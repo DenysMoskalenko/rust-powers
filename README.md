@@ -141,6 +141,9 @@ checklist for adding or changing a skill. Per-skill acceptance scenarios live in
 [`evals/`](evals/). A `tmp/` directory, when present, holds local research and review notes;
 it is untracked and not part of the plugin.
 
+[`maintenance/release-audit.md`](maintenance/release-audit.md) is the release procedure the
+maintainer follows before tagging a version; it is repository documentation, not a shipped skill.
+
 ## Principles
 
 - One pick per concern, recorded in `STACK.md`, with the rejected alternatives written down.

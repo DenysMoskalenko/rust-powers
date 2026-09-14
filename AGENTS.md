@@ -175,7 +175,10 @@ create databases. Without one of those, use `--skip-tests` and say so in your re
    and add a row to its prior-version correction table in the same commit.
 
 Never bump a version only in a skill body. A version pinned in a skill and nowhere else is a
-lie the next reader will trust.
+lie the next reader will trust. The full release procedure (inventory, research, locate, apply,
+verify, review) is `maintenance/release-audit.md`, with `maintenance/sources.md` beside it.
+`maintenance/` is repository documentation - outside `skills/`, unseen by the validator, never
+shipped by the plugin manifests.
 
 ## What Belongs Here
 
