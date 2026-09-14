@@ -12,33 +12,6 @@ guide an agent loads when working in that domain. [`STACK.md`](STACK.md) is the 
 source of truth for every version and library choice. python-powers is the sibling project
 this repository mirrors for Python services.
 
-## One Pick Per Concern
-
-| Concern | Pick | Note |
-|---|---|---|
-| toolchain and dependencies | cargo + rustup + `rust-toolchain.toml` | built in |
-| format and lint | rustfmt + clippy (`pedantic`) | built in |
-| type checking | rustc | the compiler is the type checker |
-| complexity limits | clippy `cognitive_complexity`, `too_many_lines`, `too_many_arguments` | no extra tool |
-| test runner | cargo-nextest + rstest | nextest skips doctests; run `cargo test --doc` separately |
-| coverage | cargo-llvm-cov | |
-| HTTP framework | axum 0.8 + tower-http 0.7 | |
-| request and response schemas | serde + validator + utoipa | |
-| body validation | validator 0.21 + own `Valid<T>` extractor | about 15 lines |
-| settings | `config` crate + dotenvy | env vars into a `Settings` struct, `.env` loaded in dev |
-| ORM | sea-orm 2.0 | sqlx 0.9 + sea-query 1.0 underneath |
-| migrations | sea-orm-migration + sea-orm-cli | |
-| HTTP client | reqwest 0.13 | |
-| containers in tests | testcontainers-modules 0.15 | |
-| test data | fake (`#[derive(Dummy)]`) + bon (builders) | |
-| time in tests | `Clock` trait + `tokio::time::pause` | nothing can intercept `Utc::now()` |
-| LLM agents | rig 0.42 + rmcp 2 | add when needed |
-| messaging | async-nats 0.50 | add when needed; core `publish`/`subscribe`/`request`, JetStream `get_or_create_consumer` + `consumer.messages()`, `message.ack()` |
-| cache | redis 1.7 (`ConnectionManager`) | add when needed; one multiplexed connection, not a pool |
-| telemetry | tracing + tracing-opentelemetry + opentelemetry-otlp (traces); metrics + axum-prometheus (`/metrics`) | |
-| pre-commit hooks | prek | installed with `uv tool install prek` |
-| task runner | Makefile | calls cargo directly, no task runner underneath |
-
 ## What's Inside
 
 | Skill | Use it for |
