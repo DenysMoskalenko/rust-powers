@@ -28,7 +28,7 @@ jobs:
         with:
           tool: cargo-nextest,cargo-deny,cargo-machete
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.1.0
       - run: uv tool install prek
 
       - uses: actions/cache@v6
