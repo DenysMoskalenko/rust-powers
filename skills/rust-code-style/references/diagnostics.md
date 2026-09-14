@@ -79,7 +79,9 @@ async fn fetch(key: &str) -> std::io::Result<String> {
 
 // Good: fetch first, then take the lock for a synchronous critical section.
 // A poisoned lock is recovered with `into_inner`, which passes `expect_used`;
-// `expect("cache poisoned")` does not.
+// `expect("cache poisoned")` does not. Recovery is safe here because the
+// critical section is one `insert`: a panic elsewhere cannot have left this
+// map half-updated.
 async fn refresh(state: &State, key: String) -> std::io::Result<()> {
     let value = fetch(&key).await?;
     state

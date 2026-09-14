@@ -41,10 +41,10 @@ Take the first rung that works:
 
 1. **No sharing.** `DatabaseConnection` is `Clone` and internally synchronised — hold it by value in `AppState`, never `Arc<Mutex<_>>`.
 2. **Read-mostly.** `Arc<Settings>`, no lock.
-3. **Mutable and shared.** Message passing first — `tokio::sync::mpsc` to one owner task. No poisoning, no ordering bugs.
+3. **Mutable, with a natural owner task or an ordering requirement.** `tokio::sync::mpsc` to that one owner: no poisoning, no ordering bugs. A short synchronous critical section has neither — take rung 4 directly.
 4. **Only then a lock**, `std::sync` when the critical section is synchronous, `tokio::sync` when it must await.
 
-Never hold a `std::sync` guard across `.await`: lock inside a non-async method, and settle check-then-insert races with `entry()`. A poisoned lock is recovered, not a crash: `lock().unwrap_or_else(PoisonError::into_inner)`, never `expect("poisoned")`.
+Never hold a `std::sync` guard across `.await`: lock inside a non-async method, and settle check-then-insert races with `entry()`. Keep a critical section short and panic-free, and poisoning cannot happen. If one is poisoned anyway and nothing can be half-updated (a single assignment, a counter, a whole value replaced), recover with `lock().unwrap_or_else(PoisonError::into_inner)`: `CatchPanicLayer` keeps the process alive, so an `unwrap()` here makes one panic a permanent 500 for every later request. Where a panic could leave the data half-updated, recovery restores the guard, not the invariant — rebuild the value or treat it as fatal. `expect("poisoned")` fails *lint* `expect_used`.
 
 ## Errors
 
@@ -93,7 +93,7 @@ Iterators over index loops; past four chained adaptors, a `for` loop (*house*).
 
 `main.rs` is thin: everything testable lives in `lib.rs` and below, because integration tests can only import the lib target. For the service tree and the one-ORM-statement-per-handler rule see `axum-service`.
 
-`foo.rs` beside `foo/` for modules you write by hand, never mixed with `mod.rs` at one level. `mod.rs` where a generator or a convention fixes it: `tests/common/` (cargo), generated `src/entities/` (sea-orm-cli), `src/api/` (*house*). No `utils.rs`, `helpers.rs` or `types.rs`, and no crate-wide prelude: a `prelude::*` makes every file's dependencies invisible. Imports in three blocks — std, external crates, then `crate` (*house*; rustfmt does not enforce it).
+`foo.rs` beside `foo/` for modules you write by hand, never mixed with `mod.rs` at one level (*house*). `mod.rs` where a generator or a convention fixes it: `tests/common/` (cargo), generated `src/entities/` (sea-orm-cli), `src/api/` (*house*). No `utils.rs`, `helpers.rs` or `types.rs`, and no crate-wide prelude (*house*): a `prelude::*` makes every file's dependencies invisible. Imports in three blocks — std, external crates, then `crate` (*house*; rustfmt does not enforce it).
 
 Three visibility levels only: private, `pub(crate)`, `pub`. No `pub(super)` or `pub(in path)` (*house*): moving the module silently changes the caller set. Never widen visibility for a test. A new workspace crate needs a second consumer.
 
@@ -105,7 +105,7 @@ Three visibility levels only: private, `pub(crate)`, `pub`. No `pub(super)` or `
 
 Constructors take their collaborators; `AppState` is the composition root; no globals or service singletons.
 
-Do not define a trait with one implementation. A mock of your own repository only proves the mock behaves; real Postgres and `httpmock` exercise the thing that breaks. One exception: a side effect tests cannot exercise — time, email, payments, an LLM — gets a small trait injected through `AppState`, as `Clock` already is. Never the database, never HTTP.
+A trait with one implementation earns its keep only as a seam for an effect a test cannot exercise otherwise — time, email, payments, an LLM, injected through `AppState`, as `Clock` already is — or for a second implementation you can name today. Otherwise do not define it: a mock of your own repository only proves the mock behaves, while real Postgres and `httpmock` exercise the thing that breaks. Never the database, never HTTP.
 
 ## Reuse, Suppressions and Project Style
 
@@ -125,7 +125,7 @@ Fix the finding rather than silencing it. A justified suppression is `#[expect(l
 | About to… | Rule to apply |
 |---|---|
 | Add `.clone()` because the borrow checker complained, pass `&String` or `&Vec<T>`, or put a lifetime on a service struct | Ownership and Borrowing |
-| Write `Arc<Mutex<T>>` for new state, or hold a lock across `.await` | Shared State |
+| Reach for `Arc<Mutex<T>>` before checking rungs 1-3 (no sharing, read-mostly, an owner task), or hold a lock across `.await` | Shared State |
 | Write `unwrap()` outside a test, or `expect()` with no why-it-cannot-fail message | No Panics |
 | Return `Box<dyn Error>` or `Result<T, String>`, or log an error and also return it | Errors |
 | Call `std::fs`, a sync client or a password hash inside `async fn`, reach for `#[async_trait]`, or drop a `JoinHandle` | Async Discipline |

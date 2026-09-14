@@ -167,8 +167,7 @@ with `invoke_async`, keys through `.key(..)`.
 
 ## Leases, limits, idempotency
 
-Coordination state, not cache: a `noeviction` Redis (the default) or its own instance, never
-`allkeys-lru`, which silently drops a lease.
+Coordination state, not cache: a `noeviction` Redis, never `allkeys-lru`.
 
 A lease is `SET key token NX PX ttl` plus a Lua compare-and-delete to release (Redis ≥ 8.4:
 `del_ex` with `ValueComparison::ifeq`); a plain `DEL` frees somebody else's lock whenever the
@@ -188,8 +187,11 @@ counts.
 
 Idempotency implements `axum-service`'s contract. The claim is `SET key marker NX EX 30` — claim
 and check in one command, a short TTL so a crash before `store` does not block the key for a day;
-`store` writes fingerprint + response (never the body) with its own 24 h `EX`. For a create, the
-unique index is the idempotency key. A revoked token is one key per `jti`, TTL its lifetime.
+`store` writes fingerprint + response (never the body) with its own 24 h `EX`. Redis dedups retries
+and replays the answer; it does not make the effect atomic with the record — a crash before `store`
+expires the claim and the retry re-runs the effect, which therefore must be an outbound call
+carrying the same key, never a bare database write. For a create, the unique index is the
+idempotency key. A revoked token is one key per `jti`, TTL its lifetime.
 
 ## Observability and testing
 
@@ -223,6 +225,7 @@ Most Redis material for Rust predates 1.0; these renames break it:
 | Reach for `WATCH` on a `ConnectionManager` | Multiplexing arms and disarms it unpredictably; use a Lua script |
 | Add `#[from] redis::RedisError` or a `Cache` variant to `AppError` | Every `?` becomes a 500; map explicitly with `required` onto `Unavailable`/`Other` |
 | Keep six reconnect retries in the request path | Each call pays the whole backoff during an outage; `set_number_of_retries(0)` |
+| Store an idempotency record after a database effect, outside its transaction | The claim expires and the retry repeats the write; write the row in the same transaction (`sea-orm-postgres`) |
 | Put leases or idempotency keys on an `allkeys-lru` Redis | They get evicted under pressure; `noeviction` or a separate instance |
 | Key a limiter on `x-api-key` or an `anonymous` bucket | Unverified and rotatable, or one client starves everyone; user id, else peer IP |
 | Call `SystemTime::now()` in the limiter | Time is the injected `Clock`; the window bucket takes `now` from it |

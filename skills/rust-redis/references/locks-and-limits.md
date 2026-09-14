@@ -444,10 +444,21 @@ path and body; same key and fingerprint replays the stored status and body; same
 fingerprint is 422; same key while the first attempt runs is 409.
 
 The claim and the check have to be one command, or two concurrent retries both believe they are
-first. `SET key marker NX EX ttl` is that command - with a *short* TTL, because a claim that is
-never followed by a `store` (the pod restarted mid-request) must not block the key for the whole
-replay window; the result then gets its own 24 h `EX`. Store the fingerprint and the response,
-never the body: it is user data and can be large.
+first. `SET key marker NX EX ttl` is that command, with a *short* TTL: a claim never followed by a
+`store` (the pod restarted mid-request) would otherwise block the key for the whole replay window.
+That short TTL is a trade, not a free win - the ceiling below. The result then gets its own 24 h
+`EX`. Store the fingerprint and the response, never the body: it is user data and can be large.
+
+What this buys and what it does not. Redis dedups concurrent retries and replays the stored
+response; it does not make the effect atomic with the record of it. A crash - or a handler slower
+than the claim's TTL - between the effect and `store` lets the claim expire, and the next retry
+gets `Claim::Fresh` and runs the effect a second time. So the effect itself has to tolerate that:
+an outbound call that forwards the same key and is deduplicated by the provider, or an operation
+that is safe to repeat. When the effect is a database write, do not use this at all - write the
+idempotency row in the same transaction as the write, which is `sea-orm-postgres`'s. And `store`
+is an unconditional `SETEX`: a stalled first attempt can overwrite a later attempt's entry,
+harmless while both carry the same provider result, and the reason `IN_FLIGHT_TTL` is never
+shorter than the request timeout.
 
 ```toml
 sha2 = "0.11"   # add when needed; already in the lock file through sqlx-postgres, so nothing new compiles
@@ -462,9 +473,11 @@ use redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions, aio::Connectio
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// How long a claim without a `store` blocks retries; the request timeout is
-/// the natural value. With the 24 h result TTL here, one crash mid-request made
-/// the key unusable for a day.
+/// How long a claim without a `store` blocks retries; never below the request
+/// timeout, or a slow first attempt is re-run while it is still running. Both
+/// ends cost something: the 24 h result TTL would make one crash mid-request
+/// block the key for a day, and this short TTL instead lets the retry after
+/// that crash re-run the effect - which is why the effect must survive that.
 pub const IN_FLIGHT_TTL: Duration = Duration::from_secs(30);
 /// The replay window. 24 hours is the usual contract.
 pub const RESULT_TTL: Duration = Duration::from_hours(24);
@@ -602,7 +615,10 @@ match idempotency::claim(&state.redis, &key, &fingerprint)
         return Err(errors.into()); // 422
     }
 }
-let created = payments::create(&state.db, &input).await?;
+// The effect forwards the same `header` to the provider as *its* idempotency
+// key, so the provider collapses a re-run after a lost claim into one charge.
+// Redis only keeps concurrent retries out and replays the answer.
+let created = state.payments.charge(&input, header).await?;
 let body = serde_json::to_value(&created).map_err(anyhow::Error::from)?;
 let stored = StoredResponse { status: 201, body };
 idempotency::store(&state.redis, &key, &fingerprint, stored.clone())

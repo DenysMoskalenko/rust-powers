@@ -13,7 +13,7 @@ share a path into one `MethodRouter` and registers their `#[utoipa::path]` metad
 //! `api/users.rs` — one resource: request schema, response schema, handlers and
 //! router together. Copy this file to start a second resource.
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -24,7 +24,7 @@ use validator::Validate;
 
 use crate::AppState;
 use crate::error::{AppError, ErrorBody};
-use crate::extract::{Valid, ValidQuery};
+use crate::extract::{Path, Valid, ValidQuery};
 
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(deny_unknown_fields)]

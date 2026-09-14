@@ -52,7 +52,7 @@
 **Must produce**:
 - `status` as an enum and the two bools replaced by enums or a parameter struct; the single `user_id: Uuid` left as a bare `Uuid`, since the newtype rule fires on two or more ids in one signature.
 - `tokio::fs` or `spawn_blocking` instead of `std::fs` in an `async fn`.
-- Removal of `unwrap` (the poisoned lock recovered with `unwrap_or_else(PoisonError::into_inner)`, not `expect("poisoned")`), and `Box<dyn Error>` replaced by a `thiserror` `OrderError` enum reaching `AppError` through `#[from]` — justified by the module rule: it has more than one failure mode (template, database), so it earns an enum.
+- Removal of `unwrap` (the poisoned cache lock recovered with `unwrap_or_else(PoisonError::into_inner)`, since a single cache insert cannot have left the map half-updated, not `expect("poisoned")`), and `Box<dyn Error>` replaced by a `thiserror` `OrderError` enum reaching `AppError` through `#[from]` — justified by the module rule: it has more than one failure mode (template, database), so it earns an enum.
 - The lock either taken after the await or moved into a non-async helper, citing the guard-across-await rule.
 
 **Must not produce**:

@@ -152,6 +152,10 @@ make snippets   # compile and lint every ```rust,verify block, run every verifie
 make lint       # prek run --all-files
 ```
 
+[`.github/workflows/check.yml`](.github/workflows/check.yml) runs the same two scripts —
+`validate_skills.py --strict` and `check_snippets.py` — plus `prek run --all-files`, on every
+push to `main` and every pull request.
+
 `make snippets` regenerates the gitignored `verify/` workspace from
 `skills/rust-scaffolding/assets/app/`, extracts every verifiable snippet into it, and runs
 `cargo check`, `cargo clippy -- -D warnings`, and `cargo nextest run`. The database-backed
@@ -168,7 +172,7 @@ it is untracked and not part of the plugin.
 
 - One pick per concern, recorded in `STACK.md`, with the rejected alternatives written down.
 - Clear ownership over duplicated rules.
-- Examples that compile, because CI compiles them.
+- Examples that compile, because CI compiles them on every push and pull request.
 - Skills terse enough for an agent to load and follow.
 - Supporting material in `references/` when it would bloat the main skill.
 

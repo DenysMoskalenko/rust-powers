@@ -1,7 +1,7 @@
 //! One resource: request schema, response schema, handlers and router together.
 //! Copy this file to start a second resource.
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use sea_orm::{ActiveModelTrait as _, ActiveValue::Set, EntityTrait as _, PaginatorTrait as _};
 use sea_orm::{QueryOrder as _, QuerySelect as _};
@@ -15,7 +15,7 @@ use validator::Validate;
 use crate::AppState;
 use crate::entities::user;
 use crate::error::{AppError, ErrorBody};
-use crate::extract::{Valid, ValidQuery};
+use crate::extract::{Path, Valid, ValidQuery};
 
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 #[serde(deny_unknown_fields)]

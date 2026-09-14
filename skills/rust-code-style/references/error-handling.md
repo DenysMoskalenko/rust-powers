@@ -106,6 +106,6 @@ Swallowing is a deliberate act and looks like one: `if let Err(error) = cleanup(
 
 ## Panics
 
-`unwrap()` never appears outside tests. `expect("...")` states why failure is impossible, so the message reads as a proof: `expect("regex is a compile-time constant")`, not `expect("failed to compile regex")`. A poisoned `Mutex` is not a proof of anything, so `lock().expect("cache poisoned")` fails `expect_used` on its merits: poisoning only means another thread panicked while holding the guard, and the data is still there. Recover it — `lock().unwrap_or_else(std::sync::PoisonError::into_inner)` — rather than turn one panic into a second.
+`unwrap()` never appears outside tests. `expect("...")` states why failure is impossible, so the message reads as a proof: `expect("regex is a compile-time constant")`, not `expect("failed to compile regex")`. A poisoned `Mutex` is not a proof of anything, so `lock().expect("cache poisoned")` fails `expect_used` on its merits: poisoning only means another thread panicked while holding the guard. Recover it — `lock().unwrap_or_else(std::sync::PoisonError::into_inner)` — where the critical section is short enough that it cannot have left the data half-updated, rather than turn one panic into a second; where it could, rebuild the value or treat it as fatal.
 
 `todo!` and `unimplemented!` are for a work-in-progress buffer, never a commit. `unreachable!` is acceptable only with a comment proving it, and a type change is usually the better fix.

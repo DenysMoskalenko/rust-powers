@@ -36,6 +36,7 @@ The destination `<dest>` must not exist yet: this skill never copies over an exi
 ```bash
 mkdir <dest> && cp -R <this skill's directory>/assets/app/. <dest>/  # the /. keeps dotfiles
 cd <dest> && rm -rf target
+git init   # prek's hook (step 4) needs a repository, and it should guard the first commit
 ```
 
 The template's crate is `app`. Rename it in exactly these places and nowhere else: `app`
@@ -112,11 +113,12 @@ corrupt: `docker rm -f rust-powers-test-postgres` and run again.
 ## 8. First commit
 
 ```bash
-git init && git add -A && git commit -m "Scaffold service"
+git add -A && git commit -m "Scaffold service"
 ```
 
-`Cargo.lock` is committed: this is a binary, and the lock file is what makes CI and Docker
-reproduce the local build.
+The repository already exists from step 2, so this is only the commit. `Cargo.lock` is
+committed: this is a binary, and the lock file is what makes CI and Docker reproduce the
+local build.
 
 ## What to change first for a real domain
 

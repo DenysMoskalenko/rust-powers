@@ -434,6 +434,12 @@ replay the stored response, status and body alike. Same key, different fingerpri
 while the first attempt is still in flight: 409, and the client retries later. Storage — Redis,
 a short in-flight TTL, a 24 h result TTL — is `rust-redis`'s; this file owns only the contract.
 
+That storage dedups retries and replays the answer; it does not make the effect atomic with the
+record of it, so the contract fits an effect that survives being repeated — an outbound call
+forwarding the same key, deduplicated by the provider. An effect that is a database write writes
+its idempotency row in the same transaction as the write instead (`sea-orm-postgres`), and needs
+none of this.
+
 ## Outbound HTTP
 
 One `ClientWithMiddleware` lives in `AppState` and is cloned per call — it is an `Arc` around the

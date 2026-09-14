@@ -36,6 +36,7 @@
 - A handler returning `Result<(StatusCode, Json<OrderResponse>), AppError>` with the body extractor (`Valid<CreateOrder>`) as the **last** argument.
 - `CreateOrder` deriving `Deserialize, Validate, ToSchema` with `#[serde(deny_unknown_fields)]`, `#[validate(email)]` and `#[validate(range(min = 1, max = 50))]`, and the same bounds repeated as `#[schema(...)]`.
 - `#[utoipa::path(post, path = "/orders", ...)]` with a 422 response documented as `body = ErrorBody`, registered through `routes!` on an `OpenApiRouter<AppState>`.
+- Every failure answered by the existing `AppError`, whose `JsonRejection` arm defers to `rejection.status()`: 422 for the wrong shape, 400 for bad syntax, 413 over `DefaultBodyLimit`, 415 for a missing `application/json`.
 - `#[tracing::instrument(skip_all, ...)]` on the handler or the service function, never `skip(state)`.
 - A separate `OrderResponse` DTO; the single `insert` may sit in the handler, and anything beyond one statement (a lookup then an insert, reused logic) moves to a `services/` function.
 
@@ -50,9 +51,10 @@ The scaffold's `get_user` already satisfies the DTO and 404 rules, so the runner
 **Must produce**:
 - A `ProfileResponse` DTO (or the existing `UserResponse`) with an explicit `From<user::Model>` that omits `password_hash`; the entity file untouched.
 - `AppError::NotFound(...)` from the handler's `find_by_id(..).one(..).await?.ok_or_else(..)` (one statement, so it stays in the handler), mapped to 404 by the single `IntoResponse` impl, with the full message passed in (`format!("user {id} not found")`).
+- The id taken through the crate's own `Path<Uuid>` (`crate::extract::Path`), whose `PathRejection` becomes `AppError::BadRequest` — so `/users/not-a-uuid` is a 400 in the `ErrorBody` shape, not axum's plain-text `Invalid URL: ...`.
 - `#[tracing::instrument(skip_all, fields(user_id = %id))]` without `err`, the 404 documented as `(status = 404, body = ErrorBody)`.
 
-**Must not produce**: `Json(model)` or `Json<Option<_>>` with the entity, `#[serde(skip_serializing)]` on `password_hash` in the entity (codegen overwrites it), a 404 built with a bare `StatusCode` tuple that bypasses `AppError`, `panic!` or `unwrap` on the missing row, `#[instrument(err)]` on the handler, or a second error-to-status mapping outside `error.rs`.
+**Must not produce**: `Json(model)` or `Json<Option<_>>` with the entity, `#[serde(skip_serializing)]` on `password_hash` in the entity (codegen overwrites it), a bare `axum::extract::Path<Uuid>` in the handler, a 404 built with a bare `StatusCode` tuple that bypasses `AppError`, `panic!` or `unwrap` on the missing row, `#[instrument(err)]` on the handler, or a second error-to-status mapping outside `error.rs`.
 
 ### Eval 3 - settings and secrets
 

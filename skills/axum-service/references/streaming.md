@@ -1,5 +1,10 @@
 # SSE and streaming responses
 
+## Contents
+
+- [Server-sent events](#server-sent-events)
+- [Streaming a body](#streaming-a-body)
+
 A streaming response needs a `Stream`. `tokio-stream` is in the base dependency set for exactly
 this: it is the tokio-native way to turn a channel or an interval into a stream, so nothing is
 added to `Cargo.toml`.
@@ -47,9 +52,10 @@ pub async fn events(
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
-/// Merge this router in *after* the `.layer(..)` call in `build_router`, so the
-/// innermost `TimeoutLayer` does not wrap it. The scaffold ships no streaming
-/// route, which is why its stack can wrap everything.
+/// Merge this router like any other, *inside* the `.layer(..)` stack in
+/// `build_router`, so the stream keeps the request id, panic handling, tracing,
+/// metrics and CORS. `TimeoutLayer` races only the future that produces the
+/// response, so it never cuts a body that has already started.
 pub fn router() -> axum::Router<AppState> {
     axum::Router::new().route("/events", axum::routing::get(events))
 }
@@ -57,9 +63,26 @@ pub fn router() -> axum::Router<AppState> {
 
 Things that bite:
 
-- **The timeout layer cuts the stream.** A 30-second `TimeoutLayer` closes an SSE connection
-  mid-flight. `.layer()` wraps only the routes registered before it, so register streaming routes
-  after the stack, or give them their own `Router` merged in afterwards.
+- **The timeout layer does not cut the stream.** `TimeoutLayer` races the future that produces
+  the response; once the head is out the body is passed through untouched, so a 30-second budget
+  never truncates an SSE stream. Mounting the route outside `.layer(..)` to "protect" it drops it
+  out of every other layer too — request id, panic handling, tracing, metrics, CORS — so merge it
+  inside the stack like any other router.
+- **What ends a long stream is outside the process.** Reverse-proxy and load-balancer idle
+  timeouts close a connection that has been quiet; that is what the keep-alive above is for. To
+  bound a stream from inside, wrap the stream rather than the handler — `StreamExt::timeout` for
+  a per-item deadline, or a `take_while` on an elapsed budget:
+
+  ```rust
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+  let stream = stream.take_while(move |_| tokio::time::Instant::now() < deadline);
+  ```
+
+  `take_while` is evaluated only when the next item arrives, so it bounds a busy stream and never
+  a stalled one — that is what `StreamExt::timeout` is for.
+
+  `tower_http::timeout::ResponseBodyTimeoutLayer` is the layer form of the same idea, when the
+  deadline should apply to a whole subtree instead of one stream.
 - **The status is already sent.** Once the first event goes out, the response head is gone and an
   error cannot become a 500 — hence the pre-flight check above. Report a mid-stream failure as a
   final `Event::default().event("error")` and end the stream.

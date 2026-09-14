@@ -1,4 +1,5 @@
-//! The four cases that prove the wiring: a create, its conflict, a miss, a list.
+//! The cases that prove the wiring: a create, its conflict, a miss, a list, and
+//! the three rejections that answer before the handler ever runs.
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test helpers")]
 
 mod common;
@@ -86,4 +87,54 @@ async fn list_users_returns_a_page_envelope() {
     assert_eq!(page["limit"], 2);
     assert_eq!(page["offset"], 0);
     assert_eq!(page["items"].as_array().unwrap().len(), 2);
+}
+
+/// Every rejection answers in `ErrorBody`, never in axum's plain text.
+fn assert_error_body(body: &serde_json::Value) {
+    assert!(body["error"].is_string(), "ErrorBody shape: {body}");
+    assert!(body["request_id"].is_string(), "ErrorBody shape: {body}");
+}
+
+#[tokio::test]
+async fn a_path_segment_that_is_not_a_uuid_returns_400_in_the_error_body() {
+    let app = test_app().await;
+
+    // Bare `axum::extract::Path` would answer `Invalid URL: ...` as text/plain;
+    // `crate::extract::Path` maps the rejection onto `AppError::BadRequest`.
+    let response = app.server.get("/users/not-a-uuid").expect_failure().await;
+
+    response.assert_status(StatusCode::BAD_REQUEST);
+    assert_error_body(&response.json());
+}
+
+#[tokio::test]
+async fn a_body_without_the_json_content_type_returns_415() {
+    let app = test_app().await;
+
+    let response = app
+        .server
+        .post("/users")
+        .text(r#"{ "email": "ada@example.com", "name": "Ada" }"#)
+        .expect_failure()
+        .await;
+
+    // `MissingJsonContentType` carries its own 415; a hand-written 400 would hide it.
+    response.assert_status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_error_body(&response.json());
+}
+
+#[tokio::test]
+async fn a_body_over_the_limit_returns_413() {
+    let app = test_app().await;
+
+    let response = app
+        .server
+        .post("/users")
+        // Over `DefaultBodyLimit`'s two megabytes, so the body is never buffered.
+        .json(&json!({ "email": "ada@example.com", "name": "a".repeat(3 * 1024 * 1024) }))
+        .expect_failure()
+        .await;
+
+    response.assert_status(StatusCode::PAYLOAD_TOO_LARGE);
+    assert_error_body(&response.json());
 }

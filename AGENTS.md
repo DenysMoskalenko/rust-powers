@@ -110,6 +110,9 @@ moved into `evals/` during integration; only `evals/` is tracked.
 
 `make check` is `make validate` followed by `make snippets`. Both must be green.
 
+`.github/workflows/check.yml` runs both of those scripts, plus `prek run --all-files`, on every
+push to `main` and every pull request.
+
 `make validate` runs `scripts/validate_skills.py`: frontmatter parses and uses only the
 three allowed keys with `metadata.version` present, `name` matches its directory, the
 description is double-quoted, at most 75 words and free of forbidden characters, line and

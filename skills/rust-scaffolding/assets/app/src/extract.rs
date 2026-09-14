@@ -1,6 +1,7 @@
-//! Extractors that validate. `Valid<T>` is the `Json<T>` replacement and
-//! `ValidQuery<T>` the `Query<T>` one; both reject with [`AppError`], so a
-//! failed rule is a 422 with the same body shape as every other error.
+//! Extractors that reject with [`AppError`]. `Valid<T>` is the `Json<T>`
+//! replacement, `ValidQuery<T>` the `Query<T>` one and `Path<T>` the
+//! `axum::extract::Path<T>` one, so a failed rule or a malformed URL is an
+//! `ErrorBody` with the same shape as every other error.
 use axum::extract::{FromRequest, FromRequestParts, Query, Request};
 use axum::http::request::Parts;
 use serde::de::DeserializeOwned;
@@ -45,6 +46,38 @@ where
             // deserialises and then fails a rule is the 422 below.
             .map_err(|rejection| AppError::BadRequest(rejection.body_text()))?;
         value.validate()?;
+        Ok(Self(value))
+    }
+}
+
+/// `axum::extract::Path<T>` rejects with a plain-text `Invalid URL: ...`, the one
+/// 400 in the service that would not be an `ErrorBody`. This wrapper has no
+/// validation of its own; it exists only to route that rejection through
+/// [`AppError`].
+#[derive(Debug, Clone, Copy)]
+pub struct Path<T>(pub T);
+
+impl<S, T> FromRequestParts<S> for Path<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned + Send,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let axum::extract::Path(value) = axum::extract::Path::<T>::from_request_parts(parts, state)
+            .await
+            // A segment of the wrong type is the client's mistake: a 400
+            // carrying axum's own text. The wrong arity or an unsupported type
+            // is the handler signature's, which axum already calls a 500.
+            .map_err(|rejection| {
+                let text = rejection.body_text();
+                if rejection.status().is_server_error() {
+                    AppError::Other(anyhow::anyhow!("{text}"))
+                } else {
+                    AppError::BadRequest(text)
+                }
+            })?;
         Ok(Self(value))
     }
 }

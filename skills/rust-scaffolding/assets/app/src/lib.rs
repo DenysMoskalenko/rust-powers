@@ -96,10 +96,11 @@ pub fn build_router(state: AppState) -> Router {
                 .option_layer(cors)
                 .layer(CompressionLayer::new())
                 .layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT_BYTES))
-                // Innermost. A streaming route (SSE, a download) must be mounted
-                // OUTSIDE this layer, or the timeout cuts the stream mid-flight.
-                // This service has none. A rate limiter is not a global layer
-                // either: it goes on the limited router with `route_layer`.
+                // Innermost. It races the future that produces the response,
+                // never the body, so a streaming route (SSE, a download) stays
+                // inside this stack and is not cut off. A rate limiter is not a
+                // global layer either: it goes on the limited router with
+                // `route_layer`.
                 .layer(TimeoutLayer::with_status_code(
                     StatusCode::REQUEST_TIMEOUT,
                     REQUEST_TIMEOUT,

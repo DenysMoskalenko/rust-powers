@@ -108,12 +108,14 @@ fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
 impl AppError {
     fn status(&self) -> StatusCode {
         match self {
-            // A body that parsed but broke the rules is 422; a body
-            // that did not parse at all is 400.
-            Self::Validation(_) | Self::JsonRejection(JsonRejection::JsonDataError(_)) => {
-                StatusCode::UNPROCESSABLE_ENTITY
-            }
-            Self::JsonRejection(_) | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            // A body that parsed but broke the rules is 422.
+            Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            // axum's rejection already knows its status, and it is four
+            // different ones: 422 for the wrong shape, 400 for bad syntax, 415
+            // for a missing `application/json`, 413 over the body limit.
+            // Collapsing them into a hand-written 400 loses the last two.
+            Self::JsonRejection(rejection) => rejection.status(),
+            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,

@@ -189,7 +189,7 @@ ignore = []
 [licenses]
 confidence-threshold = 0.93
 # `cargo deny init` writes `allow = []`, so its first run always fails. This list
-# is green on the whole stack; every id here is met by at least one crate.
+# is green on the whole stack.
 allow = [
     "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause",
     "ISC", "Unicode-3.0", "Zlib", "CDLA-Permissive-2.0", "Unlicense", "BSL-1.0",

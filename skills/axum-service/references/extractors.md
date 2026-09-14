@@ -1,7 +1,7 @@
 # Errors, extractors and rejections
 
 - [AppError and ErrorBody](#apperror-and-errorbody)
-- [Valid and ValidQuery](#valid-and-validquery)
+- [Valid, ValidQuery and Path](#valid-validquery-and-path)
 - [Rejection types and status codes](#rejection-types-and-status-codes)
 - [Handler argument order](#handler-argument-order)
 - [Other ways to customise a rejection](#other-ways-to-customise-a-rejection)
@@ -94,12 +94,14 @@ fn current_request_id() -> Option<String> {
 impl AppError {
     fn status(&self) -> StatusCode {
         match self {
-            // A body that parsed but broke the rules is 422; a body
-            // that did not parse at all is 400.
-            Self::Validation(_) | Self::JsonRejection(JsonRejection::JsonDataError(_)) => {
-                StatusCode::UNPROCESSABLE_ENTITY
-            }
-            Self::JsonRejection(_) | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            // A body that parsed but broke the rules is 422.
+            Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            // axum's rejection already knows its status, and it is four
+            // different ones: 422 for the wrong shape, 400 for bad syntax, 415
+            // for a missing `application/json`, 413 over the body limit.
+            // Collapsing them into a hand-written 400 loses the last two.
+            Self::JsonRejection(rejection) => rejection.status(),
+            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
@@ -205,12 +207,13 @@ The body is a constant: the constraint name is a schema detail, and a 422 is not
 client's mistake), so nothing leaks. Document the route with `(status = 422, body = ErrorBody)`, the
 same entry a validation failure uses.
 
-## Valid and ValidQuery
+## Valid, ValidQuery and Path
 
 ```rust,verify
-//! Extractors that validate. `Valid<T>` is the `Json<T>` replacement and
-//! `ValidQuery<T>` the `Query<T>` one; both reject with [`AppError`], so a
-//! failed rule is a 422 with the same body shape as every other error.
+//! Extractors that reject with [`AppError`]. `Valid<T>` is the `Json<T>`
+//! replacement, `ValidQuery<T>` the `Query<T>` one and `Path<T>` the
+//! `axum::extract::Path<T>` one, so a failed rule or a malformed URL is an
+//! `ErrorBody` with the same shape as every other error.
 use axum::extract::{FromRequest, FromRequestParts, Query, Request};
 use axum::http::request::Parts;
 use serde::de::DeserializeOwned;
@@ -258,10 +261,44 @@ where
         Ok(Self(value))
     }
 }
+
+/// `axum::extract::Path<T>` rejects with a plain-text `Invalid URL: ...`, the one
+/// 400 in the service that would not be an `ErrorBody`. This wrapper has no
+/// validation of its own; it exists only to route that rejection through
+/// [`AppError`].
+#[derive(Debug, Clone, Copy)]
+pub struct Path<T>(pub T);
+
+impl<S, T> FromRequestParts<S> for Path<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned + Send,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let axum::extract::Path(value) = axum::extract::Path::<T>::from_request_parts(parts, state)
+            .await
+            // A segment of the wrong type is the client's mistake: a 400
+            // carrying axum's own text. The wrong arity or an unsupported type
+            // is the handler signature's, which axum already calls a 500.
+            .map_err(|rejection| {
+                let text = rejection.body_text();
+                if rejection.status().is_server_error() {
+                    AppError::Other(anyhow::anyhow!("{text}"))
+                } else {
+                    AppError::BadRequest(text)
+                }
+            })?;
+        Ok(Self(value))
+    }
+}
 ```
 
-Both take `type Rejection = AppError`, which is the cheapest custom rejection there is: the
-extractor fails, `AppError::into_response` renders the same body as every other failure.
+All three take `type Rejection = AppError`, which is the cheapest custom rejection there is: the
+extractor fails, `AppError::into_response` renders the same body as every other failure. Import
+`Path` from `crate::extract`, never from `axum::extract`: the one bare `Path<Uuid>` left in a
+handler is the one route that answers `Invalid URL: ...` as `text/plain`.
 
 Validator rules worth knowing: `#[validate(nested)]` recurses into a field that is itself
 `Validate` (the bare `#[validate]` spelling is gone); `custom(function = f)` takes a quoted string
@@ -277,16 +314,19 @@ before `validator` runs and the response loses its field map.
 | `ValidationErrors` | parsed, failed a rule | 422 | field map |
 | `JsonRejection::JsonDataError` | valid JSON, wrong shape or missing field | 422 | absent |
 | `JsonRejection::JsonSyntaxError` | malformed JSON | 400 | absent |
-| `JsonRejection::MissingJsonContentType` | no `application/json` | 400 | absent |
-| `JsonRejection::BytesRejection` | body over `DefaultBodyLimit` | 400 | absent |
-| `QueryRejection`, `PathRejection` | wrong type or arity in the URL | 400 via `BadRequest` | absent |
+| `JsonRejection::MissingJsonContentType` | no `application/json` | 415 | absent |
+| `JsonRejection::BytesRejection` | body over `DefaultBodyLimit` | 413 | absent |
+| `QueryRejection` via `ValidQuery` | wrong type in the query string | 400 via `BadRequest` | absent |
+| `PathRejection` via `Path` | wrong type in the URL (wrong arity is a 500) | 400 via `BadRequest` | absent |
 | `TypedHeaderRejection` | missing or malformed `Authorization` | 401 via `Unauthorized` | absent |
 
+The four `JsonRejection` statuses come from `rejection.status()`, not from a hand-written match:
+axum's `composite_rejection!` already assigns each variant the status the RFC asks for, so a
+client can branch on "send less" (413) and "set the header" (415) instead of reading prose out of
+a 400.
+
 Two shapes share the 422 status: a `Validation` failure carries the field map, a
-`JsonDataError` carries only the prose `error`, so a client treats `details` as optional. An
-oversized body is a 400 like every other unparseable body; a client that must branch on "send
-less" gets it from an extra arm, `Self::JsonRejection(JsonRejection::BytesRejection(_)) =>
-StatusCode::PAYLOAD_TOO_LARGE`, ahead of the catch-all.
+`JsonDataError` carries only the prose `error`, so a client treats `details` as optional.
 
 Since 0.8 `Query` and `Form` report the failing field through `serde_path_to_error`, `Path` tuples
 check arity exactly, `Json` rejects trailing characters after the document, and

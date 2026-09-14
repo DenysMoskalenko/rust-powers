@@ -24,7 +24,7 @@
 
 **Must produce**:
 
-- Copying the skill's `assets/app/` (dotfiles included, no `target/` carried over) into a directory that does not exist yet as the first step, then renaming the crate `app` in the places the skill lists (crate name in `Cargo.toml` with `cargo update --workspace` for the lock, `use` paths, OpenAPI title, Dockerfile binary, database name, the `RUST_LOG` filter directive, compose project) and running `cargo fmt --all`.
+- Copying the skill's `assets/app/` (dotfiles included, no `target/` carried over) into a directory that does not exist yet as the first step, with `git init` in that same step so prek's hook in `make install-tools` has a repository, then renaming the crate `app` in the places the skill lists (crate name in `Cargo.toml` with `cargo update --workspace` for the lock, `use` paths, OpenAPI title, Dockerfile binary, database name, the `RUST_LOG` filter directive, compose project) and running `cargo fmt --all`.
 - The `.env` step with `APP__AUTH__JWT_SECRET` (and `DATABASE_URL` for sea-orm-cli already present), `make install-tools` with `uv` and Docker named as prerequisites, `docker compose up -d postgres`, `make migrate`.
 - `make check && make test` green before any feature code, and a first commit that includes `Cargo.lock`.
 - Replacing the `users` resource with `books` rather than adding a second resource beside it.

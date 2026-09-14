@@ -27,7 +27,7 @@ src/
   lib.rs       AppState, ApiDoc, build_router(state) -> Router: the stack and both fallbacks
   config.rs    Settings sub-structs, the four timeout constants
   error.rs     AppError + ErrorBody + IntoResponse; REQUEST_ID task-local
-  extract.rs   Valid, ValidQuery
+  extract.rs   Valid, ValidQuery, Path
   telemetry.rs init(&TelemetrySettings) -> TelemetryGuard
   auth.rs      Keys, Claims, AuthUser, hashing (with the first protected route)
   api/         mod.rs (router(), request_id), health.rs, users.rs (DTOs, handlers, router())
@@ -38,7 +38,7 @@ src/
 
 ## State
 
-`AppState` is cheap to clone — every field is a handle. Never `Arc<AppState>`: it forces `State<Arc<AppState>>` everywhere and gives up `FromRef`.
+`AppState` is cheap to clone — every field is a handle. While that holds, never `Arc<AppState>`: it forces `State<Arc<AppState>>` everywhere and gives up `FromRef`.
 
 ```rust
 #[derive(Clone)]
@@ -76,13 +76,15 @@ pub async fn create_user(
 
 ## Errors
 
-One enum, one `IntoResponse`, one wire shape. `Router::fallback` answers 404 with `AppError::NotFound`, `method_not_allowed_fallback` 405 with an `ErrorBody`: a wrong path has the shape of every other failure, never an empty body.
+One enum, one `IntoResponse`, one wire shape. `Router::fallback` answers 404 with `AppError::NotFound`, `method_not_allowed_fallback` 405 with an `ErrorBody`: a wrong path has the shape of every other failure, never an empty body. The one deliberate empty body is the 408 from `TimeoutLayer`, which answers with a bare status; the scaffold documents that rather than wrap the layer to reshape it.
 
 | Variant | Status | Body `error` |
 |---|---|---|
 | `Validation(ValidationErrors)` | 422 | `"validation failed"`, `details` = field map |
 | `JsonRejection(JsonDataError)` | 422 | well-formed JSON, wrong shape |
-| `JsonRejection(_)` | 400 | bad syntax, wrong content-type, too large |
+| `JsonRejection(JsonSyntaxError)` | 400 | malformed JSON |
+| `JsonRejection(BytesRejection)` | 413 (400 on any other buffering failure) | over `DefaultBodyLimit` |
+| `JsonRejection(MissingJsonContentType)` | 415 | no `application/json` |
 | `BadRequest(String)` | 400 | the message |
 | `NotFound(String)` | 404 | the message |
 | `Conflict(String)`, `Db(DbErr)` with SQLSTATE 23505 | 409 | constant `"conflict"`; the constraint name is logged |
@@ -98,7 +100,7 @@ Add-on skills never add a variant: backend down → `Unavailable`, rate limit �
 
 ## Request DTOs and validation
 
-`Valid<T>` is `Json<T>` plus `T::validate()`; `ValidQuery<T>` is the query-string sibling: unparseable query string → `BadRequest` (400), failed rule → 422.
+`Valid<T>` is `Json<T>` plus `T::validate()`; `ValidQuery<T>` is the query-string sibling: unparseable query string → `BadRequest` (400), failed rule → 422. `Path<T>` is the third, mapping `PathRejection` onto `BadRequest` so a bad id is an `ErrorBody` and not axum's plain-text `Invalid URL: ...`; a bare `axum::extract::Path` is the one handler that breaks the shape.
 
 ```rust
 #[derive(Debug, Deserialize, Validate, ToSchema)]
@@ -185,7 +187,7 @@ Do not flag: `Arc<Settings>` in state, `.clone()` on `DatabaseConnection` or `Cl
 
 ## References
 
-- `references/extractors.md` — `AppError`, `ErrorBody`, `Valid` / `ValidQuery`, rejection table, argument order, the 23503 arm. Before writing the error type or an extractor.
+- `references/extractors.md` — `AppError`, `ErrorBody`, `Valid` / `ValidQuery` / `Path`, rejection table, argument order, the 23503 arm. Before writing the error type or an extractor.
 - `references/openapi.md` — utoipa 5 wiring, `routes!`, nesting, bearer scheme, what the document omits. When documenting routes.
 - `references/settings.md` — nested env keys, lists, secrecy, `.env` precedence, `from_map`. When adding a configuration value.
 - `references/auth.md` — `Keys`, `Claims`, `AuthUser`, argon2 0.6 hashing. When adding authentication.
