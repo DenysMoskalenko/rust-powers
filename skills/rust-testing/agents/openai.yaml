@@ -1,0 +1,6 @@
+interface:
+  display_name: "Rust Testing"
+  short_description: "Test an axum service through axum-test, rstest, and nextest"
+
+policy:
+  allow_implicit_invocation: true

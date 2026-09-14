@@ -1,0 +1,22 @@
+.DS_Store
+.idea/
+
+# Local environment
+.env
+.env.*
+!.env.example
+!dist.env
+
+# Generated snippet-verification workspace (scripts/check_snippets.py)
+verify/
+
+# Rust build output, including inside skills/rust-scaffolding/assets/
+**/target/
+
+# Local Cursor MCP config (may contain tokens)
+.cursor/mcp.json
+/.cursor/
+__pycache__/
+
+# Local research and review notes; only evals/ is tracked
+tmp/

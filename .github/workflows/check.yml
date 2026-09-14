@@ -1,0 +1,48 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # check_snippets.py deletes and regenerates verify/ on every run, so the build
+  # directory has to live outside it to survive between runs and be cacheable.
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      # No toolchain step and no version here: every cargo call happens inside a
+      # copy of the scaffold, whose rust-toolchain.toml pins the channel and its
+      # components, so rustup installs it on first use. One file owns the version.
+
+      # cargo-nextest for the snippet tests; deny and machete because prek also
+      # runs the scaffold's own nested hook set (cargo fmt, clippy, deny, machete).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-deny,cargo-machete
+
+      - uses: astral-sh/setup-uv@v10.1.0
+      - run: uv tool install prek
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('skills/rust-scaffolding/assets/app/Cargo.lock', 'scripts/check_snippets.py') }}-${{ github.run_id }}
+          restore-keys: |
+            cargo-${{ hashFiles('skills/rust-scaffolding/assets/app/Cargo.lock', 'scripts/check_snippets.py') }}-
+            cargo-
+
+      - run: python3 scripts/validate_skills.py --strict
+      - run: prek run --all-files
+      # Docker is present on the runner, so testcontainers starts Postgres itself.
+      - run: python3 scripts/check_snippets.py

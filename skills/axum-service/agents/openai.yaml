@@ -1,0 +1,6 @@
+interface:
+  display_name: "Axum Service"
+  short_description: "Routes, extractors, errors, OpenAPI, settings, middleware, telemetry and operations for an axum service"
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,22 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        args: [ --markdown-linebreak-ext=md ]
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+        args: [ --maxkb=1024 ]
+      - id: check-json
+      - id: check-toml
+      - id: check-yaml
+      - id: check-merge-conflict
+
+  - repo: local
+    hooks:
+      - id: validate-skills
+        name: validate skills
+        entry: python3 scripts/validate_skills.py
+        language: system
+        pass_filenames: false
+        files: '^(skills/|STACK\.md$)'

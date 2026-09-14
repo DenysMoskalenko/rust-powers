@@ -1,0 +1,6 @@
+interface:
+  display_name: "NATS with async-nats"
+  short_description: "Core publish, request-reply, JetStream consumers, KV and NATS tests on async-nats 0.50"
+
+policy:
+  allow_implicit_invocation: true

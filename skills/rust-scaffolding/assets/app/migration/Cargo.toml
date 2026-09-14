@@ -1,0 +1,18 @@
+[package]
+name = "migration"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[lib]
+name = "migration"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Only for the migration binary that `sea-orm-cli migrate` runs.
+tokio = { version = "1.53", features = ["macros", "rt", "rt-multi-thread"] }
+sea-orm-migration = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls"] }

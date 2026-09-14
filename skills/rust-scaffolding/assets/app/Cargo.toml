@@ -1,0 +1,112 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false           # also required by cargo-deny, see deny.toml
+
+[workspace]
+members = ["migration"]   # created by `sea-orm-cli migrate init`
+
+# Every member opts in with `[lints] workspace = true`; a member without that
+# line inherits nothing.
+[lints]
+workspace = true
+
+[dependencies]
+# runtime + web
+tokio = { version = "1.53", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.7", features = ["cors", "compression-full", "timeout", "catch-panic"] }
+reqwest = { version = "0.13", features = ["json", "query"] }
+# serialization / validation / openapi
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+validator = { version = "0.21", features = ["derive"] }
+utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid", "decimal"] }
+utoipa-axum = "0.2"
+utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
+# config / errors / secrets
+dotenvy = "0.15"
+config = { version = "0.15", default-features = false }
+secrecy = { version = "0.10", features = ["serde"] }
+thiserror = "2"
+anyhow = "1"
+# database + data types
+sea-orm = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-chrono", "with-uuid", "with-rust_decimal", "with-json"] }
+migration = { path = "migration" }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+rust_decimal = { version = "1", features = ["serde"] }
+# telemetry
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.33"
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "trace"] }
+axum-tracing-opentelemetry = "0.39"
+reqwest-middleware = { version = "0.5", features = ["json", "query"] }   # its own features, not reqwest's
+reqwest-tracing = { version = "0.7", features = ["opentelemetry_0_32"] }
+metrics = "0.24"
+axum-prometheus = "0.10"
+# utilities
+bon = "3"
+itertools = "0.15"
+derive_more = { version = "2", features = ["full"] }
+strum = { version = "0.28", features = ["derive"] }
+# add when needed (all resolved and compiled in the same lock file):
+# axum-extra = { version = "0.12", features = ["typed-header"] }
+# rig = { version = "0.42", features = ["rmcp"] }   # the facade; rig-core has no agents. Add "memory" for stores, "test-utils" as a dev feature
+# rmcp = { version = "2", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }   # rig-agent pins ^2
+# jsonwebtoken = "11"   |   argon2 = "0.6"   |   nutype = { version = "0.7", features = ["serde"] }   |   sha2 = "0.11"
+# async-nats = "0.50"   # jetstream, kv, object-store, service are defaults
+# redis = { version = "1.7", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager", "script"] }
+# deadpool-redis = "0.23"   # only for blocking commands (BLPOP & co.)
+
+[dev-dependencies]
+rstest = "0.27"
+insta = { version = "1.48", features = ["json", "redactions"] }
+similar-asserts = "2"
+testcontainers-modules = { version = "0.15", features = ["postgres", "redis", "nats"] }
+testcontainers = { version = "0.27", features = ["reusable-containers"] }   # modules does not re-export it
+axum-test = "21"
+httpmock = "0.8"
+mockall = "0.15"
+fake = { version = "5", features = ["derive", "chrono", "uuid", "rust_decimal"] }
+rand = "0.10"                                            # the version fake 5 builds on
+test-log = { version = "0.2", features = ["trace"] }
+tokio = { version = "1.53", features = ["test-util"] }   # `full` does NOT include test-util
+
+[package.metadata.cargo-machete]
+# The stack ships these for the code you are about to write; `rust_decimal` is
+# additionally reachable only through sea-orm's `with-rust_decimal` feature, which
+# machete cannot see. Delete a name here when you start using the crate.
+ignored = ["bon", "derive_more", "itertools", "rust_decimal", "strum", "tokio-stream", "futures", "async-trait"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+allow_attributes_without_reason = "warn"
+cognitive_complexity = "warn"
+redundant_clone = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

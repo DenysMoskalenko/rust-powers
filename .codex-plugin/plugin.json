@@ -1,0 +1,68 @@
+{
+  "name": "rust-powers",
+  "version": "0.1.0",
+  "description": "Reusable engineering skills for AI-assisted Rust web development: axum, sea-orm, PostgreSQL, testing, telemetry, tooling, scaffolding, NATS, Redis, and rig agents.",
+  "author": {
+    "name": "Denys Moskalenko",
+    "email": "denysmoskalenko11@gmail.com",
+    "url": "https://github.com/DenysMoskalenko"
+  },
+  "homepage": "https://github.com/DenysMoskalenko/rust-powers",
+  "repository": "https://github.com/DenysMoskalenko/rust-powers",
+  "license": "Apache-2.0",
+  "keywords": [
+    "rust",
+    "backend",
+    "axum",
+    "tower",
+    "tokio",
+    "database",
+    "postgres",
+    "sea-orm",
+    "utoipa",
+    "openapi",
+    "testing",
+    "nextest",
+    "tooling",
+    "cargo",
+    "clippy",
+    "opentelemetry",
+    "tracing",
+    "nats",
+    "jetstream",
+    "messaging",
+    "redis",
+    "cache",
+    "rate-limiting",
+    "ai-agents",
+    "llm-agents",
+    "rig",
+    "scaffolding",
+    "boilerplate",
+    "skills"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Rust Powers",
+    "shortDescription": "Reusable Rust, axum, sea-orm, testing, telemetry, scaffolding, NATS, Redis, and AI-agent engineering skills",
+    "longDescription": "Rust Powers gives Codex focused engineering guidance for Rust 1.98 edition 2024 web services - axum, sea-orm and PostgreSQL, nextest and rstest testing, cargo tooling, OpenTelemetry, NATS messaging, Redis caching and rate limiting, and rig agents - plus scaffolding a brand-new service from a buildable template.",
+    "developerName": "Denys Moskalenko",
+    "category": "Coding",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/DenysMoskalenko/rust-powers",
+    "privacyPolicyURL": "https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement",
+    "termsOfServiceURL": "https://docs.github.com/en/site-policy/github-terms/github-terms-of-service",
+    "defaultPrompt": [
+      "Scaffold a brand-new axum service from scratch.",
+      "Use Rust Powers for this axum change.",
+      "Review this service against Rust Powers.",
+      "Add tests using the Rust Powers patterns."
+    ],
+    "brandColor": "#CE422B",
+    "screenshots": []
+  }
+}

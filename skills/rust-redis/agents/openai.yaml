@@ -1,0 +1,6 @@
+interface:
+  display_name: "Redis with redis-rs"
+  short_description: "Caching, leases, rate limits and idempotency keys on redis 1.7"
+
+policy:
+  allow_implicit_invocation: true
