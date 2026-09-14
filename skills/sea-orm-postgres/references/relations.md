@@ -10,20 +10,20 @@
 
 ## Choosing a strategy
 
-| API | Queries | SQL | Use when | Python analog |
-|---|---|---|---|---|
-| `Entity::load().with(..)` | one per level | join for to-one, `IN (..)` batch for to-many | the default for nested reads | `selectinload` chained |
-| `LoaderTrait::load_many` / `load_one` | two | `WHERE fk IN (..)` | the parent list came from somewhere else, or plain `Model`s are wanted | `selectinload` |
-| `find_with_related` | one | LEFT JOIN, consolidated by parent | one parent, or a small fixed set | `joinedload` on a collection |
-| `find_also_related` | one | LEFT JOIN, flat tuples | a to-one on a single fetch | `joinedload` on a to-one |
+| API | Queries | SQL | Use when |
+|---|---|---|---|
+| `Entity::load().with(..)` | one per level | join for to-one, `IN (..)` batch for to-many | the default for nested reads |
+| `LoaderTrait::load_many` / `load_one` | two | `WHERE fk IN (..)` | the parent list came from somewhere else, or plain `Model`s are wanted |
+| `find_with_related` | one | LEFT JOIN, consolidated by parent | one parent, or a small fixed set |
+| `find_also_related` | one | LEFT JOIN, flat tuples | a to-one on a single fetch |
 
-Unlike SQLAlchemy, a missed eager load is not an exception. An unloaded relation is a value:
+A missed eager load is not an error. An unloaded relation is a value:
 `HasMany<E>`, `HasOne<E>` and `BelongsTo<E>` are all `Loaded(..)` or `Unloaded`, two variants. A
 nullable foreign key generates `BelongsTo<Option<E>>`, where a loaded-but-absent parent is
 `Loaded(None)`; `is_not_found()` and `is_unloaded_or_not_found()` are the predicates for it. Checking
-`is_unloaded()` is the equivalent of `lazy='raise'`, except it is the reader's job to look rather
-than the runtime's job to shout — which is exactly why the rule below is worth keeping: every
-relation a response touches is loaded in the query that fetched the parent.
+`is_unloaded()` is the reader's job — nothing at runtime shouts, which is exactly why the rule
+below is worth keeping: every relation a response touches is loaded in the query that fetched
+the parent.
 
 ## Entity loader
 

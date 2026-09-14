@@ -6,7 +6,7 @@
 
 1. Set up cargo-deny in this service — `cargo deny check` fails on the config `cargo deny init` wrote.
 2. Our CI job recompiles the whole dependency tree in every step. Here is `.github/workflows/ci.yml`, what is wrong?
-3. We used pre-commit and ruff on the Python side; what is the equivalent hook setup here, and what goes in the Makefile?
+3. Set up the pre-commit hooks for this repo — what runs in them, and what goes in the Makefile?
 4. `warning[E0602]: unknown lint: clippy::string_to_string` — clippy prints this on every build but CI is green.
 5. Where does the coverage threshold live so `make cov`, the hook and CI all enforce the same number?
 

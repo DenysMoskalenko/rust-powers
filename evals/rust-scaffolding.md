@@ -5,10 +5,10 @@
 **Should load**
 
 1. Create a service that stores books and lends them out, with a REST API.
-2. I'm porting a FastAPI app to Rust. Start me a new repo with SQLAlchemy-style models, alembic-style migrations and pytest-style tests already wired.
+2. Start me a new repo with sea-orm entities, sea-orm-migration migrations and nextest integration tests already wired.
 3. Bootstrap this empty directory into an axum service: migrations, tests, lints, Docker and CI green from the first commit.
 4. I ran `cargo run` in my new project directory and got `error: could not find 'Cargo.toml' in '/Users/me/notifications' or any parent directory`. I want to start a new API here.
-5. We need a new microservice for notifications. Set it up from scratch, including pre-commit hooks and a uv-style dependency workflow.
+5. We need a new microservice for notifications. Set it up from scratch, including the prek hooks and a pinned toolchain.
 
 **Should not load**
 

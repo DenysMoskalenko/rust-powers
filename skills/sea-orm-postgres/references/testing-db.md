@@ -17,7 +17,7 @@ test, and none of them exist in a substitute. A suite that passes against a fake
 the real server has tested nothing.
 
 Isolation comes from giving every test its own database, not from wrapping tests in a transaction.
-The SQLAlchemy savepoint trick does not port: sea-orm has no "join the enclosing transaction" mode,
+Wrapping each test in an outer transaction does not work: sea-orm has no "join the enclosing transaction" mode,
 a service function that opens its own transaction escapes the outer one, and a
 `DatabaseTransaction` cannot be handed to code that wants a `DatabaseConnection`. Truncating
 between tests needs a shared connection and serialises the suite.

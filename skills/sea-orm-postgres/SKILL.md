@@ -1,6 +1,6 @@
 ---
 name: sea-orm-postgres
-description: "Use when working with Postgres through sea-orm — dense entities, typed COLUMN filters, pagination queries, eager loading (the selectinload and joinedload analogs), N+1 diagnosis, transactions, hand-written migrations with sea-orm-migration (the Alembic analog), sea-orm-cli generate entity, pool sizing, per-test database isolation. Also for RecordNotUpdated, no method named like found for enum Expr, duplicate key value violates unique constraint. Not for creating a new service from scratch (rust-scaffolding), nor test structure, test_app or data factories (rust-testing)."
+description: "Use when working with Postgres through sea-orm — dense entities, typed COLUMN filters, pagination queries, eager loading with load().with and LoaderTrait, N+1 diagnosis, transactions, hand-written migrations with sea-orm-migration, sea-orm-cli migrate generate and generate entity, pool sizing, per-test database isolation. Also for RecordNotUpdated, no method named like found for enum Expr, duplicate key value violates unique constraint. Not for creating a new service from scratch (rust-scaffolding), nor test structure, test_app or data factories (rust-testing)."
 metadata:
   version: "0.1.0"
 ---
@@ -75,7 +75,7 @@ needs `"user"`.
 ## Migration first, always
 
 There is no autogenerate: no `--autogenerate`, no `diff`, no `--from-entity`. Code generation points
-from the database to the entities and never back, which is the mirror image of Alembic:
+from the database to the entities and never back, so migrations come first:
 
 1. `sea-orm-cli migrate generate add_display_name` is how a migration file is created: it writes
    the timestamped file and registers it in `migration/src/lib.rs`. Rewrite its body in the
@@ -115,18 +115,18 @@ a bind parameter and `{..slice}` expands to a list, so there is no injection sur
 
 ## Relation loading
 
-| Need | Use | Python analog |
+| Need | Use | SQL |
 |---|---|---|
-| nested read, one or many parents | `Entity::load().with(post::Entity)` | chained `selectinload` |
-| parents already fetched, plain models wanted | `parents.load_many(post::Entity, db)` | `selectinload` |
-| one parent and its to-many children | `find_by_id(id).find_with_related(..)` | `joinedload` on a collection |
-| a row and its to-one parent | `find_also_related(..)` | `joinedload` on a to-one |
+| nested read, one or many parents | `Entity::load().with(post::Entity)` | join for to-one, `IN (..)` batch for to-many |
+| parents already fetched, plain models wanted | `parents.load_many(post::Entity, db)` | `WHERE fk IN (..)` |
+| one parent and its to-many children | `find_by_id(id).find_with_related(..)` | LEFT JOIN, consolidated |
+| a row and its to-one parent | `find_also_related(..)` | LEFT JOIN, flat tuples |
 | parents filtered by a child predicate | `has_related(post::Entity, cond)` | `EXISTS` subquery |
 
 `Entity::load().with(..)` is the default: one statement per level whatever the row count.
 `find_with_related` cannot be paginated, and paginating `find_also_related` over a to-many is
 wrong: `LIMIT` applies to joined rows. A missed load is a value, not an exception: `HasMany` is
-`Loaded` or `Unloaded`, so `is_unloaded()` is the `lazy='raise'` equivalent. Load every relation
+`Loaded` or `Unloaded`; nothing shouts, so check `is_unloaded()` yourself. Load every relation
 the response touches in the query that fetched the parent.
 
 ## Writes

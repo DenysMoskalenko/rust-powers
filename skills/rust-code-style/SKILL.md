@@ -1,6 +1,6 @@
 ---
 name: rust-code-style
-description: "Use when writing or reviewing Rust for an axum or tokio backend service in this stack, or porting a Python service pattern to Rust — ownership and cloning, thiserror versus anyhow, no-panic rules, newtypes, async discipline, module layout, dependency injection. Also for E0502, E0499, future cannot be sent between threads safely, or a clippy lint such as needless_pass_by_value. Not for embedded, CLI-only tools, unsafe or FFI code, language tutorials, lint configuration, framework patterns, or tests."
+description: "Use when writing or reviewing Rust for an axum or tokio backend service in this stack — ownership and cloning, thiserror versus anyhow, no-panic rules, newtypes, derive_more and strum, async discipline, module layout, dependency injection. Also for E0502, E0499, future cannot be sent between threads safely, or a clippy lint such as needless_pass_by_value. Not for embedded, CLI-only tools, unsafe or FFI code, language tutorials, lint configuration, framework patterns, or tests."
 metadata:
   version: "0.1.0"
 ---
@@ -152,4 +152,3 @@ Compiler, not edition: 1.80 `std::sync::LazyLock` replaces `once_cell::sync::Laz
 - `references/error-handling.md` — adding or changing an error type: thiserror versus anyhow, domain enums, the `#[from]` / `#[source]` / `#[error(transparent)]` table.
 - `references/async-patterns.md` — before a `select!`, background work, or an async trait: cancellation safety, structured concurrency, shutdown.
 - `references/diagnostics.md` — a pasted rustc error or clippy lint name: what it means, the fix, why the lint is on.
-- `references/python-to-rust.md` — porting a Python service, or you know the Python tool and not the Rust one.

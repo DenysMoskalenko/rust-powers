@@ -12,7 +12,7 @@
 - [Lua scripts](#lua-scripts)
 - [Degrading, classifying, counting](#degrading-classifying-counting)
 - [Blocking commands and the one case for a pool](#blocking-commands-and-the-one-case-for-a-pool)
-- [From redis-py](#from-redis-py)
+- [Command cheat sheet](#command-cheat-sheet)
 
 ## Connect once, clone per call
 
@@ -611,18 +611,18 @@ pub fn blocking_pool(url: &str) -> Result<deadpool_redis::Pool, deadpool_redis::
 }
 ```
 
-## From redis-py
+## Command cheat sheet
 
-| redis-py | redis-rs |
+| Need | redis-rs |
 |---|---|
-| `redis.asyncio.from_url(url)` | `Client::open(url)?` then `get_connection_manager_with_config(cfg)` |
-| `ConnectionPool` | one `aio::ConnectionManager`, cloned per call |
-| `r.set(k, v, ex=60)` | `conn.set_ex::<_, _, ()>(k, v, 60)` |
-| `r.set(k, v, nx=True, px=5000)` | `set_options` with `ExistenceCheck::NX` and `SetExpiry::PX` |
-| `r.get(k)` returning `None` | `conn.get::<_, Option<String>>(k)` |
-| `r.scan_iter(match=...)` | `conn.scan_options::<String>(..)` then `next_item().await` |
-| `r.pipeline(transaction=True)` | `redis::pipe().atomic()...query_async(&mut conn)` |
-| `r.register_script(src)` | `redis::Script::new(src)` then `.key(..).arg(..).invoke_async(..)` |
-| `r.lock(name, timeout=)` | no built-in; `SET NX PX` plus a Lua release (`del_ex` IFEQ on ≥ 8.4) |
-| `redis.exceptions.ConnectionError` | `e.is_connection_refusal()` or `e.is_connection_dropped()` |
-| `ResponseError("WRONGTYPE...")` | `e.code() == Some("WRONGTYPE")` |
+| connect | `Client::open(url)?` then `get_connection_manager_with_config(cfg)` |
+| share the connection | one `aio::ConnectionManager`, cloned per call |
+| set with a TTL | `conn.set_ex::<_, _, ()>(k, v, 60)` |
+| set only if absent, with a TTL | `set_options` with `ExistenceCheck::NX` and `SetExpiry::PX` |
+| read a key that may be missing | `conn.get::<_, Option<String>>(k)` |
+| walk keys by pattern | `conn.scan_options::<String>(..)` then `next_item().await` |
+| many commands, one round trip | `redis::pipe().atomic()...query_async(&mut conn)` |
+| run a Lua script | `redis::Script::new(src)` then `.key(..).arg(..).invoke_async(..)` |
+| take a lock | no built-in; `SET NX PX` plus a Lua release (`del_ex` IFEQ on ≥ 8.4) |
+| tell a dead server from a bad command | `e.is_connection_refusal()` or `e.is_connection_dropped()` |
+| catch a wrong-type key | `e.code() == Some("WRONGTYPE")` |

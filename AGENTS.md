@@ -16,7 +16,7 @@ sibling by name in one sentence instead of restating the rule.
 
 | Skill | What it is | Owner boundary |
 | --- | --- | --- |
-| `rust-code-style` | Ownership and cloning, `thiserror` vs `anyhow`, no-panic rules, newtypes, `derive_more` and `strum`, async discipline, module layout, edition 2024 idioms, Python-to-Rust concept mapping. | Language and architecture only; never lint configuration, framework patterns, or test layout. |
+| `rust-code-style` | Ownership and cloning, `thiserror` vs `anyhow`, no-panic rules, newtypes, `derive_more` and `strum`, async discipline, module layout, edition 2024 idioms. | Language and architecture only; never lint configuration, framework patterns, or test layout. |
 | `axum-service` | Routes, extractors, `Valid<T>`, response DTOs, `AppError` and status mapping, utoipa and Swagger UI, settings and secrets, middleware order, health and readiness, pagination, SSE, background work, graceful shutdown, JWT auth, and all observability: `tracing` layers, OTLP export, `traceparent` propagation, Prometheus metrics. | The whole HTTP layer and its instrumentation; queries belong to `sea-orm-postgres`. |
 | `sea-orm-postgres` | Dense entities, typed column filters, pagination queries, eager loading and N+1, transactions, `sea-orm-migration`, `sea-orm-cli generate entity`, pool sizing, per-test database isolation. | Everything below the handler; never routes or DTOs. |
 | `rust-testing` | `axum-test` API tests, the `test_app()` helper, `rstest` fixtures, `fake` and `bon` factories, `httpmock`, `insta`, the injected `Clock`, nextest filters, coverage gates. | Test authoring only; the Postgres container lives in `sea-orm-postgres`, rig mocks in `building-rig-agents`. |
@@ -45,10 +45,10 @@ Cursor discovery.
 
 **Description.** Double-quoted, at most 75 words, third person, and it starts with
 `"Use when "`. Follow that with the concrete triggers: the task shapes, the error strings an
-agent will paste (`Handler is not satisfied`, `RecordNotUpdated`, `E0502`), and the Python
-vocabulary a reader arrives with (`selectinload`, `polyfactory`, `freezegun`). End with the
+agent will paste (`Handler is not satisfied`, `RecordNotUpdated`, `E0502`), and the crate and
+API names a reader arrives with (`LoaderTrait`, `ConnectionManager`, `AgentBuilder`). End with the
 negatives, aimed at the words that collide with a sibling's description (flaky, coverage,
-bootstrapping, alembic-style), each naming the skill that wins. The description is the entire
+bootstrapping, migrations), each naming the skill that wins. The description is the entire
 triggering mechanism - it is loaded for every session while the body is not, so it earns
 more editing time than any other line in the skill.
 

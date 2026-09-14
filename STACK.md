@@ -2,35 +2,36 @@
 
 One pick per concern. Decided 13 September 2026.
 
-Toolchain: Rust 1.98, edition 2024, resolver 3.
+Toolchain: Rust 1.98, edition 2024, resolver 3. python-powers is the sibling project this
+repository mirrors for Python services.
 Re-validated on rustc 1.98.1 / clippy 0.1.98, 13 September 2026: `cargo generate-lockfile` (895 packages), `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings` with the `[lints]` table below active (zero warnings), and `cargo deny check` (advisories, bans, licenses, sources all ok). The skeleton wires settings, `AppError`, `Valid<T>`/`ValidQuery<T>`, sea-orm + a `migration/` crate, OTLP traces with the W3C propagator and the axum OTel middleware, a traced reqwest client, Prometheus metrics and Swagger UI. Every "add when needed" crate (rig, rmcp, axum-extra, jsonwebtoken, argon2, nutype) is resolved and compiled in the same lock file. The messaging and cache crates (async-nats 0.50, redis 1.7, deadpool-redis 0.23) were compiled clippy-clean and tested against Docker NATS 2.12 / Redis 8 in separate scratch crates on 13–14 September 2026.
 
-## Python to Rust
+## One Pick Per Concern
 
-| Python | Rust | Note |
+| Concern | Pick | Note |
 |---|---|---|
-| uv | cargo + rustup + `rust-toolchain.toml` | built in |
-| ruff | rustfmt + clippy (`pedantic`) | built in |
-| ty | rustc | the compiler is the type checker |
-| complexipy | clippy `cognitive_complexity`, `too_many_lines`, `too_many_arguments` | no extra tool |
-| pytest | cargo-nextest + rstest | nextest skips doctests; run `cargo test --doc` separately |
-| pytest-cov | cargo-llvm-cov | |
-| fastapi | axum 0.8 + tower-http 0.7 | |
-| pydantic (schemas) | serde + validator + utoipa | |
-| pydantic (validation) | validator 0.21 + own `Valid<T>` extractor | 15 lines, see below |
-| pydantic-settings | `config` crate + dotenvy | env vars into a `Settings` struct, `.env` loaded in dev |
-| sqlalchemy 2.0 | sea-orm 2.0 | sqlx 0.9 + sea-query 1.0 underneath |
-| alembic | sea-orm-migration + sea-orm-cli | |
-| httpx | reqwest 0.13 | |
-| testcontainers | testcontainers-modules 0.15 | |
-| polyfactory | fake (`#[derive(Dummy)]`) + bon (builders) | |
-| freezegun | `Clock` trait + `tokio::time::pause` | no monkeypatching in Rust |
-| pydantic_ai | rig 0.42 + rmcp 2 | add when needed |
-| nats-py | async-nats 0.50 | add when needed; `publish`/`subscribe`/`request`, `pull_subscribe`, `msg.ack` map 1:1 |
-| redis-py | redis 1.7 (`ConnectionManager`) | add when needed; one multiplexed connection, not a pool |
-| opentelemetry | tracing + tracing-opentelemetry + opentelemetry-otlp (traces); metrics + axum-prometheus (`/metrics`) | |
-| prek | prek | |
-| Makefile | Makefile | calls cargo directly, no task runner underneath |
+| toolchain and dependencies | cargo + rustup + `rust-toolchain.toml` | built in |
+| format and lint | rustfmt + clippy (`pedantic`) | built in |
+| type checking | rustc | the compiler is the type checker |
+| complexity limits | clippy `cognitive_complexity`, `too_many_lines`, `too_many_arguments` | no extra tool |
+| test runner | cargo-nextest + rstest | nextest skips doctests; run `cargo test --doc` separately |
+| coverage | cargo-llvm-cov | |
+| HTTP framework | axum 0.8 + tower-http 0.7 | |
+| request and response schemas | serde + validator + utoipa | |
+| body validation | validator 0.21 + own `Valid<T>` extractor | 15 lines, see below |
+| settings | `config` crate + dotenvy | env vars into a `Settings` struct, `.env` loaded in dev |
+| ORM | sea-orm 2.0 | sqlx 0.9 + sea-query 1.0 underneath |
+| migrations | sea-orm-migration + sea-orm-cli | |
+| HTTP client | reqwest 0.13 | |
+| containers in tests | testcontainers-modules 0.15 | |
+| test data | fake (`#[derive(Dummy)]`) + bon (builders) | |
+| time in tests | `Clock` trait + `tokio::time::pause` | nothing can intercept `Utc::now()` |
+| LLM agents | rig 0.42 + rmcp 2 | add when needed |
+| messaging | async-nats 0.50 | add when needed; core `publish`/`subscribe`/`request`, JetStream `get_or_create_consumer` + `consumer.messages()`, `message.ack()` |
+| cache | redis 1.7 (`ConnectionManager`) | add when needed; one multiplexed connection, not a pool |
+| telemetry | tracing + tracing-opentelemetry + opentelemetry-otlp (traces); metrics + axum-prometheus (`/metrics`) | |
+| pre-commit hooks | prek | installed with `uv tool install prek` |
+| task runner | Makefile | calls cargo directly, no task runner underneath |
 
 ## Decisions
 
@@ -55,7 +56,7 @@ Re-validated on rustc 1.98.1 / clippy 0.1.98, 13 September 2026: `cargo generate
 
 - **axum 0.8** with `macros`. actix-web is ~10 % faster and has its own middleware model; not worth it.
 - **tower-http 0.7** for `CorsLayer`, `CompressionLayer`, `TimeoutLayer`, `CatchPanicLayer` (features `cors`, `compression-full`, `timeout`, `catch-panic` only; the request id is one `from_fn` middleware, not tower-http's set/propagate pair, and there is no `TraceLayer`). `CatchPanicLayer::custom(handle_panic)` sits directly inside the request-id middleware (`error::catch_panic_layer()`): a handler panic is logged and answered with the constant 500 `ErrorBody`, request id included, instead of dropping the connection. `TimeoutLayer::new` is deprecated since 0.6.7; use `TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, dur)`, which `-D warnings` otherwise rejects.
-- **utoipa 5 + utoipa-axum + utoipa-swagger-ui** (`vendored` feature so the build does not download Swagger UI). Serves `/docs` and `/openapi.json` like FastAPI.
+- **utoipa 5 + utoipa-axum + utoipa-swagger-ui** (`vendored` feature so the build does not download Swagger UI). Serves `/docs` and `/openapi.json`.
 - **validator 0.21** with a hand-written `Valid<T>` extractor. axum-valid is not used because it pins validator 0.20.
 - **nutype** for validated newtypes (`Email`, `NonEmptyString`) only where the type is reused.
 - **thiserror** for the `AppError` enum, **anyhow** inside services. `AppError` implements `IntoResponse` and is the only place a status is chosen; every failure, both router fallbacks included, renders the same `ErrorBody { error, request_id?, details? }`. The eleven variants and their statuses are in the wiring section below. 5xx and 409 bodies are constants; the cause chain goes to `tracing::error!`.

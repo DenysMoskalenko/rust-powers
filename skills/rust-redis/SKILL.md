@@ -1,6 +1,6 @@
 ---
 name: rust-redis
-description: "Use when caching or coordinating through Redis in an axum service with redis-rs — ConnectionManager setup, cache-aside helpers and TTLs, serde values, invalidation, SCAN over KEYS, pipelines, Lua scripts, leases, Redis-backed rate limiting as an axum layer, idempotency keys, testcontainers Redis. The redis-py setex, scan_iter and register_script analogs; Connection refused, NOSCRIPT, WRONGTYPE, multiple applicable items in scope. Not for pub/sub, queues or events (rust-nats), nor transactional exclusion with advisory locks (sea-orm-postgres)."
+description: "Use when caching or coordinating through Redis in an axum service with redis-rs — ConnectionManager setup, cache-aside helpers and TTLs, serde values, invalidation, SCAN over KEYS, pipelines, Lua scripts, leases, Redis-backed rate limiting as an axum layer, idempotency keys, testcontainers Redis. Also for Connection refused, NOSCRIPT, WRONGTYPE, the trait bound FromRedisValue is not satisfied, multiple applicable items in scope. Not for pub/sub, queues or events (rust-nats), nor transactional exclusion with advisory locks (sea-orm-postgres)."
 metadata:
   version: "0.1.0"
 ---
@@ -234,7 +234,7 @@ Most Redis material for Rust predates 1.0; these renames break it:
 - `references/caching.md` — read before writing any Redis code: connection setup and settings,
   command traits, the `Json<T>` newtype, keys and TTLs, the full cache-aside module, `SCAN`,
   pipelines, Lua, error classification, the readiness entry, the one case for a pool, the
-  redis-py table.
+  cheat sheet.
 - `references/locks-and-limits.md` — read when coordinating rather than caching: the lease,
   both rate limiters and the layer function, who gets limited and fail-open, idempotency keys,
   token revocation.

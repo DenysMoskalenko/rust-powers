@@ -6,14 +6,14 @@
 
 1. "Add a `POST /chat` endpoint to our axum service that talks to OpenAI and streams the
    reply back over SSE."
-2. "Port this Pydantic AI agent to Rust — it has two tools, a typed `output_type`, and it
-   keeps message history per user."
+2. "Build an agent with two tools, a typed structured output, and message history kept
+   per user."
 3. "Our agent calls the tool but then gives up. `Error: MaxTurnsError { max_turns: 1 }` —
    what is wrong?"
-4. "I want the model to return a struct instead of a string, something like
-   `response_model=` in instructor. How do I do that with rig?"
-5. "Write a test for the assistant that does not hit the provider — the pytest equivalent
-   would be monkeypatching the client."
+4. "I want the model to return a typed struct instead of a string. How do I do that with
+   rig?"
+5. "Write a test for the assistant that does not hit the provider — a stub completion
+   model instead of OpenAI."
 
 **Should not load**
 

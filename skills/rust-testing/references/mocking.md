@@ -292,7 +292,7 @@ async fn a_row_written_by_a_background_task_is_listed() {
 
 ## Time
 
-There is no freezegun in Rust. freezegun monkey-patches `datetime.now` process-wide, and Rust offers no interception point: `Utc::now()` is a direct call with no import hook. The alternatives are injecting the clock or having every call site consult a global `AtomicI64`, which is a worse version of injection. So the service holds `Arc<dyn Clock>` and `test_app()` hands it a `FixedClock`.
+Nothing can intercept `Utc::now()` from the outside: it is a direct call with no hook. The alternatives are injecting the clock or having every call site consult a global `AtomicI64`, which is a worse version of injection. So the service holds `Arc<dyn Clock>` and `test_app()` hands it a `FixedClock`.
 
 `Clock` is the stated exception to the ban on one-implementor traits, because the real implementation reads wall-clock time and a test cannot.
 

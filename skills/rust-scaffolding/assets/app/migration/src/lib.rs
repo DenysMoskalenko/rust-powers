@@ -1,4 +1,4 @@
-//! Migrations, alembic-style: every schema change is a reviewable Rust file.
+//! Migrations: every schema change is a reviewable Rust file, applied in order.
 //! `pub use` of the prelude lets migration files write `use migration::prelude::*`.
 pub use sea_orm_migration::prelude;
 pub use sea_orm_migration::prelude::*;

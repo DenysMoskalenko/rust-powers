@@ -1,6 +1,6 @@
 # Test data factories
 
-The polyfactory analog is two crates, not one: `fake` supplies random-but-valid values, `bon` supplies "valid default, override one field". Together they cover what a `ModelFactory` subclass does in Python.
+Test data comes from two crates, not one: `fake` supplies random-but-valid values, `bon` supplies "valid default, override one field". Between them they cover every factory shape a test needs.
 
 - [Which tool for which job](#which-tool-for-which-job)
 - [fake: any valid instance](#fake-any-valid-instance)

@@ -4,9 +4,9 @@
 
 **Should load**
 
-1. "Add an endpoint that returns a user with all their posts — I want the selectinload equivalent, not a query per row."
+1. "Add an endpoint that returns a user with all their posts — one batched query for the posts, not a query per row."
 2. "My integration tests are starting a Postgres container per test and taking four minutes. How do I set up per-test database isolation?"
-3. "I need an alembic-style migration to add a nullable `display_name` column to `users` and backfill it."
+3. "I need a migration to add a nullable `display_name` column to `users` and backfill it."
 4. "Insert fails with `DbErr::RecordNotUpdated` and the row is definitely new. The primary key is a uuid I generate in Rust."
 5. "error[E0599]: no method named `like` found for enum `Expr` in the current scope"
 
@@ -14,7 +14,7 @@
 
 1. "My handler does not compile: the trait bound `fn(State, Json) -> ...: Handler` is not satisfied." -> `axum-service`
 2. "Write the OpenAPI annotations and the response DTO for the users list endpoint." -> `axum-service`
-3. "The `test_app` helper should swap in a fake clock and an httpmock base URL for the outbound client, and I want a polyfactory-style user factory." -> `rust-testing`
+3. "The `test_app` helper should swap in a fake clock and an httpmock base URL for the outbound client, and I want a `fake` and `bon` user factory." -> `rust-testing`
 4. "Create a new invoicing service from scratch with migrations, tests and CI wired up." -> `rust-scaffolding`
 5. "Spans from this service never show up in the collector even though the OTLP endpoint is set." -> `axum-service`
 

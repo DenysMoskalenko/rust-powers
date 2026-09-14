@@ -5,7 +5,7 @@
 **Should load**
 
 1. "Add a NATS publisher to the orders service: when POST /orders succeeds, publish an OrderPlaced event to JetStream so the billing worker can pick it up."
-2. "In nats-py I did `await js.pull_subscribe('orders.>', durable='billing')` and `msg.ack()`. What is the async-nats equivalent, and how do I run it as a background task in axum?"
+2. "Consume `orders.>` with a durable pull consumer named `billing` and ack each message. How do I run that as a background task in axum?"
 3. "My worker stops consuming after a NATS restart. The logs show `consumer deleted` once and then nothing; the process is still up and /health/ready still says `\"messaging\": \"ok\"`."
 4. "Request-reply to the pricing service returns `Error { kind: NoResponders, .. }` in staging but works locally. How should the handler map that, 502 or 503?"
 5. "Write integration tests for our JetStream consumer with testcontainers — the same reuse-by-name pattern we use for Postgres, and make sure a duplicate Nats-Msg-Id is dropped."
@@ -81,16 +81,16 @@
 - the module's default tag (`2.10.14`) left in place
 - a mocked NATS client instead of a server
 
-### Eval 4 - nats-py request-reply port
+### Eval 4 - request-reply over a queue group
 
-**Prompt**: "Convert this nats-py service to Rust: `nc.subscribe('pricing.quote', queue='pricing', cb=handler)` where the handler calls `await msg.respond(price)`; the client side does `await nc.request('pricing.quote', b'sku', timeout=0.5)` and catches `NoRespondersError`."
+**Prompt**: "Serve `pricing.quote` from a `pricing` queue group, replying with the price; the caller sends a sku and gives up after 500 ms. Handle the case where nothing is subscribed."
 
 **Must produce**:
 - `client.queue_subscribe("pricing.quote", "pricing".to_owned())` driven as a `Stream` with `while let Some(message) = requests.next().await`
 - replying by `client.publish(reply, ..)` to `message.reply`, with the `None` case skipped (no `respond` in core NATS)
 - `send_request("pricing.quote", Request::new().payload(..).timeout(Some(Duration::from_millis(500))))`
 - matching `err.kind() == RequestErrorKind::NoResponders` versus `TimedOut`, both mapped to `AppError::Unavailable` (503) through `messaging_error`, with the note that `TimedOut` is also what a disconnected client returns and therefore is not a 504
-- a mention that `ConnectOptions` needs `.retry_on_initial_connect()` because nats-py retries the first connect and async-nats does not
+- a mention that `ConnectOptions` needs `.retry_on_initial_connect()`, which async-nats leaves off by default
 
 **Must not produce**:
 - `message.respond(..)` on a core `async_nats::Message`

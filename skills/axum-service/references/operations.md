@@ -381,7 +381,7 @@ then `id`) or OFFSET over a non-unique sort is not stable. Switch to a cursor
 
 ## Work that outlives the response
 
-There is no `BackgroundTasks` equivalent. Spawn the work, clone what it needs out of the request,
+axum has no built-in after-response hook. Spawn the work, clone what it needs out of the request,
 and log the error inside the task — a dropped `JoinHandle` discards the result silently.
 
 ```rust,verify

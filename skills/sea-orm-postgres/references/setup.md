@@ -89,8 +89,8 @@ pub struct AppState {
 }
 ```
 
-There is no session-per-request object and nothing to open or close per request. A web framework
-extractor that produces a "session" is porting a SQLAlchemy idea that has no counterpart here:
+There is no session-per-request object and nothing to open or close per request. An extractor
+that hands a handler a "session" would have nothing to hand out:
 checkout happens inside each `await`ed statement and returns to the pool immediately. Where a
 request genuinely needs several statements to commit together, open a transaction explicitly.
 For wiring state into the router see `axum-service`.

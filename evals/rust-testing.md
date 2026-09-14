@@ -4,11 +4,11 @@
 
 **Should load**
 
-1. "our pytest suite used freezegun for this. how do I freeze time in the axum service tests so I can assert on `created_at` in the POST /users response?"
-2. "I want the polyfactory equivalent for building test users in this repo — fake and bon are already in dev-dependencies, what does the factory look like?"
+1. "how do I freeze time in the axum service tests so I can assert on `created_at` in the POST /users response?"
+2. "I need a factory for building test users in this repo — fake and bon are already in dev-dependencies, what does it look like?"
 3. "getting `error[E0599]: no method named `unwrap` found for struct `TestServer`` on every api test after bumping axum-test, what changed"
 4. "tests/users.rs passes when I run it alone and fails under `cargo nextest run`. something is leaking between tests and I can't see what"
-5. "we're porting a FastAPI service and I don't know what replaces `app.dependency_overrides` — I need the handler under test to hit a scratch database and a fake upstream instead of the real one"
+5. "I need the handler under test to hit a scratch database and a fake upstream instead of the real `AppState` — how do I override those dependencies?"
 
 **Should not load**
 

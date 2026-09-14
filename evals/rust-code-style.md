@@ -5,10 +5,10 @@
 **Should load**
 
 1. "Review this service module for style before I open the MR — it's Rust, axum, sea-orm."
-2. "I'm porting a pydantic model and a StrEnum to Rust. What replaces them, and where does validation go?"
+2. "I need a request struct with a fixed set of status values. Which type for the statuses, and where does validation go?"
 3. "error[E0502]: cannot borrow `items` as mutable because it is also borrowed as immutable — how do I fix this without cloning?"
 4. "clippy says `needless_pass_by_value` on my `fn send_invoice(body: String)`. What should the signature be?"
-5. "Should I define `trait UserRepository` with a `PgUserRepository` impl so I can mock it in tests, the way I'd inject a fake repo in Python?"
+5. "Should I define `trait UserRepository` with a `PgUserRepository` impl so I can swap in a fake in tests?"
 
 **Should not load**
 
@@ -59,16 +59,3 @@
 - `#[allow(clippy::unwrap_used)]` or any suppression as the fix.
 - A `UserId` newtype for the lone id, with the `ToSchema` / `IntoParams` / `From` plumbing it drags in.
 - A suggestion to add `Arc<Mutex<_>>` around more state, or to split the module into `handlers/`, `services/` and `repositories/` directories.
-
-### Eval 4 - Python-to-Rust mapping without teaching the neighbour skill
-
-**Prompt**: "Coming from FastAPI plus SQLAlchemy plus pytest. Give me the Rust equivalents so I know what to learn."
-
-**Must produce**:
-- A mapping that names axum, serde with validator and utoipa, sea-orm, sea-orm-migration, nextest with rstest, fake with bon, and an injected `Clock` for freezegun.
-- The owning skill named beside each area rather than inline code for it.
-- At least one habit that does not port: no monkeypatching, or no `Any`.
-
-**Must not produce**:
-- A worked sea-orm query, an axum router, or a migration — those belong to the neighbour skills.
-- A recommendation of a crate that is not in this stack (sqlx, diesel, actix-web) as the default.

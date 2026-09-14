@@ -113,7 +113,7 @@ pub struct CreateUser {
 }
 ```
 
-House style: snake_case JSON (serde's default), `deny_unknown_fields` on every request-body DTO so a typo'd field is a 422 instead of silence, `ToSchema` on every DTO. Response DTOs are separate types with an explicit `From<Model>`; nothing filters a response like FastAPI's `response_model`.
+House style: snake_case JSON (serde's default), `deny_unknown_fields` on every request-body DTO so a typo'd field is a 422 instead of silence, `ToSchema` on every DTO. Response DTOs are separate types with an explicit `From<Model>`; whatever the DTO declares is what ships.
 
 ## OpenAPI, settings, middleware
 

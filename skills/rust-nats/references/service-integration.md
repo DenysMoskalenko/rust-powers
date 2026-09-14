@@ -9,7 +9,7 @@
 - [Process wiring, startup retry and shutdown order](#process-wiring-startup-retry-and-shutdown-order)
 - [Readiness](#readiness)
 - [Telemetry](#telemetry)
-- [From nats-py](#from-nats-py)
+- [Easy to get wrong](#easy-to-get-wrong)
 
 ## State: the client is Clone
 
@@ -716,16 +716,16 @@ Spans carry the subject and the payload size, never the payload: it is user data
 Counters: `nats_messages_published_total`, `nats_messages_consumed_total`, plus a handle-time
 histogram, all labelled by subject family.
 
-## From nats-py
+## Easy to get wrong
 
-Only the rows that cannot be guessed; the rest is a rename.
+Only the calls whose name does not give them away; the rest reads as it is spelled.
 
-| nats-py | async-nats |
+| Need | async-nats |
 |---|---|
-| `error_cb`, `disconnected_cb`, `reconnected_cb` | one `event_callback(\|event\| async move { .. })` |
-| (retries first connect by default) | `.retry_on_initial_connect()` — off by default |
-| `msg.respond(data)` | `client.publish(msg.reply.unwrap(), data)` — no `respond` |
-| `js.publish(subj, b, headers={"Nats-Msg-Id": id})` | `js.send_publish(subj, PublishMessage::build().message_id(id)).await?.await?` |
-| `msg.ack_sync()`, `msg.nak(delay=5)` | `double_ack()`, `ack_with(AckKind::Nak(Some(5s)))` |
-| `msg.in_progress()` | `ack_with(AckKind::Progress)` — no `in_progress()` |
-| `nats.micro.add_service(..)` | `client.service_builder()` with `ServiceExt` imported |
+| connection lifecycle callbacks | one `event_callback(\|event\| async move { .. })` |
+| retry the first connect | `.retry_on_initial_connect()` — off by default |
+| reply to a request | `client.publish(msg.reply.unwrap(), data)` — there is no `respond` |
+| publish with a dedup id | `js.send_publish(subj, PublishMessage::build().message_id(id)).await?.await?` |
+| ack synchronously, or nak with a delay | `double_ack()`, `ack_with(AckKind::Nak(Some(5s)))` |
+| extend the ack deadline | `ack_with(AckKind::Progress)` — there is no `in_progress()` |
+| expose a micro service | `client.service_builder()` with `ServiceExt` imported |

@@ -1,6 +1,6 @@
 ---
 name: rust-testing
-description: "Use when writing or fixing tests for an axum service, or stabilizing a flaky test — API tests through axum-test, the test_app helper (the dependency_overrides analog), rstest fixtures and cases, fake and bon factories (the polyfactory analog), httpmock (the responses or respx analog), insta snapshots, an injected Clock instead of freezegun, nextest filters, coverage exclusions. Not for nextest.toml, llvm-cov flags or CI (rust-tooling), the Postgres container and per-test database (sea-orm-postgres), or rig mocks (building-rig-agents)."
+description: "Use when writing or fixing tests for an axum service, or stabilizing a flaky test — API tests through axum-test, the test_app helper and its dependency overrides, rstest fixtures and cases, fake and bon factories, httpmock, insta snapshots, an injected Clock, nextest filters, coverage exclusions. Also for PoolTimedOut, or a test that leaks state under nextest. Not for nextest.toml, llvm-cov flags or CI (rust-tooling), the Postgres container and per-test database (sea-orm-postgres), or rig mocks (building-rig-agents)."
 metadata:
   version: "0.1.0"
 ---
@@ -42,9 +42,9 @@ Integration tests reach only `pub` items of a **library** target, so a binary-on
 
 `allow-unwrap-in-tests` in `clippy.toml` covers only the body of a `#[test]` function. Any `tests/*.rs` holding helpers, `tests/common/mod.rs` included, opens with the scaffold's attribute: `#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "test helpers")]`.
 
-## test_app(): the dependency-override analog
+## test_app(): overriding dependencies
 
-There is no `dependency_overrides` registry in axum and none is needed: the router is a function of its state, so a test builds the **real** router over a state it owns.
+There is no override registry in axum and none is needed: the router is a function of its state, so a test builds the **real** router over a state it owns.
 
 ```rust
 pub struct TestApp {
@@ -109,7 +109,7 @@ Put `#[rstest]` first, above `#[tokio::test]`. Plain cases tolerate the wrong or
 | Attribute | Use |
 |---|---|
 | `#[fixture] fn server() -> TestServer` | injected by parameter name |
-| `#[once]` on a fixture | sync only — rstest rejects `async`, so it cannot wrap `test_app()`; once per test *process*, which under nextest is once per test, so there is no `scope="session"`: share a server through `TEST_DATABASE_URL` |
+| `#[once]` on a fixture | sync only — rstest rejects `async`, so it cannot wrap `test_app()`; once per test *process*, which under nextest is once per test, so nothing is built once for a whole run: share a server through `TEST_DATABASE_URL` |
 | `#[future]` on the parameter, `#[awt]` on the test | await an async fixture so the body sees `T` |
 | `#[case::missing_at("not-an-email")]` | one named case per tuple of inputs |
 | `#[values(a, b)]` on a parameter | cartesian product; prefer named `#[case]`s |
@@ -118,19 +118,18 @@ Put `#[rstest]` first, above `#[tokio::test]`. Plain cases tolerate the wrong or
 
 An underscore-prefixed fixture parameter trips `clippy::used_underscore_binding` under pedantic; name it normally.
 
-| pytest habit | Here |
+| Need | Here |
 |---|---|
-| `with pytest.raises(..)` | API: `.expect_failure()` then `assert_status`; unit: `let err = f().unwrap_err(); assert!(matches!(err, AppError::NotFound(_)))` |
-| `@pytest.mark.xfail` | `#[should_panic(expected = "..")]` for a known panic, `#[ignore = ".."]` otherwise |
-| `scope="session"` | none — see the `#[once]` row |
-| `autouse=True` | none; every fixture is a named parameter |
+| assert a call failed | API: `.expect_failure()` then `assert_status`; unit: `let err = f().unwrap_err(); assert!(matches!(err, AppError::NotFound(_)))` |
+| a known failure, unfixed | `#[should_panic(expected = "..")]` for a known panic, `#[ignore = ".."]` otherwise |
+| an implicit fixture | none; every fixture is a named parameter |
 
 ## Running tests
 
 | Goal | Command |
 |---|---|
 | Everything | `cargo nextest run` |
-| One test (`pytest -k`) | `cargo nextest run -E 'test(creates_user)'` |
+| One test by name | `cargo nextest run -E 'test(creates_user)'` |
 | One binary, or a regex | `cargo nextest run -E 'binary(users)'`, `-E 'test(/^db_/)'` |
 | Combine | `-E 'binary(users) and not test(slow)'` |
 | Include `#[ignore]`d tests | `cargo nextest run --run-ignored all` |

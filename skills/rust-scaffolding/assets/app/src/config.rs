@@ -1,4 +1,4 @@
-//! Settings: the `pydantic-settings` analogue. Environment variables only, no
+//! Settings: typed configuration. Environment variables only, no
 //! config files. `APP__DATABASE__URL` becomes `settings.database.url`.
 use secrecy::SecretString;
 use serde::Deserialize;

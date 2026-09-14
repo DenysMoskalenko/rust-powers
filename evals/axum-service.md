@@ -5,13 +5,13 @@
 **Should load**
 
 1. "Add a paginated list endpoint `GET /api/v1/orders` and document its query parameters in the OpenAPI spec."
-2. "This handler returns the whole user row including `password_hash` — what is the `response_model` equivalent in axum?"
+2. "This handler returns the whole user row including `password_hash` — how do I keep that field off the wire?"
 3. "Getting `error[E0277]: the trait bound `fn(Valid<CreateUser>, State<AppState>) -> impl Future {create_user}: Handler<_, _>` is not satisfied` on my route."
 4. "The service panics at startup: `Path segments must not start with `:`. For capture groups, use `{capture}`.`"
-5. "I need the `BackgroundTasks` equivalent — send the confirmation email after the 202 goes out."
+5. "Send the confirmation email after the 202 goes out, without making the caller wait for it."
 6. "Our axum service logs fine locally but nothing shows up in Tempo. We set the OTLP endpoint and the collector is up. Where do I even start looking?"
 7. "The checkout service calls the billing service and they end up as two separate traces in Jaeger instead of one. Both are Rust, both use axum."
-8. "I want structured JSON logs in prod and the pretty format locally, plus `RUST_LOG` working — in Python I'd just configure `structlog` and be done. What's the equivalent here?"
+8. "I want structured JSON logs in prod and the pretty format locally, plus `RUST_LOG` working. How do I set up the tracing subscriber?"
 9. "Adding a Prometheus `/metrics` endpoint to our axum app and a counter for orders by status. What naming convention should I use, and is it safe to add the customer id as a label?"
 10. "Pasted error: `error[E0599]: no method named 'tracer' found for struct 'SdkTracerProvider' in the current scope` — this is in my `init_telemetry` function."
 

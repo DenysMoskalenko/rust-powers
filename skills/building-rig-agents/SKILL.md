@@ -1,6 +1,6 @@
 ---
 name: building-rig-agents
-description: "Use when adding an LLM, assistant, or chatbot endpoint to an axum service, porting a Pydantic AI agent, or building, testing, or debugging rig agents against OpenAI, Anthropic or Gemini — AgentBuilder, tools, structured extraction, streaming, RAG, conversation history, rmcp clients, mapping PromptError onto AppError. Also for MaxTurnsError, rig-core versus rig, or E0599 no method named agent. For routes, SSE transport and validation see axum-service."
+description: "Use when adding an LLM, assistant, or chatbot endpoint to an axum service, or building, testing, or debugging rig agents against OpenAI, Anthropic or Gemini — AgentBuilder, tools, structured extraction, streaming, RAG, conversation history, rmcp clients, mapping PromptError onto AppError. Also for MaxTurnsError, ToolCallError, rig-core versus rig, or E0599 no method named agent. For routes, SSE transport and validation see axum-service."
 metadata:
   version: "0.1.0"
 ---

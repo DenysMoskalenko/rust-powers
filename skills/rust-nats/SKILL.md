@@ -1,6 +1,6 @@
 ---
 name: rust-nats
-description: "Use when publishing or consuming NATS messages from an axum service — an event bus, work queue or message queue on async-nats: connect options, subjects, request-reply, queue groups, JetStream streams and durable pull consumers, Nats-Msg-Id deduplication, ack, nak and term, KV buckets, tests against a NATS container. The nats-py nc.publish, js.pull_subscribe and msg.ack analogs; no responders, consumer deleted, timed out. Not for Redis caching or pub/sub (rust-redis), nor the readiness endpoint itself (axum-service)."
+description: "Use when publishing or consuming NATS messages from an axum service — an event bus, work queue or message queue on async-nats: connect options, subjects, request-reply, queue groups, JetStream streams and durable pull consumers, Nats-Msg-Id deduplication, ack, nak and term, KV buckets, tests against a NATS container. Also for no responders, consumer deleted, timed out, MAX_DELIVERIES. Not for Redis caching or pub/sub (rust-redis), nor the readiness endpoint itself (axum-service)."
 metadata:
   version: "0.1.0"
 ---
@@ -254,6 +254,6 @@ are tested without a broker.
 - `references/service-integration.md` — read when wiring NATS into the service: state and
   settings, publishing from handlers, `MessagingError` and `messaging_error`, the worker task,
   startup retry and bounded shutdown, the readiness check, `traceparent` and `messaging.*`
-  spans, the nats-py table.
+  spans, the easy-to-get-wrong table.
 - `references/testing-nats.md` — read when setting up NATS tests: the container and its tag,
   the two races, prefix isolation, the harness, what is worth a test.

@@ -108,7 +108,7 @@ fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
 impl AppError {
     fn status(&self) -> StatusCode {
         match self {
-            // A body that parsed but broke the rules is 422, like FastAPI; a body
+            // A body that parsed but broke the rules is 422; a body
             // that did not parse at all is 400.
             Self::Validation(_) | Self::JsonRejection(JsonRejection::JsonDataError(_)) => {
                 StatusCode::UNPROCESSABLE_ENTITY

@@ -1,6 +1,6 @@
-//! Time as a dependency. Rust has no `freezegun`: nothing can monkeypatch
-//! `Utc::now()`, so code that needs the current time takes a `Clock` and tests
-//! hand it a `FixedClock`.
+//! Time as a dependency. Nothing can intercept `Utc::now()` from the outside,
+//! so code that needs the current time takes a `Clock` and tests hand it a
+//! `FixedClock`.
 use chrono::{DateTime, Utc};
 
 pub trait Clock: Send + Sync {

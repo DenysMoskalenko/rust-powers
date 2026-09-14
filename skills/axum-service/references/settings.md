@@ -15,7 +15,7 @@ this stack.
 ## The Settings struct
 
 ```rust,verify
-//! `config.rs` — the `pydantic-settings` analogue. Environment variables only, no
+//! `config.rs` — typed settings. Environment variables only, no
 //! config files. `APP__DATABASE__URL` becomes `settings.database.url`.
 use secrecy::SecretString;
 use serde::Deserialize;

@@ -5,7 +5,7 @@
 **Should load**
 
 1. "Cache the user lookup in Redis for five minutes and drop the entry when the profile is updated."
-2. "This is the redis-py code I am porting: `r.set(key, body, ex=60)` and `r.scan_iter(match='sess:*')`. What is the redis-rs equivalent?"
+2. "Store a session body with a 60-second TTL, then walk every `sess:*` key. Which redis-rs calls?"
 3. "Two cron replicas both run the nightly reindex. Give me a distributed lock with a TTL so only one of them does."
 4. "error[E0034]: multiple applicable items in scope — `conn.get(\"k\")` after importing `AsyncCommands` and `AsyncTypedCommands`."
 5. "Rate limit the public API to 100 requests a minute per API key, backed by Redis, as an axum layer."

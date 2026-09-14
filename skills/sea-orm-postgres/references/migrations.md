@@ -13,8 +13,7 @@
 ## There is no autogenerate
 
 sea-orm-cli has no `--autogenerate`, no `diff` and no `--from-entity`. Code generation points one
-way only: database to entities. The workflow is the mirror image of Alembic's — migrations are
-hand-written, entities are generated:
+way only: database to entities. Migrations are hand-written, entities are generated:
 
 1. `sea-orm-cli migrate generate add_org_to_users` is how a migration file is created: it
    writes the timestamped file under `migration/src/` and registers it in `migration/src/lib.rs`

@@ -21,7 +21,7 @@ bold label, and `-> ` followed by a backticked skill name on every should-not-lo
 **Should load**
 
 1. <prompt a user would actually type>
-2. ... (five or more, including the Python vocabulary a reader arrives with)
+2. ... (five or more, including the crate and API names a reader arrives with)
 
 **Should not load**
 

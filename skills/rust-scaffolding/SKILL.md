@@ -1,6 +1,6 @@
 ---
 name: rust-scaffolding
-description: "Use when creating a brand-new Rust axum service from nothing — 'create a service that...', an empty directory with no Cargo.toml, a new API or microservice that needs migrations, tests, lints, Docker and CI green from the first commit, or porting a FastAPI app into a fresh repo. Greenfield only. Not for adding a route, entity or test to an existing crate, and not for changing tooling in an existing service (rust-tooling)."
+description: "Use when creating a brand-new Rust axum service from nothing — 'create a service that...', an empty directory with no Cargo.toml, a new API or microservice that needs migrations, tests, lints, Docker and CI green from the first commit, or a repo that still errors with could not find Cargo.toml. Greenfield only. Not for adding a route, entity or test to an existing crate, and not for changing tooling in an existing service (rust-tooling)."
 metadata:
   version: "0.1.0"
 ---
@@ -25,7 +25,7 @@ Assumes Rust 1.98.1 edition 2024, axum 0.8, sea-orm 2.0, utoipa 5, cargo-nextest
 
 `rustup` (the template's `rust-toolchain.toml` fetches 1.98.1 on the first cargo command),
 Docker, `git`, and for `make install-tools`: `cargo-binstall` is installed by the target
-itself, but `uv` must already exist because prek is a Python tool.
+itself, but `uv` must already exist: it is what installs prek.
 
 ## 2. Copy the template and rename the crate
 
@@ -94,8 +94,8 @@ cargo run
 
 Then `curl localhost:8000/health/live`, `curl localhost:8000/health/ready` (a JSON body:
 `status` plus one entry per dependency under `checks`), `localhost:8000/docs` for Swagger
-UI, `/openapi.json` for the document, `/metrics` for Prometheus. Port 8000 is also
-uvicorn's default: if a Python dev server answers, set `APP__SERVER__PORT`.
+UI, `/openapi.json` for the document, `/metrics` for Prometheus. If something else already
+listens on port 8000, set `APP__SERVER__PORT`.
 
 ## 7. Prove the gate is green
 
