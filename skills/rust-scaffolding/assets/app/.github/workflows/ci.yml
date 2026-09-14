@@ -1,0 +1,90 @@
+name: CI
+on: [push, pull_request]
+
+env:
+  CARGO_TERM_COLOR: always
+  # RUSTFLAGS is deliberately not set: it changes cargo's fingerprint and the
+  # rust-cache key, so every step would rebuild. `-D warnings` goes to clippy.
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt, llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-llvm-cov,cargo-machete
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo machete
+
+      - name: Tests and coverage
+        run: cargo llvm-cov --no-report nextest --profile ci --workspace --all-features --locked
+
+      - name: Doctests, which nextest cannot run
+        run: cargo test --doc --workspace --all-features --locked
+
+      - name: Coverage report and gate
+        run: |
+          cargo llvm-cov report --lcov --output-path target/lcov.info \
+            --ignore-filename-regex '(entities|migration)/|main\.rs|telemetry\.rs'
+          cargo llvm-cov report --summary-only --fail-under-lines 80 \
+            --ignore-filename-regex '(entities|migration)/|main\.rs|telemetry\.rs'
+
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit
+          path: target/nextest/ci/junit.xml
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov
+          path: target/lcov.info
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
+  docs:
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # A fixed key shared across runs of this job, which has its own
+          # RUSTDOCFLAGS and therefore its own artifacts.
+          shared-key: docs
+      - run: cargo doc --no-deps --workspace --all-features --locked

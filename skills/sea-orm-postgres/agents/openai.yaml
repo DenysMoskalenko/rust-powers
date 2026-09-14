@@ -1,0 +1,6 @@
+interface:
+  display_name: "sea-orm Postgres"
+  short_description: "Entities, migrations, queries and test databases with sea-orm 2.0"
+
+policy:
+  allow_implicit_invocation: true

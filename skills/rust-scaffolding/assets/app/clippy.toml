@@ -1,0 +1,14 @@
+# Levels live in Cargo.toml's [lints]; only thresholds belong here.
+
+# `unwrap_used` / `expect_used` stay on for src/, off inside test functions.
+# NOTE: this covers the body of a `#[test]` fn only. A helper in
+# tests/common/mod.rs still warns and needs its own `#![allow(...)]`.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
+
+# The default of 25 lets a genuinely tangled function through.
+cognitive-complexity-threshold = 15
+# Past five arguments, pass a struct.
+too-many-arguments-threshold = 5

@@ -1,0 +1,26 @@
+default_job = "clippy"
+
+[jobs.check]
+command = ["cargo", "check", "--workspace", "--all-targets", "--color", "always"]
+need_stdout = false
+
+[jobs.clippy]
+command = ["cargo", "clippy", "--workspace", "--all-targets", "--all-features", "--color", "always"]
+need_stdout = false
+
+[jobs.nextest]
+command = [
+    "cargo", "nextest", "run", "--workspace",
+    "--hide-progress-bar", "--failure-output", "final",
+]
+need_stdout = true
+analyzer = "nextest"
+
+[jobs.doc]
+command = ["cargo", "doc", "--no-deps", "--color", "always"]
+need_stdout = false
+
+[keybindings]
+c = "job:clippy"
+n = "job:nextest"
+d = "job:doc"

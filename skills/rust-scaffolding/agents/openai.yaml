@@ -1,0 +1,6 @@
+interface:
+  display_name: "Rust Scaffolding"
+  short_description: "Stand up a new axum service from the bundled template"
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,32 @@
+{
+  "name": "rust-powers",
+  "owner": {
+    "name": "Denys Moskalenko",
+    "email": "denysmoskalenko11@gmail.com"
+  },
+  "metadata": {
+    "description": "Reusable Rust, axum, sea-orm, PostgreSQL, testing, telemetry, tooling, project scaffolding, NATS messaging, Redis caching, and AI-agent engineering skills",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "rust-powers",
+      "source": "./",
+      "description": "Reusable engineering skills for Rust 1.98 edition 2024, axum, sea-orm, PostgreSQL, nextest, cargo tooling, OpenTelemetry, NATS, Redis, and rig agents, plus greenfield service scaffolding.",
+      "category": "developer-tools",
+      "tags": [
+        "rust",
+        "axum",
+        "sea-orm",
+        "postgres",
+        "testing",
+        "opentelemetry",
+        "nats",
+        "redis",
+        "ai-agents",
+        "rig",
+        "scaffolding"
+      ]
+    }
+  ]
+}

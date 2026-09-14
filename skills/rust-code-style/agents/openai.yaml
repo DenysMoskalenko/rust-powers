@@ -1,0 +1,6 @@
+interface:
+  display_name: "Rust Code Style"
+  short_description: "Ownership, errors, types and async discipline for Rust services"
+
+policy:
+  allow_implicit_invocation: true

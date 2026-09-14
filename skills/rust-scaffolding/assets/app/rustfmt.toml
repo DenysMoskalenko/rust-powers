@@ -1,0 +1,6 @@
+edition = "2024"          # for a bare `rustfmt file.rs`, which has no cargo to ask
+style_edition = "2024"    # the knob cargo fmt actually reads for formatting rules
+max_width = 100
+use_field_init_shorthand = true
+use_try_shorthand = true
+newline_style = "Unix"
