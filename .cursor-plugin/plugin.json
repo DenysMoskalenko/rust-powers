@@ -1,7 +1,7 @@
 {
   "name": "rust-powers",
   "displayName": "Rust Powers",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Reusable Rust, axum, sea-orm, PostgreSQL, testing, telemetry, tooling, project scaffolding, NATS messaging, Redis caching, and AI-agent engineering skills.",
   "author": {
     "name": "Denys Moskalenko",

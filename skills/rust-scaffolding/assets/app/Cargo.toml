@@ -13,6 +13,12 @@ members = ["migration"]   # created by `sea-orm-cli migrate init`
 [lints]
 workspace = true
 
+# Dependencies compile without debuginfo: target/ is about a third smaller and
+# links faster. Your own crates keep full debuginfo, so backtraces into them still
+# carry line numbers.
+[profile.dev.package."*"]
+debug = false
+
 [dependencies]
 # runtime + web
 tokio = { version = "1.53", features = ["full"] }

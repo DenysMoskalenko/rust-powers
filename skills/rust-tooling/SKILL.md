@@ -2,7 +2,7 @@
 name: rust-tooling
 description: "Use when changing the tooling of an existing Rust service — rust-toolchain.toml, cargo add and the lockfile, the workspace lints table, clippy.toml and rustfmt.toml, nextest and llvm-cov configuration, cargo-deny, cargo-machete, bacon, prek hooks, the Makefile, Dockerfile, docker-compose, CI jobs, unknown lint warnings, a failing cargo deny check. Not for a brand-new repository (rust-scaffolding), fixing one clippy finding (rust-code-style), or writing tests and deciding what coverage measures (rust-testing)."
 metadata:
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Rust Tooling
@@ -36,6 +36,7 @@ what coverage should exclude (`rust-testing`); the Postgres container and per-te
 | Find duplicate versions | `cargo tree -d` |
 | Install the cargo tools | `make install-tools` |
 | Run the hooks over everything | `prek run --all-files` |
+| Reclaim disk from `target/` | `cargo clean`; deps build without debuginfo (`references/configs.md`) |
 
 ## Toolchain
 

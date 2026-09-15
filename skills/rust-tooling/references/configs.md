@@ -8,6 +8,7 @@ comment explains a choice that is not obvious from the key name.
 - [rust-toolchain.toml](#rust-toolchaintoml)
 - [Cargo.toml — the lints table](#cargotoml--the-lints-table)
 - [Cargo.toml — cargo-machete exemptions](#cargotoml--cargo-machete-exemptions)
+- [Cargo.toml — the dev profile](#cargotoml--the-dev-profile)
 - [clippy.toml](#clippytoml)
 - [rustfmt.toml](#rustfmttoml)
 - [.config/nextest.toml](#confignextesttoml)
@@ -89,6 +90,26 @@ ignored = ["bon", "derive_more", "itertools", "rust_decimal", "strum", "tokio-st
 The list is the template's: crates the stack ships for code not yet written, plus one reachable only
 through a feature. Delete a name when you start using that crate. Add a new name only after deleting the
 dependency line and watching the build fail, with a comment naming the path that makes it reachable.
+
+## Cargo.toml — the dev profile
+
+```toml
+# Dependencies compile without debuginfo: target/ is about a third smaller and
+# links faster. Your own crates keep full debuginfo, so backtraces into them still
+# carry line numbers.
+[profile.dev.package."*"]
+debug = false
+```
+
+Profiles are read from the root manifest only; cargo ignores one in a member. The `test` profile inherits
+from `dev`, so `cargo nextest run` gets the same setting. On the scaffold's ~900-crate dependency tree a clean
+`cargo build --workspace --all-targets` went from 3.1 GB to 2.1 GB and from 84 s to 71 s (rustc 1.98.1, 15 September 2026).
+
+`target/` never shrinks on its own: cargo keeps every artifact from every dependency version, feature set and
+toolchain it has ever built there. When `du -sh target` surprises you, `cargo clean` is the whole remedy;
+the next build re-fetches nothing, because the sources stay in the global cache. Cargo's own `cargo clean gc`
+size limits (`--max-crate-size` and friends) are nightly-only in 1.98 and clean only that global cache under
+`~/.cargo`, never `target/`.
 
 ## clippy.toml
 

@@ -107,3 +107,21 @@ cargo-chef.
 - Copying the lint tables into `migration/Cargo.toml`.
 - `#![deny(...)]` or `#![warn(...)]` attributes in `migration/src/lib.rs`.
 - A `RUSTFLAGS`-based fix.
+
+### Eval 6 - target/ eats the disk
+
+**Prompt**: `target/` in this service is 22 GB. Cargo has a max-size option, doesn't it? Configure it.
+
+**Must produce**:
+
+- `cargo clean gc --max-*-size` is nightly-only in 1.98 and cleans the global cache under `~/.cargo`, never
+  `target/`; the stable `cache.auto-clean-frequency` is already on and also only touches the global cache.
+- `[profile.dev.package."*"] debug = false` in the root `Cargo.toml`, matching `references/configs.md`, with
+  the note that the service's own crates keep full debuginfo.
+- `cargo clean` as the way to reclaim what is already there.
+
+**Must not produce**:
+
+- `-Zgc` or `cargo clean gc` flags on the pinned stable toolchain.
+- A `[profile.*]` table in `migration/Cargo.toml`.
+- Disabling `Swatinem/rust-cache` or adding `cargo clean` to CI.
