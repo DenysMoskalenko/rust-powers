@@ -109,8 +109,10 @@ The bump itself is AGENTS.md `## Versions`; the order across a release:
 4. Skill pin lines, correction-table rows, snippets.
 5. `evals/<skill>.md` in the same commit whenever what a good answer looks like changed.
 6. `metadata.version` in every skill whose teaching changed: patch for wording, minor for an API change.
-7. The release `version` in the three `plugin.json` manifests and `.claude-plugin/marketplace.json`
-   `metadata.version`; a toolchain bump also edits `Rust 1.98 edition 2024` in the `marketplace.json`
+7. The release `version` in the three `plugin.json` manifests and both version fields of
+   `.claude-plugin/marketplace.json` (top-level `version` and `metadata.version`); installed plugins
+   auto-update only when it changes, and `validate_skills.py --base` fails a pull request that
+   changes `skills/` without it; a toolchain bump also edits `Rust 1.98 edition 2024` in the `marketplace.json`
    plugin `description` and `.codex-plugin/plugin.json` `interface.longDescription`; README only if it
    names the version.
 
@@ -138,7 +140,8 @@ cap: trim before adding. Never edit `verify/`; it is regenerated.
 An independent, fresh-context review of the diff against the inventory table: every (b) and (c) row
 has exactly one edit, no edit lacks a row. Show the complete diff; the pull request opens only on
 the owner's explicit approval, its body the inventory table plus what was verified. After merge, tag
-`vX.Y.Z` matching the manifests and update the `Decided` and `Re-validated on` date lines in STACK.md.
+`rust-powers--vX.Y.Z` matching the manifests (`claude plugin tag --push`, the name Claude Code's
+dependency resolution looks for) and update the `Decided` and `Re-validated on` date lines in STACK.md.
 
 ## Red Flags — STOP
 

@@ -38,7 +38,7 @@ owned by `axum-service` and implemented in the scaffold.
 ## House Conventions
 
 **Frontmatter.** Exactly `name`, `description`, and `metadata` with a `version` line
-(`"0.1.0"` today; bump it when the skill's behaviour changes). `name` is lowercase
+(bumped with every change to the skill, together with the plugin version; see step 6 below). `name` is lowercase
 kebab-case and identical to its directory name, 64 characters or fewer, and never contains
 `claude` or `anthropic`. No `<`, `>`, or `#` anywhere in frontmatter - they break Codex and
 Cursor discovery.
@@ -53,11 +53,28 @@ triggering mechanism - it is loaded for every session while the body is not, so 
 more editing time than any other line in the skill.
 
 **Budgets and shape.** `SKILL.md` targets 250 lines and 1500 words; 300 lines and 2000 words
-is the hard cap that fails validation. Open with a one-line version pin naming only the
-crates that skill touches, then a `## Important` block of three to five non-negotiable
-bullets. Discipline skills end with a `## Red Flags — STOP` table and, where one exists, a
+is the hard cap that fails validation. Claude Code keeps only the first 5,000 tokens of an
+invoked skill after compaction, and a SKILL.md runs about 2.5 bytes per token, so size is
+measured in tokens as well as words. Open with a one-line version pin naming only the crates
+that skill touches, then the scope block below, then a `## Important` block of three to five
+non-negotiable bullets, then the `## References` index, so the index survives compaction.
+Discipline skills end with a `## Red Flags — STOP` table and, where one exists, a
 prior-version correction table (sea-orm 1.x to 2.0, axum 0.7 to 0.8, edition 2021 to 2024).
 Technique skills - `rust-tooling`, `rust-scaffolding` - have neither.
+
+**Scope block.** Current models apply rules literally, including to code a task did not ask
+them to change. Every skill except the greenfield `rust-scaffolding` carries this paragraph
+verbatim after its version pin:
+
+> Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come from the rust-scaffolding template. In a project built differently, use its own types, helpers and tooling, map outcomes onto its nearest existing error variant, and say so when none fits instead of adding one. Apply these rules to new code; when editing existing code, keep its public contract and tuned configuration and report differences instead of rewriting, unless asked. If `Cargo.lock` pins another major or minor version than the line above, follow the project and say which rules may not apply.
+
+**What earns a place in `## Important` and Red Flags.** A failure that reproduces on a model the
+skills support: an eval case where the skill makes a difference, or a recorded incident. House
+conventions the model cannot guess and API facts newer than its training usually qualify;
+general practice a current model already follows usually does not. The skills target current
+models first (Opus 5.5, Fable 5.1, GPT-6) and must keep working on older ones, so general
+advice that only older models need moves to a one-line Red Flags row rather than disappearing.
+Say each rule once, give its reason in one clause, and prefer what to do over what to avoid.
 
 **References.** One level deep under `references/`, plural, no size cap. A reference over
 100 lines needs a `Contents` heading or an anchor list in its first 20 lines. Every
@@ -97,10 +114,17 @@ skill's own version-pin line, not in a pointer to `STACK.md`.
 ## Evaluation Scenarios
 
 Every skill has `evals/<skill>.md` at the repository root. It holds one `### Triggering`
-block - five prompts that should load the skill, five that should not, each of those naming
-the skill that should win instead - and at least three `Eval N` blocks of Prompt / Must
-produce / Must not produce. `evals/README.md` has the exact format, and the validator parses
-it. An eval never contradicts the skill it tests or a sibling skill.
+block - prompts that should load the skill, and near misses that should not, each of those
+naming the skill that should win instead - at least three `Eval N` blocks of Prompt / Must
+produce / Must not produce, and `Probe N` blocks that each test one rule with a wrong-answer
+regex. `evals/README.md` has the exact format, and the validator parses it. An eval never
+contradicts the skill it tests or a sibling skill.
+
+`make evals` generates `claude plugin eval` cases from these files into the gitignored
+`evals/.run/` and runs every eval and probe with and without the plugin, so each case reports
+what the skill adds. Runs are billed model calls: run the suite before a release, when a new
+model ships, and after a description change, never in CI. Keep the per-case summary that
+justifies an `## Important` bullet or a Red Flags row under `maintenance/`.
 
 A behaviour change that changes what a good agent response looks like updates the matching
 eval file in the same commit. Drafts written while authoring live in `tmp/evals/` and are
@@ -118,11 +142,13 @@ three allowed keys with `metadata.version` present, `name` matches its directory
 description is double-quoted, at most 75 words and free of forbidden characters, line and
 word budgets, no skill `README.md` or `scripts/`, reference depth and TOCs, no reference-to-reference
 links, fence tags in the allowed set, the `## References` index, `agents/openai.yaml`
-presence, `evals/<skill>.md` presence and format, no repository plumbing in skill text, and
+presence, `evals/<skill>.md` presence and format, no repository plumbing and no Python in
+skill text, equal versions in every plugin manifest, no build output inside `skills/`, and
 that the `[dependencies]`, `[dev-dependencies]`, and `[workspace.lints]` tables in
 `skills/rust-scaffolding/assets/app/Cargo.toml` still match STACK.md's `## Cargo.toml`
 block. Warnings do not fail; errors exit 1. `--strict` promotes a missing eval file to an
-error, `--json` emits findings as JSON.
+error, `--json` emits findings as JSON, and `--base <ref>` fails when a skill changed since
+that ref without a version bump (CI passes the pull request's base branch).
 
 `make snippets` runs `scripts/check_snippets.py`: it deletes and regenerates `verify/` as a
 copy of `skills/rust-scaffolding/assets/app/`, writes every `rust,verify` block into
@@ -137,7 +163,10 @@ The database-backed tests need either a running Docker daemon - testcontainers s
 Postgres 18-alpine - or `TEST_DATABASE_URL` pointing at a Postgres where the test user may
 create databases. Without one of those, use `--skip-tests` and say so in your report.
 
-`verify/` is generated and gitignored. Never edit it; edit the markdown and re-run.
+`verify/` is generated and gitignored. Never edit it; edit the markdown and re-run. The
+Makefile builds into `$CARGO_TARGET_DIR`, by default `rust-powers-target` in the system temp
+directory, because the plugin root is the repository root and a local install copies it whole;
+never leave a `target/` inside the repository.
 
 `make lint` runs `prek run --all-files` for whitespace, JSON, TOML, and YAML hygiene.
 
@@ -156,9 +185,13 @@ create databases. Without one of those, use `--skip-tests` and say so in your re
 4. **Evals.** Add or update `evals/<skill>.md` in the same change.
 5. **`make check`.** Green before review. Without Docker or `TEST_DATABASE_URL`, run
    `python3 scripts/check_snippets.py --skip-tests` and report that the test leg was skipped.
-6. **Review.** Re-read the changed section end to end. Verify every relative path you touched
-   exists. Update the plugin manifests (`.claude-plugin/`, `.codex-plugin/`,
-   `.cursor-plugin/`) only when the change alters what the plugin advertises.
+6. **Version.** Any change under `skills/<name>/` bumps that skill's `metadata.version` and the
+   `version` in every plugin manifest (`.claude-plugin/plugin.json`, both version fields of
+   `.claude-plugin/marketplace.json`, `.codex-plugin/plugin.json`,
+   `.cursor-plugin/plugin.json`). Installed plugins auto-update only when that version changes.
+7. **Review.** Re-read the changed section end to end. Verify every relative path you touched
+   exists. Update the rest of the plugin manifests only when the change alters what the
+   plugin advertises.
 
 ## Versions
 

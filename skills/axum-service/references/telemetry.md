@@ -36,20 +36,22 @@ Instrument the function that does the work, not every layer it passes through. `
 already opens a span per request, so a handler that extracts and delegates adds nothing but noise.
 
 ```rust
-#[instrument(skip_all, fields(user_id = %id), err)]
+#[instrument(skip_all, fields(user_id = %id))]
 pub async fn deactivate(db: &DatabaseConnection, id: Uuid, reason: &SecretString)
     -> Result<(), AppError>
 ```
 
 - **`skip_all` plus explicit `fields(..)`**, not `skip(db)`: with `skip`, an argument added later
   silently becomes a field. Connections, pools, clients, bodies and credentials stay out.
-- **`%` is `Display`, `?` is `Debug`.** `%` on a `SecretString` prints the secret — `secrecy` redacts
-  `Debug` only. Never `%` a token, password or `Authorization` header, and never field a whole body.
+- **`%` is `Display`, `?` is `Debug`.** `SecretString` has no `Display`, so `%secret` does not
+  compile, and its `Debug` prints `[REDACTED]`; the leak is `%secret.expose_secret()`. Never field
+  an exposed secret, a token, a password or an `Authorization` header, and never a whole body.
 - **`err` emits only on `Err`**, at ERROR, formatted with `Display`. `err(Debug)` gives the whole
-  chain; `err(level = Level::INFO)` lowers an expected failure such as a 404. It belongs on a
-  service function like `deactivate` above, never on a handler returning `AppError`:
-  `into_response` already logs every 5xx once, so `err` on the handler double-logs those and
-  records each 404 and 422 as an error event.
+  chain; `err(level = Level::INFO)` lowers an expected failure. It belongs only where an error
+  never reaches `into_response`: a background task, a queue worker, a startup step.
+  `into_response` already logs every 5xx once, so `err` on a handler, or on a function returning
+  `AppError` like `deactivate` above, logs those twice and records each 404 and 422 as an error
+  event.
 - **The field name `error` is load-bearing.** tracing-opentelemetry turns an event into an OTel
   `exception` only when it carries a field named `error` *and* has an empty message, so
   `#[instrument(err)]` and `tracing::error!(error = %e);` both produce one while
@@ -347,7 +349,8 @@ on log content; the two attributes conflict because both install a subscriber.
 | Call `tracing_subscriber::…init()` or `global::set_*` outside `telemetry::init`, or `PrometheusMetricLayer::pair()` outside `build_router` | One wiring point each — the second subscriber silently loses, the second recorder panics |
 | Layer a second HTTP tracing layer next to `OtelAxumLayer` | Two server spans per request — the two Otel layers are the only HTTP span source |
 | Write `#[instrument]` with no `skip_all` on a function taking a pool, client or credential | Every argument becomes a field |
-| `%` a `SecretString`, token or header value | `secrecy` redacts `Debug` only |
+| `%` or `?` an `.expose_secret()`, a token or a header value | The value itself is recorded; a bare `SecretString` has no `Display` and a redacted `Debug` |
+| Put `err` on a function whose `AppError` reaches `into_response` | Each 5xx is logged twice and each 404 becomes an error event |
 | Call `guard.shutdown()` before `axum::serve` returns, or not at all | The spans of in-flight requests are lost |
 | Build a `reqwest::Client` for one outbound call | No `traceparent` — use the client in `AppState` |
 | Add `.with_sampler(..)`, `.with_service_name(..)` or the `rt-tokio` feature | The first two override env vars; the third has not been the cause since 0.32 |

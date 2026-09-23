@@ -189,7 +189,7 @@ A KV bucket is a stream named `KV_<bucket>` with a key-value facade: `put` retur
 current value; `watch_with_history(key)` (and `watch_many_with_history`) delivers the current
 value of each matching key first, then every change. `history: 1` makes it a last-value cache;
 higher keeps revisions. This is what replaces "Redis for feature flags": a flag reader uses
-`watch_with_history`, or one `get` followed by `watch`. For an actual cache with TTLs see
+`watch_with_history`; a `get` followed by `watch` loses any change made between the two calls. For an actual cache with TTLs see
 `rust-redis`.
 
 ```rust,verify

@@ -283,16 +283,26 @@ pub async fn run(stream: stream::Stream, durable: String, mut stop: watch::Recei
             Ok(consumer) => consume(consumer, &mut stop).await,
             Err(err) => Err(err),
         };
-        if let Err(err) = result {
-            tracing::error!(%err, ?backoff, "consumer stopped; reopening");
-            // The pause ends early on shutdown: a plain `sleep` would hold the
-            // join for up to 30 s. `Ok` means the watch changed or was dropped.
-            if timeout(backoff, stop.changed()).await.is_ok() {
-                return;
-            }
-            // ponytail: never resets; 30 s is an acceptable worst case.
-            backoff = (backoff * 2).min(Duration::from_secs(30));
+        // `Ok` only on shutdown: the watch changed or its sender was dropped,
+        // and a dropped sender never flips the flag the `while` reads.
+        let Err(err) = result else { break };
+        tracing::error!(%err, ?backoff, "consumer stopped; reopening");
+        // The pause ends early on shutdown: a plain `sleep` would hold the
+        // join for up to 30 s. `Ok` means the watch changed or was dropped.
+        if timeout(backoff, stop.changed()).await.is_ok() {
+            break;
         }
+        // ponytail: never resets; 30 s is an acceptable worst case.
+        backoff = (backoff * 2).min(Duration::from_secs(30));
+    }
+    warn_if_orphaned(&stop);
+}
+
+/// Nobody can stop the worker any more, so nobody meant it to end: a stop
+/// sender dropped by mistake, such as a discarded `start(..)` result.
+fn warn_if_orphaned(stop: &watch::Receiver<bool>) {
+    if !*stop.borrow() {
+        tracing::error!("stop sender dropped; worker exiting");
     }
 }
 
@@ -306,9 +316,9 @@ async fn consume(consumer: PullConsumer, stop: &mut watch::Receiver<bool>) -> an
         };
         let message = match next {
             Some(Ok(message)) => message,
-            // The first `Err` is terminal for this stream (`ConsumerDeleted`,
-            // `NoResponders`, `MissingHeartbeat`, `Pull`): after it the stream
-            // stays pending, so return and let `run` rebuild the consumer.
+            // After `ConsumerDeleted` the stream ends; after `NoResponders`,
+            // `MissingHeartbeat` or `Pull` it stays pending; either way `run`
+            // rebuilds the consumer.
             Some(Err(err)) => return Err(err.into()),
             None => anyhow::bail!("message stream ended"),
         };
@@ -391,7 +401,11 @@ use std::time::Duration;
 use async_nats::{
     ConnectOptions, Event,
     connection::State,
-    jetstream::{self, consumer::pull, stream},
+    jetstream::{
+        self,
+        consumer::{AckPolicy, pull},
+        stream,
+    },
 };
 use tokio::{sync::watch, time::timeout};
 use tokio_stream::StreamExt as _;
@@ -491,11 +505,23 @@ pub async fn start(nats_url: &str) -> anyhow::Result<Messaging> {
 async fn worker(stream: stream::Stream, mut stop: watch::Receiver<bool>) {
     let mut backoff = Duration::from_secs(1);
     while !*stop.borrow() {
-        if let Err(err) = consume(&stream, &mut stop).await {
-            tracing::error!(%err, ?backoff, "consumer stopped; reopening");
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(Duration::from_secs(30));
+        // `Ok` only on shutdown, a dropped sender included; looping on it would spin.
+        let Err(err) = consume(&stream, &mut stop).await else { break };
+        tracing::error!(%err, ?backoff, "consumer stopped; reopening");
+        // Not a bare `sleep`: the pause ends as soon as the stop signal flips.
+        if timeout(backoff, stop.changed()).await.is_ok() {
+            break;
         }
+        backoff = (backoff * 2).min(Duration::from_secs(30));
+    }
+    warn_if_orphaned(&stop);
+}
+
+/// Nobody can stop the worker any more, so nobody meant it to end: a stop
+/// sender dropped by mistake, such as a discarded `start(..)` result.
+fn warn_if_orphaned(stop: &watch::Receiver<bool>) {
+    if !*stop.borrow() {
+        tracing::error!("stop sender dropped; worker exiting");
     }
 }
 
@@ -505,6 +531,11 @@ async fn consume(stream: &stream::Stream, stop: &mut watch::Receiver<bool>) -> a
             "orders-worker",
             pull::Config {
                 durable_name: Some("orders-worker".to_owned()),
+                ack_policy: AckPolicy::Explicit,
+                ack_wait: Duration::from_secs(30),
+                max_deliver: 5,
+                filter_subject: "orders.placed.*".to_owned(),
+                max_ack_pending: 256,
                 ..Default::default()
             },
         )

@@ -1,7 +1,8 @@
 # Configuration files, verbatim
 
-Every file below lives at the repository root unless the heading says otherwise. Copy them as they are; each
-comment explains a choice that is not obvious from the key name.
+Every file below lives at the repository root unless the heading says otherwise. In a new repository copy them
+as they are; in an existing one merge only the entries the change needs into its own files, keeping its tuned
+values. Each comment explains a choice that is not obvious from the key name.
 
 ## Contents
 
@@ -317,7 +318,7 @@ repos:
         pass_filenames: false
       - id: clippy
         name: cargo clippy
-        entry: cargo clippy --all-targets --all-features -- -D warnings
+        entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false
@@ -355,8 +356,7 @@ Cargo has no script section, so the Makefile is the task runner and the single e
 
 install-tools:
 	cargo install cargo-binstall
-	cargo binstall -y cargo-nextest cargo-llvm-cov cargo-deny cargo-machete cargo-chef bacon cargo-insta sea-orm-cli
-	uv tool install prek
+	cargo binstall -y cargo-nextest cargo-llvm-cov cargo-deny cargo-machete cargo-chef bacon cargo-insta sea-orm-cli prek
 	prek install
 
 fmt:
@@ -400,9 +400,9 @@ and nextest never runs a member's tests, so the Makefile and CI stop agreeing wi
 
 `cov` writes `target/lcov.info` **before** the gate runs, because `--fail-under-lines` exits non-zero and make
 stops at the first failing line: with the two in the other order a failing gate leaves no report to look at.
-`--fail-under-lines` is the number, `--ignore-filename-regex` is the denominator — keep both in this one place
-so the Makefile and CI cannot drift apart. For which files to exclude and why, see `rust-testing`;
-a regex that excludes everything reports zero lines and the gate can no longer pass.
+`--fail-under-lines` is the number, `--ignore-filename-regex` is the denominator — CI's coverage step repeats
+both, so change the two together or the Makefile and CI drift apart. For which files to exclude and why, see
+`rust-testing`; a regex that excludes everything reports zero lines and the gate can no longer pass.
 
 Snapshot review is part of the same loop: `cargo insta review` walks the `.snap.new` files interactively,
 `cargo insta accept` takes them all, and `cargo insta reject` discards them. `*.pending-snap` belongs in

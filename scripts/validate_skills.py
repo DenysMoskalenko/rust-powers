@@ -5,14 +5,16 @@ Stdlib only, Python 3.11+. Prints `file:line: LEVEL: message`.
 Exit 1 if any ERROR was found; warnings alone exit 0.
 
 Usage:
-    python3 scripts/validate_skills.py [--json] [--strict]
+    python3 scripts/validate_skills.py [--json] [--strict] [--base REF]
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -61,7 +63,7 @@ ALLOWED_FENCES = {
 
 # Repository plumbing must not leak into skill bodies. No skill is exempt: a skill is read
 # inside somebody else's project, where none of these paths exist.
-REPO_PATH_PATTERNS = ["tmp/research", "tmp/evals", "verify/", "scripts/validate_skills", "scripts/check_snippets", "STACK.md"]
+REPO_PATH_PATTERNS = ["tmp/research", "tmp/evals", "verify/", "evals/", "make evals", "scripts/validate_skills", "scripts/check_snippets", "scripts/build_eval_cases", "STACK.md"]
 
 # Cargo.toml sections that must match STACK.md verbatim.
 PINNED_CARGO_SECTIONS = ("[dependencies]", "[dev-dependencies]", "[workspace.lints.rust]", "[workspace.lints.clippy]")
@@ -77,6 +79,22 @@ EVAL_SHOULD_NOT_LOAD_RE = re.compile(r"^\*\*Should not load\*\*\s*$", re.MULTILI
 EVAL_HEADING_RE = re.compile(r"^### Eval (\d+) - \S", re.MULTILINE)
 EVAL_NUMBERED_RE = re.compile(r"^\d+\. \S")
 EVAL_WINNER_RE = re.compile(r"-> `[a-z0-9-]+`")
+PROBE_SPLIT_RE = re.compile(r"^### Probe \d+ - .*$", re.MULTILINE)
+FIXTURE_RE = re.compile(r"^\*\*Fixture\*\*:(.*)$", re.MULTILINE)
+WRONG_ANSWER_RE = re.compile(r"^\*\*Wrong answer\*\*: `.+`\s*$", re.MULTILINE)
+FIXTURES = {"scaffold", "empty"}
+
+# The skill set does not talk about Python (settled 2026-09-14); these words are how it slips back in.
+PYTHON_WORDS_RE = re.compile(r"\b(python|pytest|fastapi|pydantic|polyfactory|uv)\b|lambda:|monkey-?patch", re.IGNORECASE)
+
+# Every manifest carries the same release version; Claude Code ships an update only when it changes.
+MANIFESTS = (
+    (ROOT / ".claude-plugin" / "plugin.json", ("version",)),
+    (ROOT / ".claude-plugin" / "marketplace.json", ("version",)),
+    (ROOT / ".claude-plugin" / "marketplace.json", ("metadata", "version")),
+    (ROOT / ".codex-plugin" / "plugin.json", ("version",)),
+    (ROOT / ".cursor-plugin" / "plugin.json", ("version",)),
+)
 
 
 @dataclass
@@ -290,10 +308,19 @@ def check_eval_file(path: Path, report: Report) -> None:
     evals = EVAL_HEADING_RE.findall(text)
     if len(evals) < 3:
         report.error(path, 1, f"needs at least three '### Eval N - <name>' blocks, found {len(evals)}")
-    for n, section in enumerate(re.split(r"^### Eval \d+ - .*$", text, flags=re.MULTILINE)[1:], start=1):
+    eval_part = PROBE_SPLIT_RE.split(text)[0]
+    for n, section in enumerate(re.split(r"^### Eval \d+ - .*$", eval_part, flags=re.MULTILINE)[1:], start=1):
         for label in ("**Prompt**:", "**Must produce**:", "**Must not produce**:"):
             if label not in section:
                 report.error(path, 1, f"Eval {n} is missing the {label!r} line")
+    for n, section in enumerate(PROBE_SPLIT_RE.split(text)[1:], start=1):
+        if "**Prompt**:" not in section:
+            report.error(path, 1, f"Probe {n} is missing the '**Prompt**:' line")
+        if not WRONG_ANSWER_RE.search(section):
+            report.error(path, 1, f"Probe {n} needs a '**Wrong answer**: `<regex>`' line")
+    for m in FIXTURE_RE.finditer(text):
+        if m.group(1).strip() not in FIXTURES:
+            report.error(path, text[: m.start()].count("\n") + 1, f"**Fixture** must be one of {sorted(FIXTURES)}")
 
 
 def check_repo_paths(path: Path, lines: list[str], report: Report) -> None:
@@ -301,6 +328,8 @@ def check_repo_paths(path: Path, lines: list[str], report: Report) -> None:
         for pattern in REPO_PATH_PATTERNS:
             if pattern in raw:
                 report.error(path, idx, f"skill content must not mention repository plumbing {pattern!r}")
+        if m := PYTHON_WORDS_RE.search(raw):
+            report.error(path, idx, f"skill content must not talk about Python ({m.group(0)!r})")
 
 
 def check_references(skill_dir: Path, skill_md: Path, body: str, report: Report) -> None:
@@ -358,6 +387,10 @@ def validate_skill(skill_dir: Path, report: Report, strict: bool) -> None:
         report.error(skill_dir / "reference", 1, "supporting material goes in 'references/' (plural), not 'reference/'")
     if not (skill_dir / "agents" / "openai.yaml").is_file():
         report.error(skill_dir / "agents" / "openai.yaml", 1, "missing agents/openai.yaml (Codex per-skill metadata)")
+    for dirpath, dirnames, _ in os.walk(skill_dir):
+        if "target" in dirnames:
+            dirnames.remove("target")
+            report.warn(Path(dirpath) / "target", 1, "build output inside a skill: local plugin installs copy it and `claude plugin eval` refuses its hard links; delete it")
 
     eval_file = EVALS / f"{skill_dir.name}.md"
     if not eval_file.is_file():
@@ -440,6 +473,60 @@ def check_cargo_parity(report: Report) -> None:
             report.error(SCAFFOLD_CARGO, 1, f"{section}: scaffold has `{line}` which STACK.md does not pin")
 
 
+# --------------------------------------------------------------------------- release versions
+
+
+def manifest_version(text: str, keys: tuple[str, ...]) -> str | None:
+    value = json.loads(text)
+    for key in keys:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def check_manifest_versions(report: Report) -> None:
+    seen: dict[str, list[str]] = {}
+    for path, keys in MANIFESTS:
+        if not path.is_file():
+            report.error(path, 1, "plugin manifest is missing")
+            continue
+        version = manifest_version(path.read_text(encoding="utf-8"), keys)
+        if version is None:
+            report.error(path, 1, f"no version at {'.'.join(keys)}")
+            continue
+        seen.setdefault(version, []).append(f"{path.relative_to(ROOT)}:{'.'.join(keys)}")
+    if len(seen) > 1:
+        report.error(ROOT / ".claude-plugin" / "plugin.json", 1, f"manifest versions disagree: {seen}")
+
+
+def git_show(ref: str, rel: str) -> str | None:
+    result = subprocess.run(["git", "show", f"{ref}:{rel}"], cwd=ROOT, capture_output=True, text=True)
+    return result.stdout if result.returncode == 0 else None
+
+
+def check_version_bumps(report: Report, base: str) -> None:
+    """A change under skills/<name>/ must bump that skill's metadata.version and the plugin version."""
+    diff = subprocess.run(["git", "diff", "--name-only", base, "--", "skills/"], cwd=ROOT, capture_output=True, text=True)
+    if diff.returncode != 0:
+        report.error(ROOT, 1, f"git diff against {base!r} failed: {diff.stderr.strip()}")
+        return
+    changed = sorted({Path(p).parts[1] for p in diff.stdout.split() if len(Path(p).parts) > 2})
+    for name in changed:
+        rel = f"skills/{name}/SKILL.md"
+        old = git_show(base, rel)
+        path = ROOT / rel
+        if old is None or not path.is_file():
+            continue
+        version_re = re.compile(r"^  version: *(.+)$", re.MULTILINE)
+        before, after = version_re.search(old), version_re.search(path.read_text(encoding="utf-8"))
+        if before and after and before.group(1) == after.group(1):
+            report.error(path, 1, f"skills/{name}/ changed since {base} but metadata.version is still {after.group(1)}")
+    if changed:
+        rel = ".claude-plugin/plugin.json"
+        old = git_show(base, rel)
+        if old is not None and manifest_version(old, ("version",)) == manifest_version((ROOT / rel).read_text(encoding="utf-8"), ("version",)):
+            report.error(ROOT / rel, 1, f"skills/ changed since {base} but the plugin version did not: Claude Code ships updates only on a version change")
+
+
 # --------------------------------------------------------------------------- main
 
 
@@ -447,6 +534,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit findings as JSON")
     parser.add_argument("--strict", action="store_true", help="treat missing evals/<skill>.md as an error")
+    parser.add_argument("--base", metavar="REF", help="require version bumps for skills changed since this git ref")
     args = parser.parse_args()
 
     report = Report()
@@ -458,6 +546,9 @@ def main() -> int:
     for skill_dir in skill_dirs:
         validate_skill(skill_dir, report, args.strict)
     check_cargo_parity(report)
+    check_manifest_versions(report)
+    if args.base:
+        check_version_bumps(report, args.base)
 
     if args.json:
         print(json.dumps([asdict(f) for f in report.findings], indent=2))

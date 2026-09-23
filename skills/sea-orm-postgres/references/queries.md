@@ -10,6 +10,7 @@
 - [Raw SQL](#raw-sql)
 - [Transactions](#transactions)
 - [Advisory locks](#advisory-locks)
+- [Idempotency and the outbox](#idempotency-and-the-outbox)
 
 ## Typed columns
 
@@ -354,6 +355,8 @@ pub async fn create_user<C: ConnectionTrait>(
     })
 }
 
+/// For `POST /users/{user_id}/posts`: the parent id comes from the path, so a
+/// missing parent means the URL names nothing, and 23503 becomes `NotFound`.
 pub async fn create_post<C: ConnectionTrait>(
     db: &C,
     user_id: Uuid,
@@ -378,10 +381,18 @@ pub async fn create_post<C: ConnectionTrait>(
 }
 ```
 
-The service picks the domain outcome — `Conflict` for a duplicate, `NotFound` for a missing parent
-(a body-supplied id that references nothing is closer to "not found" than to "malformed"; a service
-that disagrees maps it to `BadRequest`). Which HTTP status each `AppError` variant renders as, and
-the default the `Db` arm applies when a service returns a bare `DbErr`, are `axum-service`'s.
+The service picks the domain outcome. A duplicate is `Conflict`. For 23503, where the parent id
+came from decides:
+
+- **From the path** (`POST /users/{user_id}/posts`): the URL names a parent that is not there, so
+  the service classifies the violation to `NotFound`, as `create_post` does.
+- **From the body** (`POST /posts` with a `user_id` field): the service does not classify it. The
+  bare `DbErr` goes up and reaches `axum-service`'s 23503 arm, a 422 with the constant body
+  `"invalid reference"`.
+
+Which HTTP status each `AppError` variant renders as, the 23503 arm, and the default the `Db` arm
+applies to any other bare `DbErr` are `axum-service`'s.
+
 Other variants worth handling by name: `DbErr::RecordNotFound`, `RecordNotInserted`,
 `RecordNotUpdated`, and `ConnectionAcquire(ConnAcquireErr::Timeout)`, which means the pool is
 exhausted rather than that the database is down.
@@ -487,9 +498,17 @@ needs `QueryOrder`, `.paginate` and `.count` need `PaginatorTrait`.
 `pg_advisory_xact_lock(key)` serialises work across every replica that names the same key, and
 Postgres releases it with the transaction — commit, rollback or a dropped connection — so there is
 no unlock path to get wrong. The key is one `bigint`; `hashtext(..)::bigint` folds a string into
-it (a collision only over-serialises), or derive a stable `i64` in code.
+it (a collision over-serialises the blocking form and makes an unrelated try-lock skip), or derive
+a stable `i64` in code.
+
+The blocking form is a queue, not a gate: each waiter runs its own work once the holder commits.
+That is right for "never two at once" and wrong for "once": a nightly job guarded by it runs once
+per replica, one after another. Run-once work takes `pg_try_advisory_xact_lock`, which returns
+`false` at once while another transaction holds the key, and records the run in the same
+transaction, because a replica whose timer fires after the leader committed finds the lock free.
 
 ```rust,verify
+use chrono::NaiveDate;
 use sea_orm::{ConnectionTrait, DbErr, TransactionSession, TransactionTrait, raw_sql};
 
 /// Blocks until no other transaction holds `key`, then holds it until `txn` ends.
@@ -507,18 +526,58 @@ where
     Ok(())
 }
 
-/// One nightly job across N replicas: the others block until the leader commits.
-pub async fn rebuild_report<C: TransactionTrait>(db: &C) -> Result<(), DbErr> {
+/// `false` at once while another transaction holds `key`; `true` holds it until `txn` ends.
+pub async fn try_advisory_xact_lock<T>(txn: &T, key: &str) -> Result<bool, DbErr>
+where
+    T: ConnectionTrait + TransactionSession,
+{
+    txn.query_one_raw(raw_sql!(
+        Postgres,
+        r#"SELECT pg_try_advisory_xact_lock(hashtext({key})::bigint)"#
+    ))
+    .await?
+    .ok_or_else(|| DbErr::RecordNotFound("lock row".to_owned()))?
+    .try_get_by_index(0)
+}
+
+/// One nightly run across N replicas; `false` means this replica skipped it. The
+/// try-lock makes the others skip at once instead of queueing behind the leader,
+/// and the `job_run` row (`PRIMARY KEY (job, run_date)`) stops a replica that
+/// starts after the leader committed.
+pub async fn rebuild_report<C: TransactionTrait>(
+    db: &C,
+    run_date: NaiveDate,
+) -> Result<bool, DbErr> {
+    let job = "rebuild_report";
     let txn = db.begin().await?;
-    advisory_xact_lock(&txn, "rebuild_report").await?;
+    if !try_advisory_xact_lock(&txn, job).await? {
+        txn.rollback().await?;
+        return Ok(false);
+    }
+    let first_run = txn
+        .execute_raw(raw_sql!(
+            Postgres,
+            r#"INSERT INTO "job_run" ("job", "run_date") VALUES ({job}, {run_date})
+               ON CONFLICT DO NOTHING"#
+        ))
+        .await?
+        .rows_affected()
+        == 1;
+    if !first_run {
+        txn.rollback().await?;
+        return Ok(false);
+    }
     // ... the work, on `txn` ...
-    txn.commit().await
+    txn.commit().await?;
+    Ok(true)
 }
 ```
 
-`pg_try_advisory_xact_lock` is the non-blocking form: it returns `false` at once when another
-transaction holds the key, for "skip this run if one is already going". It is also how a test
-proves the lock without a race: the second transaction cannot take it until the first commits.
+`job_run` is an ordinary two-column table from a migration. Fire the timer more than once per
+`run_date` (hourly for a nightly job): the replicas that got `false` do not retry, so a leader whose
+work failed and rolled back leaves the date unrun until the next tick, and `job_run` makes the ticks
+after a success no-ops. The same try-lock is how a test proves
+the lock without a race: the second transaction cannot take it until the first commits.
 
 ```rust,verify,test
 mod common;
@@ -559,7 +618,92 @@ async fn second_transaction_waits_for_the_first() {
 }
 ```
 
-Prefer it over a Redis lease when the guarded work is itself in this database: the release is
-transactional for free, there is no lease TTL to size, and a crashed holder releases on
-reconnect. Reach for a Redis lease (`rust-redis`) when the critical section spans services or
-protects non-database work — an HTTP call, a file, a queue — or must outlive one transaction.
+An advisory lock fits work whose effect is a write to this Postgres database; when the effect is
+anything else, `rust-redis` covers the lease that replaces it. In the database case the lock also
+wins on mechanics: the release
+is transactional for free, there is no lease TTL to size, and a crashed holder releases on
+reconnect.
+
+## Idempotency and the outbox
+
+A redelivered message or a retried request must not do its work twice, and an event must be
+neither published for work that rolled back nor lost for work that committed. Both come from
+writing the record in the same transaction as the work.
+
+**Idempotency.** The key is a row: the event's `event_id` for a consumer, the caller-scoped
+`Idempotency-Key` for a request, in a table whose primary key or unique index is that key. Insert it
+first, inside the transaction that does the work:
+
+- inserted: this attempt owns the work; do it and commit;
+- conflicted: an earlier attempt already committed the work, so this one is done — a consumer
+  acks, a request answers as the idempotency contract says (`axum-service`);
+- concurrent: a second attempt blocks on the unique index until the first commits, then sees the
+  conflict, or inserts and proceeds if the first rolled back.
+
+`on_conflict_do_nothing_on([..])` reports the conflict as `TryInsertResult::Conflicted` and leaves
+the transaction usable. A plain insert reports it as 23505 (`is_duplicate` above), after which
+Postgres has aborted the transaction: roll it back and treat the attempt as done. For a create, the
+new row's own key, a uuid the producer minted, is already the idempotency key and needs no marker.
+
+```rust,verify
+use crate::entities::post;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DbErr, TransactionSession,
+    TransactionTrait, raw_sql,
+};
+use uuid::Uuid;
+
+/// `processed_event` has `PRIMARY KEY (consumer, event_id)`, so two services can each
+/// handle the same event once. `false`: an earlier delivery already committed. The
+/// `TransactionSession` bound rejects the pool, where the marker would commit alone.
+async fn first_delivery<T>(txn: &T, consumer: &str, event_id: Uuid) -> Result<bool, DbErr>
+where
+    T: ConnectionTrait + TransactionSession,
+{
+    let recorded = txn
+        .execute_raw(raw_sql!(
+            Postgres,
+            r#"INSERT INTO "processed_event" ("consumer", "event_id")
+               VALUES ({consumer}, {event_id}) ON CONFLICT DO NOTHING"#
+        ))
+        .await?;
+    Ok(recorded.rows_affected() == 1)
+}
+
+/// Each `DraftRequested` event creates one post, however often it is delivered.
+/// `Ok` on both branches, so the consumer acks once this returns.
+pub async fn handle_draft_requested<C: TransactionTrait>(
+    db: &C,
+    event_id: Uuid,
+    user_id: Uuid,
+    title: &str,
+) -> Result<(), DbErr> {
+    let txn = db.begin().await?;
+    if !first_delivery(&txn, "drafts", event_id).await? {
+        return txn.rollback().await;
+    }
+    post::ActiveModel {
+        id: Set(Uuid::now_v7()),
+        user_id: Set(user_id),
+        title: Set(title.to_owned()),
+        published: Set(false),
+        created_at: Set(chrono::Utc::now().into()),
+    }
+    .insert(&txn)
+    .await?;
+    txn.commit().await
+}
+```
+
+With a generated `processed_event` entity the marker is a typed insert,
+`.on_conflict_do_nothing_on([processed_event::Column::Consumer, processed_event::Column::EventId])`,
+and `TryInsertResult::Conflicted` is the `false` branch.
+
+**The outbox.** Publishing inside the transaction can announce work that then rolls back;
+publishing after the commit loses the event when the process dies in between. Insert the event
+into an `outbox` table in the same transaction as the state change instead. A relay task, in a
+transaction of its own, selects unsent rows oldest first with `FOR UPDATE SKIP LOCKED`, so
+replicas share the rows without sending one twice, publishes each with the row id as the broker's
+deduplication id, marks it sent and commits. A crash between the publish and the commit sends the
+row again: within the stream's `duplicate_window` the deduplication id absorbs it, and past that
+the consumer's `event_id` row does. The publish itself is `rust-nats`'s.

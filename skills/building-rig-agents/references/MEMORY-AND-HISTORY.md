@@ -49,6 +49,10 @@ message, any tool calls and results, and the assistant reply. **Do not push them
 yourself.** This is the exception to the rule above, and the source of a common
 duplicated-message bug.
 
+`chat` returns a plain future, so it takes no per-request options: its turn budget is the
+agent's `.default_max_turns(n)`, set on the builder. A tool-using agent driven by `chat` needs
+`n >= 2`.
+
 ### 3. Conversation memory — Rig loads and saves
 
 ```rust,verify

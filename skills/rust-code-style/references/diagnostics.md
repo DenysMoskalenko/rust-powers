@@ -101,7 +101,7 @@ async fn refresh(state: &State, key: String) -> std::io::Result<()> {
 | `ptr_arg` | `&String` or `&Vec<T>` in a signature. Take `&str` or `&[T]` — callers deref-coerce for free. |
 | `await_holding_lock` | A `std::sync` guard is live across `.await`. Take the lock inside a non-async helper so the guard cannot escape. |
 | `redundant_clone` | The cloned value is never used again. Drop the clone. |
-| `unwrap_used`, `expect_used` | Outside a test. Return an error, or give `expect` a message stating why it cannot fail. |
+| `unwrap_used`, `expect_used` | Outside a test, whatever the message. Return the error with context; where failure is impossible, put `#[expect(clippy::expect_used, reason = "...")]` on the item. |
 | `manual_let_else` | A `match` or `if let` that only guards. Rewrite as `let ... else { return ... };`. |
 | `cast_possible_truncation`, `cast_sign_loss` | An `as` cast between integer types. Use `TryFrom`, or `#[expect(..., reason = "...")]` if the cast is right. |
 | `too_many_arguments` | Past five parameters. Pass a struct; derive `bon::Builder` at four or more fields. |
@@ -116,7 +116,7 @@ async fn refresh(state: &State, key: String) -> std::io::Result<()> {
 | Lint | Why |
 |---|---|
 | `unwrap_used` | In the service a panic becomes a logged 500 via `CatchPanicLayer`; still never panic on purpose in a request path — the layer is a net for bugs, not an error path. |
-| `expect_used` | Every survivor must state why it cannot fail; tests are exempt. |
+| `expect_used` | Every `expect` outside tests needs an item-level `#[expect(clippy::expect_used, reason = "...")]` saying why it cannot fail; tests are exempt. |
 | `allow_attributes_without_reason` | Forces `#[expect(..., reason)]`, so a suppression justifies itself and goes stale loudly. |
 | `redundant_clone` | Catches the mechanical half of cloning past the borrow checker. |
 | `cognitive_complexity` | An alarm that a function wants splitting, not a measurement. |
@@ -128,5 +128,5 @@ async fn refresh(state: &State, key: String) -> std::io::Result<()> {
 
 - `await_holding_lock` only catches bound guards, so a clean clippy run is not proof the rule held.
 - `allow-unwrap-in-tests` covers only the body of a `#[test]` or `#[tokio::test]` function. A helper in the same file, `tests/common/mod.rs` included, still warns. Such a file needs `#![allow(clippy::unwrap_used, clippy::expect_used, reason = "test helpers")]`; a bare `#![allow(..)]` with no reason trips `allow_attributes_without_reason`.
-- An unknown lint name is only a warning, so a typo in the lint table silently does nothing unless the build denies warnings.
+- An unknown lint name in the `[lints]` table stays a warning even under `-D warnings`, so a typo there silently does nothing: after editing the table, read the first lines of `cargo clippy` for `unknown lint`.
 - Fixing a lint by deleting the code it complains about is usually right. Fixing it with an attribute is only right when the reason string would convince a reviewer.

@@ -56,8 +56,9 @@ cargo add tokio --features macros,rt-multi-thread
 ### `unresolved import rig::...`
 
 Capabilities are feature-gated. The `agent` feature (on by default) carries `Agent`,
-`Tool`, hooks, and extractors; `test-utils`, `rmcp`, `pdf`, `epub`, `audio`, `image`,
-`memory`, and the vector stores are opt-in. Check the feature table in SKILL.md.
+`Tool`, hooks, and extractors. The rest are opt-in: `test-utils` (mocks, dev-dependencies
+only), `rmcp` (MCP tools), `memory` (history-bounding policies), `pdf` and `epub` (file
+loaders), `audio`, `image`, and one per vector store (`lancedb`, `qdrant`, `postgres`, …).
 
 ### `Agent<M>` does not compile
 
@@ -109,7 +110,8 @@ match agent.prompt("What is 2 + 2?").max_turns(3).await {
     }
 
     Err(PromptError::PromptCancelled { reason, .. }) => {
-        // A hook returned a stop action.
+        // A hook returned a stop action, or rig cancelled the run itself (a lost
+        // prompt, a protocol violation): only the reason tells them apart.
         eprintln!("cancelled: {reason}");
     }
 

@@ -10,6 +10,9 @@
 # Generated snippet-verification workspace (scripts/check_snippets.py)
 verify/
 
+# Generated eval cases and their results (scripts/build_eval_cases.py)
+evals/.run/
+
 # Rust build output, including inside skills/rust-scaffolding/assets/
 **/target/
 
