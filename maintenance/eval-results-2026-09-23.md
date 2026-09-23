@@ -257,4 +257,3 @@ lists every grader that failed in at least one run with the plugin, with its pas
 | probe-3 | 1.00 | 0.50 | 0.50 |  |
 | probe-4 | 1.00 | 1.00 | 0.00 |  |
 | probe-5 | 1.00 | 0.50 | 0.50 |  |
-
