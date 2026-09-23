@@ -107,9 +107,13 @@ impl AppError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-            // 23505 is a duplicate key: a client problem, not a server one.
+            // 23505 is a duplicate key and 23503 a missing or still-referenced
+            // parent row: client problems, not server ones.
             Self::Db(err) => match err.sql_err() {
                 Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => StatusCode::CONFLICT,
+                Some(sea_orm::SqlErr::ForeignKeyConstraintViolation(_)) => {
+                    StatusCode::UNPROCESSABLE_ENTITY
+                }
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
             // This service is fine; something it depends on is not.
@@ -124,8 +128,8 @@ impl IntoResponse for AppError {
         let status = self.status();
 
         // Logged once, here, where every failure passes through. 5xx carries the
-        // whole cause chain; the 409 line is what tells you which constraint fired.
-        if status.is_server_error() || status == StatusCode::CONFLICT {
+        // whole cause chain; a `Conflict` or `Db` line is what tells you which constraint fired.
+        if status.is_server_error() || matches!(self, Self::Conflict(_) | Self::Db(_)) {
             tracing::error!(error = ?self, %status, "request failed");
         }
 
@@ -135,6 +139,14 @@ impl IntoResponse for AppError {
             // stringified into a response. Nor is a 409, whose only honest
             // constant is the status itself.
             _ if status == StatusCode::CONFLICT => ErrorBody::new("conflict"),
+            Self::Db(err)
+                if matches!(
+                    err.sql_err(),
+                    Some(sea_orm::SqlErr::ForeignKeyConstraintViolation(_))
+                ) =>
+            {
+                ErrorBody::new("invalid reference")
+            }
             Self::Db(_) | Self::Other(_) => ErrorBody::new("internal server error"),
             Self::Http(_) => ErrorBody::new("upstream request failed"),
             Self::Unavailable(_) => ErrorBody::new("service unavailable"),
@@ -183,29 +195,22 @@ onto what is here with one function: an unreachable or failed backend is `Unavai
 wiring bug is `Other(anyhow::Error)` (500), bad input is `BadRequest(String)` (400). 502 is only
 ever `Http`, this service's own outbound call.
 
-The one arm the scaffold does not ship, because its schema has no foreign key yet: SQLSTATE 23503,
-`SqlErr::ForeignKeyConstraintViolation`, is a client error like 23505 — a `POST /orders` naming a
-`user_id` that does not exist. Without the arm it is a 500. A pre-flight `SELECT` is not the fix:
-it loses every race the constraint wins. Add the arm on both matches the day the first foreign key
-lands:
+### A missing parent row: 23503
 
-```rust
-// in `status()`
-Self::Db(err) => match err.sql_err() {
-    Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => StatusCode::CONFLICT,
-    Some(sea_orm::SqlErr::ForeignKeyConstraintViolation(_)) => StatusCode::UNPROCESSABLE_ENTITY,
-    _ => StatusCode::INTERNAL_SERVER_ERROR,
-},
+SQLSTATE 23503, `SqlErr::ForeignKeyConstraintViolation`, is a client error like 23505. Its status
+depends on where the parent id came from:
 
-// in `into_response()`, before the `Self::Db(_) | Self::Other(_)` arm
-Self::Db(err) if matches!(err.sql_err(), Some(sea_orm::SqlErr::ForeignKeyConstraintViolation(_))) => {
-    ErrorBody::new("referenced row does not exist")
-}
-```
+- **A path segment** (`POST /users/{id}/posts`): the URL names a resource that does not exist, so
+  the service classifies the `DbErr` and returns `NotFound(format!("user {id} not found"))`,
+  documented as `(status = 404, body = ErrorBody)`. Classifying a `DbErr` is `sea-orm-postgres`'s.
+- **A body field** (`POST /posts` with a `user_id`): the `DbErr` reaches the arm in both matches
+  above, a 422 with the constant `"invalid reference"`, documented as
+  `(status = 422, body = ErrorBody)`, the same entry a validation failure uses.
 
-The body is a constant: the constraint name is a schema detail, and a 422 is not logged (4xx are the
-client's mistake), so nothing leaks. Document the route with `(status = 422, body = ErrorBody)`, the
-same entry a validation failure uses.
+A pre-flight `SELECT` is the fix for neither: it loses every race the constraint wins. The 422 body
+is a constant because the constraint name is a schema detail. The error is still logged: 23503 also
+fires when a delete or update hits a row something still references, and when the service chose a
+bad id itself, and neither is the client's mistake.
 
 ## Valid, ValidQuery and Path
 
@@ -315,7 +320,7 @@ before `validator` runs and the response loses its field map.
 | `JsonRejection::JsonDataError` | valid JSON, wrong shape or missing field | 422 | absent |
 | `JsonRejection::JsonSyntaxError` | malformed JSON | 400 | absent |
 | `JsonRejection::MissingJsonContentType` | no `application/json` | 415 | absent |
-| `JsonRejection::BytesRejection` | body over `DefaultBodyLimit` | 413 | absent |
+| `JsonRejection::BytesRejection` | body over `DefaultBodyLimit` (any other buffering failure is a 400) | 413 | absent |
 | `QueryRejection` via `ValidQuery` | wrong type in the query string | 400 via `BadRequest` | absent |
 | `PathRejection` via `Path` | wrong type in the URL (wrong arity is a 500) | 400 via `BadRequest` | absent |
 | `TypedHeaderRejection` | missing or malformed `Authorization` | 401 via `Unauthorized` | absent |

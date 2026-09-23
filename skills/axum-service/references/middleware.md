@@ -135,6 +135,8 @@ the call site fails with four unsatisfied-trait-bound errors.
 
 `TimeoutLayer::new` is deprecated since tower-http 0.6.7; under `-D warnings` it fails the build.
 Use `with_status_code`. `REQUEST_TIMEOUT` lives in `config.rs` next to the other budget constants.
+Its 408 is the one deliberate empty body in the service: the layer answers with a bare status, and
+the scaffold documents that rather than wrap the layer to reshape it.
 `DefaultBodyLimit` is axum's own limit layer, so the tower-http `limit` feature is not needed.
 
 ## The two ordering rules
@@ -214,10 +216,11 @@ Where it sits is fixed here, so the two skills agree:
   round trip.
 - It answers `AppError::TooManyRequests { retry_after_secs }`; `error.rs` already renders the 429
   and the `Retry-After` header. No new variant.
-- Its fallback identity for an unauthenticated caller is the peer address, which only exists when
-  `main.rs` serves with `app.into_make_service_with_connect_info::<SocketAddr>()` — the scaffold
-  does. Plain `axum::serve(listener, app)` has no `ConnectInfo`, and the limiter fails every
-  anonymous request with a 500 rather than quietly sharing one bucket.
+- Which address identifies an unauthenticated caller is `rust-redis`'s trusted-proxy rule; its
+  last resort, the `ConnectInfo` peer, only exists when `main.rs` serves with
+  `app.into_make_service_with_connect_info::<SocketAddr>()` — the scaffold does. Plain
+  `axum::serve(listener, app)` has no `ConnectInfo`, and the limiter fails every anonymous
+  request with a 500 rather than quietly sharing one bucket.
 
 ```rust
 // main.rs

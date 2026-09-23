@@ -121,9 +121,13 @@ impl AppError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-            // 23505 is a duplicate key: a client problem, not a server one.
+            // 23505 is a duplicate key and 23503 a missing or still-referenced
+            // parent row: client problems, not server ones.
             Self::Db(err) => match err.sql_err() {
                 Some(sea_orm::SqlErr::UniqueConstraintViolation(_)) => StatusCode::CONFLICT,
+                Some(sea_orm::SqlErr::ForeignKeyConstraintViolation(_)) => {
+                    StatusCode::UNPROCESSABLE_ENTITY
+                }
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
             // This service is fine; something it depends on is not.
@@ -138,8 +142,8 @@ impl IntoResponse for AppError {
         let status = self.status();
 
         // Logged once, here, where every failure passes through. 5xx carries the
-        // whole cause chain; the 409 line is what tells you which constraint fired.
-        if status.is_server_error() || status == StatusCode::CONFLICT {
+        // whole cause chain; a `Conflict` or `Db` line is what tells you which constraint fired.
+        if status.is_server_error() || matches!(self, Self::Conflict(_) | Self::Db(_)) {
             tracing::error!(error = ?self, %status, "request failed");
         }
 
@@ -149,6 +153,14 @@ impl IntoResponse for AppError {
             // stringified into a response. Nor is a 409, whose only honest
             // constant is the status itself.
             _ if status == StatusCode::CONFLICT => ErrorBody::new("conflict"),
+            Self::Db(err)
+                if matches!(
+                    err.sql_err(),
+                    Some(sea_orm::SqlErr::ForeignKeyConstraintViolation(_))
+                ) =>
+            {
+                ErrorBody::new("invalid reference")
+            }
             Self::Db(_) | Self::Other(_) => ErrorBody::new("internal server error"),
             Self::Http(_) => ErrorBody::new("upstream request failed"),
             Self::Unavailable(_) => ErrorBody::new("service unavailable"),

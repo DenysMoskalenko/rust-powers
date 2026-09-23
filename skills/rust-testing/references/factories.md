@@ -28,8 +28,8 @@ use fake::faker::name::en::Name;
 use fake::{Dummy, Fake, Faker};
 
 /// `#[derive(Dummy)]` is "just give me a valid instance"; `#[dummy(faker = ..)]`
-/// is the `Use(lambda: faker...)` equivalent. Locale lives in the module path,
-/// so `name::fr_fr::Name` is the French generator.
+/// picks the generator for one field. Locale lives in the module path, so
+/// `name::fr_fr::Name` is the French generator.
 #[derive(Debug, Clone, Dummy)]
 struct SignupPayload {
     #[dummy(faker = "SafeEmail()")]

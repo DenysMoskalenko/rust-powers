@@ -30,7 +30,7 @@ Re-validated on rustc 1.98.1 / clippy 0.1.98, 13 September 2026: `cargo generate
 | messaging | async-nats 0.50 | add when needed; core `publish`/`subscribe`/`request`, JetStream `get_or_create_consumer` + `consumer.messages()`, `message.ack()` |
 | cache | redis 1.7 (`ConnectionManager`) | add when needed; one multiplexed connection, not a pool |
 | telemetry | tracing + tracing-opentelemetry + opentelemetry-otlp (traces); metrics + axum-prometheus (`/metrics`) | |
-| pre-commit hooks | prek | installed with `uv tool install prek` |
+| pre-commit hooks | prek | installed with `cargo binstall prek` |
 | task runner | Makefile | calls cargo directly, no task runner underneath |
 
 ## Decisions
@@ -299,8 +299,7 @@ components = ["rustfmt", "clippy", "llvm-tools-preview"]
 
 install-tools:
 	cargo install cargo-binstall
-	cargo binstall -y cargo-nextest cargo-llvm-cov cargo-deny cargo-machete cargo-chef bacon cargo-insta sea-orm-cli
-	uv tool install prek
+	cargo binstall -y cargo-nextest cargo-llvm-cov cargo-deny cargo-machete cargo-chef bacon cargo-insta sea-orm-cli prek
 	prek install
 
 fmt:
@@ -363,7 +362,7 @@ repos:
         pass_filenames: false
       - id: clippy
         name: cargo clippy
-        entry: cargo clippy --all-targets --all-features -- -D warnings
+        entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false

@@ -263,8 +263,8 @@ async fn main() -> anyhow::Result<()> {
         .context("binding the listener")?;
     tracing::info!(addr = ?listener.local_addr()?, "listening");
 
-    // `ConnectInfo` gives every request the peer address, which a rate limiter
-    // falls back to for callers without an API key. Plain `app` has no such thing.
+    // `ConnectInfo` gives every request the peer address, a rate limiter's last
+    // resort for an anonymous caller. Plain `app` has no such thing.
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

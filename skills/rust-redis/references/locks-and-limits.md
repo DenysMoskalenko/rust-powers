@@ -18,11 +18,12 @@ with `OOM`, that is an outage to surface, not a miss to swallow.
 
 `SET key token NX PX ttl` gives at most one holder *probably*, never at most one holder
 *certainly*: a garbage-collection pause or a network stall longer than the TTL means two holders
-and no way for either to notice. That is fine for suppressing duplicate work - one cron runner,
-one cache refill, one webhook consumer - and not fine for anything whose correctness depends on
-exclusion. When money or a uniqueness invariant is at stake, take `pg_advisory_xact_lock` inside
-the transaction that does the write, since it dies with the session and has no lease to expire;
-for that see `sea-orm-postgres`.
+and no way for either to notice. That is fine for suppressing duplicate work - one cron runner, one
+cache refill, one webhook consumer - and not fine for anything that breaks when it runs twice. Work
+whose effect is a write to this Postgres database takes an advisory lock inside that transaction
+instead (`sea-orm-postgres`). A lease fits everything else — an outbound call, a file, work spanning
+services or outliving one transaction — and only suppresses duplicates, so that effect must itself
+be idempotent.
 
 Releasing with a plain `DEL` is the classic bug: if the holder stalled past the TTL, the key now
 belongs to somebody else and `DEL` frees *their* lock. Compare the token and delete in one Lua
@@ -249,11 +250,11 @@ Two algorithms, and the choice is about state, not accuracy:
 | Worst case | 2x the limit across a boundary (measured: 10 of "5 per second" in 100 ms) | exact |
 | Use when | the limit is a fairness guard | the limit is a contract with a paying customer |
 
-```rust,verify
+```rust,verify,test
 //! src/ratelimit.rs - both limiters plus the axum layer that applies one.
 
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::{Arc, LazyLock},
     time::Duration,
 };
@@ -358,6 +359,59 @@ pub struct Limiter {
     pub window: Duration,
     /// The same `Arc<dyn Clock>` as `AppState.clock`; never `SystemTime::now()`.
     pub clock: Arc<dyn Clock>,
+    /// How many `X-Forwarded-For` entries your own infrastructure appends in
+    /// front of the service: 0 when clients connect directly, 1 behind one
+    /// ingress, 2 behind Google Cloud's HTTP(S) load balancer, which appends the
+    /// client and itself. A layer-4 load balancer appends nothing. A setting,
+    /// never read from the request.
+    pub trusted_proxies: usize,
+}
+
+/// The unauthenticated caller's address. It is the `trusted_proxies`-th
+/// `X-Forwarded-For` entry, the outermost one your infrastructure appended,
+/// counted from the right across every header line: every entry to its left was
+/// written by the client, and skipping a line the client made unreadable would
+/// shift the count onto one of those. With no proxy, or a hop that is missing or
+/// does not parse, it is the TCP peer. Sound only while those proxies are the one
+/// way into the service.
+fn client_address(request: &Request, trusted_proxies: usize) -> Option<IpAddr> {
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(peer)| peer.ip());
+    if trusted_proxies == 0 {
+        return peer;
+    }
+    request
+        .headers()
+        .get_all("x-forwarded-for")
+        .iter()
+        .rev()
+        .flat_map(|line| line.as_bytes().rsplit(|&byte| byte == b','))
+        .nth(trusted_proxies - 1)
+        .and_then(parse_hop)
+        .or(peer)
+}
+
+/// One bucket per IPv4 address and per IPv6 /64: a host is usually handed a
+/// whole /64 and could take a fresh address, and a fresh bucket, per request.
+fn address_key(address: IpAddr) -> String {
+    match address.to_canonical() {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => {
+            let [a, b, c, d, ..] = v6.segments();
+            format!("{a:x}:{b:x}:{c:x}:{d:x}::/64")
+        }
+    }
+}
+
+/// `203.0.113.7`, `2001:db8::1`, or either with a port: the port a proxy may add
+/// changes per connection and must not hand the caller a fresh bucket.
+fn parse_hop(hop: &[u8]) -> Option<IpAddr> {
+    let hop = std::str::from_utf8(hop).ok()?.trim();
+    hop.parse::<IpAddr>()
+        .ok()
+        .or_else(|| hop.parse::<SocketAddr>().ok().map(|addr| addr.ip()))
 }
 
 /// Applied with `from_fn_with_state(state.clone(), rate_limit::<AppState, AuthUser>)`
@@ -366,7 +420,7 @@ pub struct Limiter {
 /// is what makes `ConnectInfo` exist here). `U` is the authenticated identity -
 /// `axum-service`'s `AuthUser`, with
 /// `impl AsRef<str> for AuthUser { fn as_ref(&self) -> &str { &self.0.sub } }`.
-/// A request that does not carry a valid token is limited by peer address
+/// A request that does not carry a valid token is limited by its client address
 /// instead, the one unauthenticated identity the client cannot choose; the
 /// handler's own `AuthUser` argument still answers 401. What it counts belongs
 /// here; where it sits does not.
@@ -385,8 +439,8 @@ where
         Ok(user) => format!("user:{}", user.as_ref()),
         // Without `into_make_service_with_connect_info` in `main.rs` every
         // unauthenticated request fails loudly here rather than sharing one bucket.
-        Err(_) => match request.extensions().get::<ConnectInfo<SocketAddr>>() {
-            Some(ConnectInfo(peer)) => format!("ip:{}", peer.ip()),
+        Err(_) => match client_address(&request, limiter.trusted_proxies) {
+            Some(address) => format!("ip:{}", address_key(address)),
             None => {
                 return Err(AppError::Other(anyhow::anyhow!(
                     "rate_limit: no ConnectInfo; serve with into_make_service_with_connect_info"
@@ -414,15 +468,82 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, SocketAddr};
+
+    use axum::{
+        body::Body,
+        extract::{ConnectInfo, Request},
+        http::{HeaderValue, header::InvalidHeaderValue},
+    };
+
+    use super::{address_key, client_address};
+
+    const PEER: [u8; 4] = [10, 0, 0, 9];
+    const CLIENT: [u8; 4] = [203, 0, 113, 7];
+
+    /// One `X-Forwarded-For` line per element, arriving from `PEER`.
+    fn request(lines: &[&[u8]]) -> Result<Request, InvalidHeaderValue> {
+        let mut request = Request::new(Body::empty());
+        for line in lines {
+            request
+                .headers_mut()
+                .append("x-forwarded-for", HeaderValue::from_bytes(line)?);
+        }
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((PEER, 443))));
+        Ok(request)
+    }
+
+    #[test]
+    fn an_unreadable_line_does_not_hide_the_ingress_entry() -> Result<(), InvalidHeaderValue> {
+        // Two client lines; the ingress appended its entry to the second, in place.
+        let request = request(&[b"6.6.6.6", b"\xff, 203.0.113.7"])?;
+        assert_eq!(client_address(&request, 1), Some(IpAddr::from(CLIENT)));
+        Ok(())
+    }
+
+    #[test]
+    fn a_port_does_not_rotate_the_bucket() -> Result<(), InvalidHeaderValue> {
+        let request = request(&[b"6.6.6.6, 203.0.113.7:51234"])?;
+        assert_eq!(client_address(&request, 1), Some(IpAddr::from(CLIENT)));
+        Ok(())
+    }
+
+    #[test]
+    fn an_ipv6_host_gets_one_bucket_per_64() {
+        let one: IpAddr = [0x2001, 0xdb8, 1, 2, 0, 0, 0, 1].into();
+        let other: IpAddr = [0x2001, 0xdb8, 1, 2, 9, 9, 9, 9].into();
+        assert_eq!(address_key(one), address_key(other));
+        let mapped: IpAddr = std::net::Ipv4Addr::from(CLIENT).to_ipv6_mapped().into();
+        assert_eq!(address_key(mapped), "203.0.113.7");
+    }
+
+    #[test]
+    fn an_entry_that_does_not_parse_falls_back_to_the_peer() -> Result<(), InvalidHeaderValue> {
+        let request = request(&[b"6.6.6.6, unknown"])?;
+        assert_eq!(client_address(&request, 1), Some(IpAddr::from(PEER)));
+        Ok(())
+    }
+}
 ```
 
 ## Who gets limited, and what happens when Redis is down
 
 The key names the caller, and the caller has to be something the client cannot pick. An
-authenticated subject (`AuthUser` above) is the right unit; the peer address is the fallback for
-public routes, and behind a load balancer that means the address the proxy reports - the
-*last* `X-Forwarded-For` entry, the one the trusted proxy appended, never the first, which the
-client wrote. Two things never become the key: an unverified header such as `x-api-key`, which an
+authenticated subject (`AuthUser` above) is the right unit; the client address is the fallback for
+public routes. Behind any ingress the `ConnectInfo` peer is the proxy, so keying on it puts every
+anonymous caller in one bucket. The client address is then the `X-Forwarded-For` entry your own
+ingress appended: the Nth from the right, where N is how many entries your infrastructure appends
+(one per ingress, two behind Google Cloud's load balancer, none for a layer-4 balancer), never one
+further left, which the client wrote. IPv6 callers are limited per /64. `client_address` above takes `trusted_proxies` from
+the setting, not from the request; it counts every header line, readable or not, drops a port
+from the chosen entry, and falls back to the peer when that entry does not parse. It holds only
+while those proxies are the one way in: a pod the client can reach directly lets it write the
+whole header. Two things never become the key: an unverified header such as `x-api-key`, which an
 attacker rotates to get a fresh bucket and which then sits in plain text in every `SCAN`,
 `MONITOR` and `SLOWLOG` output; and a shared `anonymous` bucket, where one client exhausts the
 limit for every other unauthenticated caller. A per-route limit is the same key with the route

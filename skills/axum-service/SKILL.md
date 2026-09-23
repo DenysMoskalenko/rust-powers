@@ -1,21 +1,35 @@
 ---
 name: axum-service
-description: "Use when building or modifying an axum service — routes, extractors, validated request bodies, response DTOs, AppError and status mapping, utoipa OpenAPI, settings and secrets, middleware order, health and readiness, pagination, SSE, background tasks, graceful shutdown, JWT auth, tracing, OTLP export, Prometheus metrics. Also for Handler is not satisfied, a router panic about path segments, or spans never reaching the collector. Not for queries (sea-orm-postgres), flaky tests (rust-testing), or Cargo.toml, CI and lint config (rust-tooling)."
+description: "Use when changing an axum service — routes, extractors, response DTOs, AppError statuses, utoipa OpenAPI, settings, secrets, middleware order, health checks, pagination, SSE, background tasks, shutdown, JWT auth, tracing, JSON logs, OTLP export, traceparent propagation, Prometheus metrics. Also for Handler is not satisfied, Path segments must not start with a colon, no method named tracer, spans never reaching the collector. Not for queries (sea-orm-postgres), a new service (rust-scaffolding), flaky tests (rust-testing), Cargo.toml or CI (rust-tooling)."
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 
 # axum service patterns
 
 Assumes Rust 1.98 edition 2024, axum 0.8, tower-http 0.7, utoipa 5, validator 0.21, config 0.15, secrecy 0.10, reqwest 0.13, tracing 0.1 with opentelemetry 0.32, axum-prometheus 0.10, jsonwebtoken 11, argon2 0.6.
 
+Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come from the rust-scaffolding template. In a project built differently, use its own types, helpers and tooling, map outcomes onto its nearest existing error variant, and say so when none fits instead of adding one. Apply these rules to new code; when editing existing code, keep its public contract and tuned configuration and report differences instead of rewriting, unless asked. If `Cargo.lock` pins another major or minor version than the line above, follow the project and say which rules may not apply.
+
 ## Important
 
-- Path captures are `/{id}` and `/{*rest}`; the 0.7 spelling `/:id` compiles and panics at router build.
-- The one body extractor (`Json`, `Valid`) is the last handler argument; otherwise the only error is `Handler` is not satisfied.
 - Handlers return `Result<_, AppError>`; `error.rs` is the only file that chooses a status code, and a 5xx body is a constant. Never `panic!` to signal failure.
-- A response is its own DTO with `From<Model>`; `Json(model)` ships every column, `password_hash` included. Not `#[serde(skip_serializing)]` on the entity: codegen overwrites it.
 - Every validator rule a client needs is repeated as `#[schema(...)]` or `#[param(...)]`; utoipa never reads `validate`.
+- `#[tracing::instrument(skip_all, fields(..))]` on the function that does the work; `err` only where an error never reaches `into_response`, which already logs each 5xx once.
+
+## References
+
+- `references/extractors.md` — `AppError`, `ErrorBody`, `Valid` / `ValidQuery` / `Path`, rejection table, argument order, the 23503 arm. Before writing the error type or an extractor.
+- `references/openapi.md` — utoipa 5 wiring, `routes!`, nesting, bearer scheme, what the document omits. When documenting routes.
+- `references/settings.md` — nested env keys, lists, secrecy, `.env` precedence, `from_map`. When adding a configuration value.
+- `references/auth.md` — `Keys`, `Claims`, `AuthUser`, argon2 0.6 hashing. When adding authentication.
+- `references/middleware.md` — `build_router`: the stack in order, the panic catcher, fallbacks, the timeout's empty 408, CORS, `route_layer`, `from_fn`, the rate-limit slot. When adding or reordering a layer.
+- `references/operations.md` — health and the readiness body, request id, `main.rs`, timeout budget, pagination, background work, idempotency, outbound HTTP. When wiring `main.rs` or a production concern.
+- `references/streaming.md` — SSE and streaming bodies. When a response is unbounded or long-lived.
+- `references/telemetry.md` — subscriber, `EnvFilter`, OTLP export, propagation, shutdown flush, missing spans. When wiring or fixing observability.
+- `references/metrics.md` — `/metrics`, custom instruments, cardinality. When adding a metric.
+
+Queries, migrations, entities: `sea-orm-postgres`. Tests: `rust-testing`. LLM endpoints: `building-rig-agents`. Rate limiting and idempotency storage: `rust-redis`.
 
 ## Architecture
 
@@ -54,7 +68,7 @@ pub struct AppState {
 
 ## Routes and handlers
 
-Argument order is load-bearing: `FromRequestParts` extractors (`State`, `Path`, `Query`, `AuthUser`) may repeat; the one body extractor comes last. When a route stops compiling, `#[axum::debug_handler]` names the culprit.
+`FromRequestParts` extractors (`State`, `Path`, `Query`, `AuthUser`) may repeat before the body extractor. When a route stops compiling, `#[axum::debug_handler]` names the culprit.
 
 ```rust
 #[tracing::instrument(skip_all)]
@@ -76,27 +90,28 @@ pub async fn create_user(
 
 ## Errors
 
-One enum, one `IntoResponse`, one wire shape. `Router::fallback` answers 404 with `AppError::NotFound`, `method_not_allowed_fallback` 405 with an `ErrorBody`: a wrong path has the shape of every other failure, never an empty body. The one deliberate empty body is the 408 from `TimeoutLayer`, which answers with a bare status; the scaffold documents that rather than wrap the layer to reshape it.
+One enum, one `IntoResponse`, one wire shape. `Router::fallback` answers 404 with `AppError::NotFound`, `method_not_allowed_fallback` 405 with an `ErrorBody`: a wrong path has the shape of every other failure, never an empty body.
 
 | Variant | Status | Body `error` |
 |---|---|---|
 | `Validation(ValidationErrors)` | 422 | `"validation failed"`, `details` = field map |
 | `JsonRejection(JsonDataError)` | 422 | well-formed JSON, wrong shape |
 | `JsonRejection(JsonSyntaxError)` | 400 | malformed JSON |
-| `JsonRejection(BytesRejection)` | 413 (400 on any other buffering failure) | over `DefaultBodyLimit` |
+| `JsonRejection(BytesRejection)` | 413 | over `DefaultBodyLimit` |
 | `JsonRejection(MissingJsonContentType)` | 415 | no `application/json` |
 | `BadRequest(String)` | 400 | the message |
 | `NotFound(String)` | 404 | the message |
 | `Conflict(String)`, `Db(DbErr)` with SQLSTATE 23505 | 409 | constant `"conflict"`; the constraint name is logged |
+| `Db(DbErr)` with SQLSTATE 23503 | 422 | constant `"invalid reference"` |
 | `Unauthorized` | 401 | constant |
 | `TooManyRequests { retry_after_secs }` | 429 | constant; `Some` adds a `Retry-After` header |
 | `Unavailable(String)` | 503 | constant `"service unavailable"`; the string is logged |
 | `Db(DbErr)` otherwise, `Other(anyhow::Error)` | 500 | constant `"internal server error"` |
 | `Http(reqwest_middleware::Error)` | 502 | constant `"upstream request failed"` |
 
-`ErrorBody` is `{ "error", "request_id", "details" }` (the last two absent when `None`); `ErrorBody::new(msg)` fills `request_id` from the task-local. Every 5xx and 409 renders a constant and logs the chain once, in `into_response`.
+`ErrorBody` is `{ "error", "request_id", "details" }` (the last two absent when `None`); `ErrorBody::new(msg)` fills `request_id` from the task-local. `into_response` logs every 5xx, every 409 and every `Db` error once, with the chain.
 
-Add-on skills never add a variant: backend down → `Unavailable`, rate limit → `TooManyRequests`, wiring bug → `Other`, bad input → `BadRequest`. The first foreign key adds one arm beside 23505: `SqlErr::ForeignKeyConstraintViolation` (23503) is a 422 with the constant `"referenced row does not exist"`; a pre-flight `SELECT` loses the race the constraint wins.
+Add-on skills never add a variant: backend down → `Unavailable`, rate limit → `TooManyRequests`, wiring bug → `Other`, bad input → `BadRequest`. A missing parent row (23503) takes its status from where the parent id came from: a path segment (`POST /users/{id}/posts`) names a resource that does not exist, so the service classifies the `DbErr` and returns `NotFound`; a body field lets the `DbErr` reach the 422 row. Never a pre-flight `SELECT`: it loses the race the constraint wins.
 
 ## Request DTOs and validation
 
@@ -115,7 +130,7 @@ pub struct CreateUser {
 }
 ```
 
-House style: snake_case JSON (serde's default), `deny_unknown_fields` on every request-body DTO so a typo'd field is a 422 instead of silence, `ToSchema` on every DTO. Response DTOs are separate types with an explicit `From<Model>`; whatever the DTO declares is what ships.
+House style: snake_case JSON (serde's default), `ToSchema` on every DTO, and `deny_unknown_fields` on every new request-body DTO so a typo'd field is a 422 instead of silence. Never add it to an existing public DTO: clients that already send an extra field start failing.
 
 ## OpenAPI, settings, middleware
 
@@ -123,13 +138,13 @@ OpenAPI: `OpenApiRouter::with_openapi(ApiDoc::openapi())`, `.routes(routes!(..))
 
 Settings come from the environment only (`APP__SERVER__PORT`, `__` between every level); `dotenvy::dotenv().ok()` is the first statement of `main`; secrets are `SecretString`; tests use `Settings::from_map` because `std::env::set_var` is `unsafe` in edition 2024. Details: `references/settings.md`.
 
-Layer order has two opposite rules: inside one `ServiceBuilder` the **first** `.layer()` is outermost; chaining `.layer()` on a `Router` the **last** call is. The stack, outermost first: `api::request_id`, `error::catch_panic_layer()`, `OtelInResponseLayer`, `OtelAxumLayer`, Prometheus, CORS from `server.cors_origins` (empty means no layer; never `permissive()`), compression, `DefaultBodyLimit`, `TimeoutLayer` innermost. Everything — `/metrics`, probes, fallbacks — sits inside it. A rate limiter (`rust-redis`) is a `from_fn_with_state` on the limited subtree via `route_layer` — inside the global stack, right before the handler; `main.rs` serves with `into_make_service_with_connect_info::<SocketAddr>()` so its IP fallback has a `ConnectInfo`.
+Layer order has two opposite rules: inside one `ServiceBuilder` the **first** `.layer()` is outermost; chaining `.layer()` on a `Router` the **last** call is. The stack, outermost first: `api::request_id`, `error::catch_panic_layer()`, `OtelInResponseLayer`, `OtelAxumLayer`, Prometheus, CORS from `server.cors_origins` (empty means no layer; never `permissive()`), compression, `DefaultBodyLimit`, `TimeoutLayer` innermost. Everything — `/metrics`, probes, fallbacks, streaming routes — sits inside it.
 
 ## Telemetry
 
-`#[tracing::instrument(skip_all, fields(user_id = %id))]` on the function that does the work: `skip_all` then opt fields back in, because with `skip(state)` an argument added later silently becomes a field. `err` only on service functions, never on a handler returning `AppError`: `into_response` already logs each 5xx once, so `err` double-logs and records a 404 as an error. `%` is `Display`, `?` is `Debug`. `SecretString` redacts `Debug` only; never `%` one, and never log a whole body.
+`#[tracing::instrument(skip_all, fields(user_id = %id))]` on the function that does the work: `skip_all` then opt fields back in, because with `skip(state)` an argument added later silently becomes a field. `err` only where an error never reaches `into_response`, such as a background task or a worker: `into_response` already logs each 5xx once, so `err` on a handler or on a function returning `AppError` logs it twice and records a 404 as an error. `%` is `Display`, `?` is `Debug`. `SecretString` has no `Display` and redacts `Debug`, so the leak is `%secret.expose_secret()`; never log a whole body.
 
-One middleware, `api::request_id`, trusts or mints `x-request-id`, opens a `request` span carrying it, scopes the `REQUEST_ID` task-local so `ErrorBody::new` copies it into every error body, and echoes the header.
+One middleware, `api::request_id`, trusts or mints `x-request-id`, opens a `request` span carrying it, scopes the `REQUEST_ID` task-local that `ErrorBody::new` reads, and echoes the header.
 
 `OtelAxumLayer` + `OtelInResponseLayer` are the only HTTP span source: inbound `traceparent` continued, server span named by `http.route`, context written back. `telemetry::init` always installs the tracer provider and `TraceContextPropagator`; `APP__TELEMETRY__OTLP_ENDPOINT` only decides whether an exporter is attached — unset means no exporter, and the SDK's own `OTEL_EXPORTER_OTLP_ENDPOINT` is never consulted.
 
@@ -143,18 +158,9 @@ Timeout budget, four constants in `config.rs`, shortest first: `READINESS_TIMEOU
 
 Shutdown order: drain in-flight (`with_graceful_shutdown`), flush the exporter (`guard.shutdown()`), close the pool.
 
-Pagination is `?limit=&offset=`, default 20, maximum 100 via `#[validate(range(min = 1, max = 100))]`, in a `Page<T> { items, total, limit, offset }` envelope, never a bare array.
+A new list endpoint pages with `?limit=&offset=`, default 20, maximum 100 via `#[validate(range(min = 1, max = 100))]`, in a `Page<T> { items, total, limit, offset }` envelope, never a bare array. An existing list keeps the shape its clients parse.
 
 Work that outlives the response is `tokio::spawn` with the error logged inside the task; a dropped `JoinHandle` discards it.
-
-A handler panic is answered with the constant 500 body and logged (`error::catch_panic_layer`, directly inside the request id); the connection survives. Still a bug: return `AppError`.
-
-## Common issues
-
-| Symptom | Open |
-|---|---|
-| Spans never reach the collector | `references/telemetry.md`, Debugging: endpoint unset, `RUST_LOG` too quiet, no `guard.shutdown()`, provider built outside the runtime, port 4318 instead of 4317 |
-| Trace ids differ across services | same section: missing `set_text_map_propagator`, a bare `reqwest::Client`, a `tokio::spawn` without `.instrument` |
 
 ## axum 0.7 to 0.8 corrections
 
@@ -172,8 +178,8 @@ A handler panic is answered with the constant 500 body and logged (`error::catch
 
 | About to… | Rule to apply |
 |---|---|
-| Write `/users/:id` | Routes — 0.8 captures are `/{id}`; `:id` panics at router build |
-| Return `Json(model)` from a handler | Request DTOs — a response DTO, or every column ships |
+| Return `Json(model)`, or put `#[serde(skip_serializing)]` on an entity | Architecture — a response DTO with `From<Model>`; the model ships `password_hash`, and codegen overwrites entity attributes |
+| Put `Json` or `Valid` before another extractor | Routes — the body extractor goes last, or the only error is `Handler` is not satisfied |
 | Put a second statement, an if-ladder or reused logic in a handler | Architecture — one statement in the handler; more is a `services/` function |
 | Add a repository trait over sea-orm | Architecture — the ORM is the abstraction |
 | Expect `#[validate(range(max = 100))]` in the schema | Request DTOs — repeat it as `#[schema(maximum = 100)]` |
@@ -184,17 +190,3 @@ A handler panic is answered with the constant 500 body and logged (`error::catch
 | Put an id or a raw path in a metric label | Telemetry — labels are constants; ids go in span fields |
 
 Do not flag: `Arc<Settings>` in state, `.clone()` on `DatabaseConnection` or `Client` (handles), or a handler taking `State` by value.
-
-## References
-
-- `references/extractors.md` — `AppError`, `ErrorBody`, `Valid` / `ValidQuery` / `Path`, rejection table, argument order, the 23503 arm. Before writing the error type or an extractor.
-- `references/openapi.md` — utoipa 5 wiring, `routes!`, nesting, bearer scheme, what the document omits. When documenting routes.
-- `references/settings.md` — nested env keys, lists, secrecy, `.env` precedence, `from_map`. When adding a configuration value.
-- `references/auth.md` — `Keys`, `Claims`, `AuthUser`, argon2 0.6 hashing. When adding authentication.
-- `references/middleware.md` — `build_router`: the stack in order, fallbacks, CORS, `route_layer`, `from_fn`, the rate-limit slot. When adding or reordering a layer.
-- `references/operations.md` — health and the readiness body, request id, `main.rs`, timeout budget, pagination, background work, idempotency, outbound HTTP. When wiring `main.rs` or a production concern.
-- `references/streaming.md` — SSE and streaming bodies. When a response is unbounded or long-lived.
-- `references/telemetry.md` — subscriber, `EnvFilter`, OTLP export, propagation, shutdown flush, missing spans. When wiring or fixing observability.
-- `references/metrics.md` — `/metrics`, custom instruments, cardinality. When adding a metric.
-
-Queries, migrations, entities: `sea-orm-postgres`. Tests: `rust-testing`. LLM endpoints: `building-rig-agents`. Rate limiting and idempotency storage: `rust-redis`.

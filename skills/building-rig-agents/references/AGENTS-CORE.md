@@ -170,6 +170,10 @@ let answer = agent
     .await?;
 ```
 
+`chat(prompt, &mut history)` is the exception: it returns a plain future with no options, so
+`agent.chat(..).max_turns(n)` does not compile and its budget is the agent's
+`default_max_turns(n)`, set on the builder.
+
 Pick a number matching the longest tool chain you actually expect, so a confused model
 fails fast instead of burning tokens. `MaxTurnsError` carries the accumulated
 `chat_history` and the undelivered `prompt`, so you can inspect what happened.

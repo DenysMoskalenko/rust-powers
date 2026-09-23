@@ -17,6 +17,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # the version-bump check diffs against the base branch
 
       # No toolchain step and no version here: every cargo call happens inside a
       # copy of the scaffold, whose rust-toolchain.toml pins the channel and its
@@ -43,6 +45,10 @@ jobs:
             cargo-
 
       - run: python3 scripts/validate_skills.py --strict
+        if: github.event_name != 'pull_request'
+      # A change under skills/ must bump the plugin version: Claude Code ships updates only on a version change.
+      - run: python3 scripts/validate_skills.py --strict --base origin/${{ github.base_ref }}
+        if: github.event_name == 'pull_request'
       - run: prek run --all-files
       # Docker is present on the runner, so testcontainers starts Postgres itself.
       - run: python3 scripts/check_snippets.py

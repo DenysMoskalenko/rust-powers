@@ -56,6 +56,9 @@ testcontainers-modules = { version = "0.15", features = ["postgres", "redis", "n
 testcontainers = { version = "0.27", features = ["reusable-containers"] }   # modules does not re-export it
 ```
 
+The module's Postgres image defaults to the `11-alpine` tag, so every container sets `with_tag`
+to the version production runs.
+
 ## The harness
 
 This is the database half of `tests/common/mod.rs` — the file `rust-testing`'s `test_app()` lives

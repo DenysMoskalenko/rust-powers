@@ -1,8 +1,8 @@
 ---
 name: rust-scaffolding
-description: "Use when creating a brand-new Rust axum service from nothing — 'create a service that...', an empty directory with no Cargo.toml, a new API or microservice that needs migrations, tests, lints, Docker and CI green from the first commit, or a repo that still errors with could not find Cargo.toml. Greenfield only. Not for adding a route, entity or test to an existing crate, and not for changing tooling in an existing service (rust-tooling)."
+description: "Use when creating a brand-new Rust axum service from nothing — 'create a service that...', an empty directory with no Cargo.toml, a new API or microservice that needs migrations, tests, lints, Docker and CI green from the first commit, or a repo that still errors with could not find Cargo.toml. Greenfield only. Not for adding a route (axum-service), entity (sea-orm-postgres) or test (rust-testing) to an existing crate, nor changing tooling in an existing service (rust-tooling)."
 metadata:
-  version: "0.1.1"
+  version: "0.2.0"
 ---
 
 # Rust Scaffolding (Greenfield Only)
@@ -14,18 +14,23 @@ Assumes Rust 1.98.1 edition 2024, axum 0.8, sea-orm 2.0, utoipa 5, cargo-nextest
 - Copy `assets/app/` and rename the crate by hand (step 2). Never `cargo new`, never a
   hand-written `Cargo.toml`, `main.rs`, `Dockerfile` or CI workflow: the template's value
   is the version interactions that already pass.
-- Only where no `Cargo.toml` exists. An existing service is `rust-tooling`, `axum-service`,
-  `sea-orm-postgres` and `rust-testing` territory.
+- Only where neither the destination nor any parent directory has a `Cargo.toml`: inside an
+  existing workspace the template's own `[workspace]` fails the parent with `multiple workspace
+  roots found`, or sits beside it unbuilt. An existing service is `rust-tooling`,
+  `axum-service`, `sea-orm-postgres` and `rust-testing` territory.
 - Migration first, then `make entity`. Never hand-edit `src/entities/`.
 - The gate is `make check && make test`, green before any feature code. A red baseline is
   a copy problem, never a code problem.
-- Commit `Cargo.lock`.
+
+## References
+
+- `references/layout.md` — open when you need to know which file a change belongs in, or
+  how a request travels through the tree.
 
 ## 1. Prerequisites
 
 `rustup` (the template's `rust-toolchain.toml` fetches 1.98.1 on the first cargo command),
-Docker, `git`, and for `make install-tools`: `cargo-binstall` is installed by the target
-itself, but `uv` must already exist: it is what installs prek.
+Docker and `git`; step 4 installs everything else.
 
 ## 2. Copy the template and rename the crate
 
@@ -73,8 +78,8 @@ git-ignored and loaded only in development; in production the missing file is a 
 make install-tools
 ```
 
-Installs cargo-binstall, then nextest, llvm-cov, deny, machete, chef, bacon, insta and
-sea-orm-cli as prebuilt binaries, plus prek and its git hook.
+Installs cargo-binstall, then nextest, llvm-cov, deny, machete, chef, bacon, insta,
+sea-orm-cli and prek as prebuilt binaries, and prek's git hook.
 
 ## 5. Start Postgres and migrate
 
@@ -116,9 +121,7 @@ corrupt: `docker rm -f rust-powers-test-postgres` and run again.
 git add -A && git commit -m "Scaffold service"
 ```
 
-The repository already exists from step 2, so this is only the commit. `Cargo.lock` is
-committed: this is a binary, and the lock file is what makes CI and Docker reproduce the
-local build.
+Step 2 already ran `git init`. `-A` includes `Cargo.lock`, which CI's `--locked` and the Docker build need.
 
 ## What to change first for a real domain
 
@@ -143,8 +146,3 @@ For handlers, extractors, errors, the readiness body, OpenAPI and telemetry see
 `axum-service`; for queries, relations and migrations see `sea-orm-postgres`; for test
 helpers, factories and fixtures see `rust-testing`; for any configuration file see
 `rust-tooling`.
-
-## References
-
-- `references/layout.md` — open when you need to know which file a change belongs in, or
-  how a request travels through the tree.

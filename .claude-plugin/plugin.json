@@ -1,6 +1,8 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "rust-powers",
-  "version": "0.1.1",
+  "displayName": "Rust Powers",
+  "version": "0.2.0",
   "description": "Reusable Rust, axum, sea-orm, PostgreSQL, testing, telemetry, tooling, project scaffolding, NATS messaging, Redis caching, and AI-agent engineering skills for Claude Code.",
   "author": {
     "name": "Denys Moskalenko",

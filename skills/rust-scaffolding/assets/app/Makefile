@@ -2,8 +2,7 @@
 
 install-tools:
 	cargo install cargo-binstall
-	cargo binstall -y cargo-nextest cargo-llvm-cov cargo-deny cargo-machete cargo-chef bacon cargo-insta sea-orm-cli
-	uv tool install prek
+	cargo binstall -y cargo-nextest cargo-llvm-cov cargo-deny cargo-machete cargo-chef bacon cargo-insta sea-orm-cli prek
 	prek install
 
 fmt:

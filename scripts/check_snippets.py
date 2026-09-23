@@ -218,6 +218,8 @@ def run_cargo(cmd: list[str], blocks: list[Block]) -> bool:
     # the first capture instead of failing on it. Snapshot *content* is the skill
     # author's concern (cargo insta review in their own project), not the checker's.
     env = {**os.environ, "INSTA_UPDATE": "always"}
+    # Never build inside the repository: the plugin root is the repository root and local installs copy it.
+    env.setdefault("CARGO_TARGET_DIR", str(Path(os.environ.get("TMPDIR", "/tmp")) / "rust-powers-target"))
     proc = subprocess.run(cmd, cwd=VERIFY, text=True, capture_output=True, env=env)
     sys.stdout.write(proc.stdout)
     sys.stderr.write(proc.stderr)

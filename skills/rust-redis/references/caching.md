@@ -62,9 +62,12 @@ const fn default_true() -> bool {
     true
 }
 
-/// Connects eagerly: a Redis that is down at boot fails the boot. Swap in
-/// `get_connection_manager_lazy` when the service must start degraded instead.
-pub async fn connect(settings: &RedisSettings) -> Result<ConnectionManager, redis::RedisError> {
+/// Lazy: nothing is dialled until the first command, so a Redis that is down at
+/// boot leaves the service up with `"cache": "degraded"` instead of crash-looping
+/// the pod, and the first command after Redis returns connects. It spawns a task,
+/// so call it inside the runtime. A service that cannot run without Redis uses
+/// `get_connection_manager_with_config(config).await` and fails the boot instead.
+pub fn connect(settings: &RedisSettings) -> Result<ConnectionManager, redis::RedisError> {
     let info = settings.url.expose_secret().into_connection_info()?;
     // What `CLIENT LIST` shows as `lib-name`; the default is `redis-rs`.
     let handshake = info
@@ -79,7 +82,7 @@ pub async fn connect(settings: &RedisSettings) -> Result<ConnectionManager, redi
         // finds the socket dead - a request-path caller cannot afford it. The
         // manager still re-arms a reconnect for the next command.
         .set_number_of_retries(0);
-    client.get_connection_manager_with_config(config).await
+    client.get_connection_manager_lazy(config)
 }
 
 /// The `"cache"` entry for `axum-service`'s readiness `checks` map: one
@@ -615,7 +618,7 @@ pub fn blocking_pool(url: &str) -> Result<deadpool_redis::Pool, deadpool_redis::
 
 | Need | redis-rs |
 |---|---|
-| connect | `Client::open(url)?` then `get_connection_manager_with_config(cfg)` |
+| connect | `Client::open(url)?` then `get_connection_manager_lazy(cfg)` for an optional cache, `get_connection_manager_with_config(cfg).await` where Redis is required |
 | share the connection | one `aio::ConnectionManager`, cloned per call |
 | set with a TTL | `conn.set_ex::<_, _, ()>(k, v, 60)` |
 | set only if absent, with a TTL | `set_options` with `ExistenceCheck::NX` and `SetExpiry::PX` |

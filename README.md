@@ -60,13 +60,17 @@ claude plugin marketplace add https://github.com/DenysMoskalenko/rust-powers
 claude plugin install rust-powers@rust-powers
 ```
 
-**Local development:**
+**Local development:** install from a clean clone. A local install copies the directory
+whole, so a working copy with build output in it copies gigabytes.
 
 ```bash
 git clone https://github.com/DenysMoskalenko/rust-powers
 claude plugin marketplace add ./rust-powers
 claude plugin install rust-powers@rust-powers
 ```
+
+Installed plugins update when the plugin `version` changes, which every change to `skills/`
+bumps.
 
 After installation, the skills listed above are available to Claude Code via the `Skill`
 tool.
@@ -82,13 +86,13 @@ manifest lives at [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json).
 Open **Plugins**, add this GitHub marketplace, then install and enable **Rust Powers**:
 
 ```text
-git@github.com:DenysMoskalenko/rust-powers.git
+https://github.com/DenysMoskalenko/rust-powers
 ```
 
 **Codex CLI:**
 
 ```bash
-codex plugin marketplace add git@github.com:DenysMoskalenko/rust-powers.git
+codex plugin marketplace add DenysMoskalenko/rust-powers
 codex plugin add rust-powers@rust-powers
 ```
 
@@ -106,13 +110,22 @@ In a Cursor Agent chat, run:
 /add-plugin rust-powers@https://github.com/DenysMoskalenko/rust-powers
 ```
 
-For local testing, copy or symlink this repository to:
+For local testing, copy a clean clone of this repository to the path below. Cursor skips a
+symlink that points outside that folder.
 
 ```text
 ~/.cursor/plugins/local/rust-powers
 ```
 
 Then restart Cursor or run `Developer: Reload Window`.
+
+## Other Agents
+
+Any agent that reads Agent Skills can install the nine skills directly:
+
+```bash
+npx skills add DenysMoskalenko/rust-powers
+```
 
 ## Development
 
@@ -123,6 +136,7 @@ make check      # validate + snippets, what CI runs
 make validate   # frontmatter, budgets, ownership hygiene, evals, STACK.md parity
 make snippets   # compile and lint every ```rust,verify block, run every verified test
 make lint       # prek run --all-files
+make evals      # billed: run evals/ with and without the plugin via claude plugin eval
 ```
 
 [`.github/workflows/check.yml`](.github/workflows/check.yml) runs the same two scripts —
@@ -138,7 +152,8 @@ test user may create databases in; without either, run
 
 [`AGENTS.md`](AGENTS.md) (symlinked as `CLAUDE.md`) has the full house conventions and the
 checklist for adding or changing a skill. Per-skill acceptance scenarios live in
-[`evals/`](evals/). A `tmp/` directory, when present, holds local research and review notes;
+[`evals/`](evals/); `make evals` runs them against a model with and without the plugin, which
+costs real model calls, so it runs before a release rather than in CI. A `tmp/` directory, when present, holds local research and review notes;
 it is untracked and not part of the plugin.
 
 [`maintenance/release-audit.md`](maintenance/release-audit.md) is the release procedure the

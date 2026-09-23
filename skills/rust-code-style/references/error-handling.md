@@ -17,7 +17,7 @@ Domain error types and the rules around them. The service-wide `AppError`, its `
 
 The module rule: one `thiserror` enum per domain module when callers match on variants or the module has more than one failure mode (a template that is missing *and* a database that fails); a single-variant wrapper is not worth an enum — propagate that one failure as `AppError` directly.
 
-`Box<dyn Error>` and `Result<T, String>` are banned. Both throw away the source chain, so the log shows a single line instead of the cause, and neither can be matched on.
+In production code `Box<dyn Error>` and `Result<T, String>` are banned; a test double may return either. Both throw away the source chain, so the log shows a single line instead of the cause, and neither can be matched on.
 
 ## One enum per domain module
 
@@ -106,6 +106,18 @@ Swallowing is a deliberate act and looks like one: `if let Err(error) = cleanup(
 
 ## Panics
 
-`unwrap()` never appears outside tests. `expect("...")` states why failure is impossible, so the message reads as a proof: `expect("regex is a compile-time constant")`, not `expect("failed to compile regex")`. A poisoned `Mutex` is not a proof of anything, so `lock().expect("cache poisoned")` fails `expect_used` on its merits: poisoning only means another thread panicked while holding the guard. Recover it — `lock().unwrap_or_else(std::sync::PoisonError::into_inner)` — where the critical section is short enough that it cannot have left the data half-updated, rather than turn one panic into a second; where it could, rebuild the value or treat it as fatal.
+Outside tests, clippy's `unwrap_used` and `expect_used` fire on every `unwrap()` and `expect()`, whatever the message says, and CI runs clippy with `-D warnings`. Return the error with context instead. Where failure is impossible, the item carries the proof in an `#[expect]`, and its reason reads as one: "the pattern is a compile-time constant", not "failed to compile regex".
+
+```rust,verify
+use std::sync::LazyLock;
+
+use reqwest::Url;
+
+#[expect(clippy::expect_used, reason = "a constant URL literal always parses")]
+static STATUS_PAGE: LazyLock<Url> =
+    LazyLock::new(|| Url::parse("https://status.example.com/").expect("constant URL literal"));
+```
+
+A poisoned `Mutex` is not a proof of anything, so `lock().expect("cache poisoned")` earns no such attribute: poisoning only means another thread panicked while holding the guard. `CatchPanicLayer` keeps the process alive after that panic, so an `unwrap()` or `expect()` on the lock makes one panic a permanent 500 for every later request. Recover it — `lock().unwrap_or_else(std::sync::PoisonError::into_inner)` — where the critical section is short enough that it cannot have left the data half-updated (a single assignment, a counter, a whole value replaced). Where it could, recovery restores the guard, not the invariant: rebuild the value or treat it as fatal.
 
 `todo!` and `unimplemented!` are for a work-in-progress buffer, never a commit. `unreachable!` is acceptable only with a comment proving it, and a type change is usually the better fix.

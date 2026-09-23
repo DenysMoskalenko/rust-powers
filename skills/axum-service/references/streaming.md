@@ -79,7 +79,9 @@ Things that bite:
   ```
 
   `take_while` is evaluated only when the next item arrives, so it bounds a busy stream and never
-  a stalled one — that is what `StreamExt::timeout` is for.
+  a stalled one — that is what `StreamExt::timeout` is for. It yields one `Elapsed` and then waits
+  for the next item again, so end the stream there, as in `stream.timeout(d).map_while(Result::ok)`,
+  or the keep-alive holds the stalled connection open.
 
   `tower_http::timeout::ResponseBodyTimeoutLayer` is the layer form of the same idea, when the
   deadline should apply to a whole subtree instead of one stream.

@@ -4,7 +4,7 @@ Read this file when a Rig agent has to live inside an axum service: held in stat
 from a handler, streamed to a browser, tested offline, and traced.
 
 Verified against `rig` 0.42.0, axum 0.8, axum-test 21. The agent adds one sub-struct to
-`Settings`, one field to `AppState`, one module, two routes in `build_router` and one
+`Settings`, one field to `AppState`, one module, two routes inside the middleware stack and one
 parameter to `test_app()`; `error.rs` is not touched. This
 file shows those deltas and names what stays as it is. For routes, extractors, the error
 type itself, SSE transport rules and OpenAPI see `axum-service`.
@@ -134,20 +134,26 @@ the handler calls it with `.map_err(agent_error)?`:
 
 | `PromptError` | `AppError` | Status | Client sees |
 |---|---|---|---|
-| `MaxTurnsError`, `UnknownToolCall`, `PromptCancelled` | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
-| provider answered 429 (`provider_response_status()`) | `TooManyRequests { retry_after_secs }` | 429 | `"too many requests"` + `Retry-After` |
+| `PromptCancelled` with the reason `DECLINED` (a policy hook's `Stop`) | `BadRequest("the assistant declined this request")` | 400 | that constant |
+| `MaxTurnsError`, `UnknownToolCall`, any other `PromptCancelled` | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
+| provider answered 400, 401 or 403 (`provider_response_status()`) | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
+| provider answered 429 | `TooManyRequests { retry_after_secs }` | 429 | `"too many requests"` + `Retry-After` |
 | anything else | `Unavailable(error.to_string())` | 503 | `"service unavailable"` |
 
-The first row is a wiring bug on this side (a budget too small, a tool the model invented),
-so it takes the scaffold's *unexpected* path: logged with the whole cause chain, answered
-with a constant. The 429 is surfaced as a 429, with the provider's `Retry-After` when it
-sends one, so clients back off instead of retrying into the same limit. Everything else is
-the dependency this request cannot do without being down, which is exactly what
-`Unavailable` is for: the string is **logged, never sent** — a provider message can carry
-prompt text, internal URLs and account ids, and `IntoResponse` already renders
-`Unavailable` as a constant. The wire shape stays `{ error, request_id, details }`, so
-document an agent route with `(status = 503, body = ErrorBody)` and
-`(status = 429, body = ErrorBody)` like any other.
+A policy hook declining this request is a normal outcome rather than a fault, so it is a 400.
+Every such hook stops with the one constant, `DECLINED`, because rig raises `PromptCancelled`
+for its own failures too (a lost prompt, a driver protocol violation, a tool round with no
+results), and those are faults. The 500 rows are wiring bugs on this side (a budget too small,
+a tool the model invented, a run rig cancelled itself, a revoked key, a request shape the
+provider rejects), so they take the scaffold's *unexpected* path: logged with the whole cause
+chain, answered with a constant. A 503 there would read as an outage and invite clients to retry
+what can never succeed. The 429 is surfaced as a 429, with the
+provider's `Retry-After` when it sends one, so clients back off instead of retrying into the same
+limit. Everything else is the dependency this request cannot do without being down, which is
+exactly what `Unavailable` is for: the string is **logged, never sent** — a provider message can
+carry prompt text, internal URLs and account ids, and `IntoResponse` already renders `Unavailable`
+as a constant. The wire shape stays `{ error, request_id, details }`, so document an agent route
+with `(status = 503, body = ErrorBody)` and `(status = 429, body = ErrorBody)` like any other.
 
 `provider_response_status()`, `provider_response_headers()` and `provider_request_id()` are
 forwarded through `PromptError` — no destructuring needed.
@@ -172,7 +178,7 @@ use axum::http::{StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::post;
 use futures::{Stream, StreamExt as _};
-use rig::agent::{Agent, MultiTurnStreamItem};
+use rig::agent::{Agent, MultiTurnStreamItem, StreamingError};
 use rig::completion::PromptError;
 use rig::prelude::*;
 use rig::streaming::StreamedAssistantContent;
@@ -199,9 +205,6 @@ pub struct ChatRequest {
     #[validate(length(min = 1, max = 4000))]
     #[schema(min_length = 1, max_length = 4000)]
     pub message: String,
-    #[validate(length(min = 1, max = 64))]
-    #[schema(min_length = 1, max_length = 64)]
-    pub conversation_id: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -211,11 +214,23 @@ pub struct ChatResponse {
     pub output_tokens: u64,
 }
 
+/// The reason every policy hook in this service stops a run with, as in
+/// `CompletionCallAction::stop(DECLINED)`. rig raises `PromptCancelled` for its
+/// own failures too, so the reason is how `agent_error` tells a refusal from a fault.
+/// A hook that could not decide, say because its moderation call failed, stops
+/// with another reason: that is an outage, not a refusal.
+pub const DECLINED: &str = "declined by policy";
+
 /// Maps a failed run onto the variants `error.rs` already has, so it stays untouched.
 fn agent_error(error: PromptError) -> AppError {
     match error {
-        // Out of turns, or a tool the model invented: a wiring bug on this side.
-        // `Other` is 500, logged with its cause chain, answered with a constant.
+        // A policy hook said no: a refusal, not a fault, answered with a constant.
+        PromptError::PromptCancelled { reason, .. } if reason == DECLINED => {
+            AppError::BadRequest("the assistant declined this request".to_owned())
+        }
+        // Out of turns, a tool the model invented, or a run rig cancelled itself:
+        // a bug on this side. `Other` is 500, logged with its cause chain,
+        // answered with a constant.
         PromptError::MaxTurnsError { .. }
         | PromptError::UnknownToolCall { .. }
         | PromptError::PromptCancelled { .. } => AppError::Other(anyhow::Error::from(error)),
@@ -228,6 +243,15 @@ fn agent_error(error: PromptError) -> AppError {
                 .and_then(|value| value.parse().ok());
             AppError::TooManyRequests { retry_after_secs }
         }
+        // A revoked key or a request the provider rejects is a wiring bug too:
+        // a 503 would invite clients to retry what can never succeed.
+        _ if matches!(
+            error.provider_response_status(),
+            Some(StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+        ) =>
+        {
+            AppError::Other(anyhow::Error::from(error))
+        }
         // The provider is down or broken; the caller's request was fine. The
         // message is logged, never sent: it can carry prompt text, internal URLs
         // and account ids.
@@ -237,17 +261,14 @@ fn agent_error(error: PromptError) -> AppError {
 
 /// `skip_all` is deliberate: the default records every argument, which puts the
 /// whole prompt in your logs.
-#[tracing::instrument(skip_all, fields(conversation_id = body.conversation_id.as_deref()))]
+#[tracing::instrument(skip_all)]
 pub async fn chat(
     State(state): State<AppState>,
     Valid(body): Valid<ChatRequest>,
 ) -> Result<Json<ChatResponse>, AppError> {
     // Explicit on every prompt, tools or not: the budget is visible here, and a
     // provider that keeps asking for tools the agent does not have cannot loop.
-    let mut request = state.agent.prompt(body.message).max_turns(5);
-    if let Some(id) = body.conversation_id {
-        request = request.conversation(id);
-    }
+    let request = state.agent.prompt(body.message).max_turns(5);
 
     // `extended_details()` returns `PromptResponse` (output plus aggregated
     // usage) rather than a bare `String`.
@@ -266,62 +287,94 @@ pub async fn chat_stream(
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
     // `stream_prompt` clones the agent's config, so the stream owns its data and
     // is `'static` — it outlives this handler with no borrow of `state`.
-    let stream = state.agent.stream_prompt(body.message).max_turns(5).await;
-
-    let events = stream
-        .scan(false, |failed, item| {
-            // The status line went out with the first token, so a mid-stream
-            // failure can only be reported as an event — and then the stream
-            // ends, because a client that keeps reading has no way to tell a
-            // recovered run from a dead one.
-            if *failed {
-                return futures::future::ready(None);
-            }
-            let event = match item {
-                Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
-                    text,
-                ))) => Some(Event::default().event("token").data(text.text)),
-                Ok(MultiTurnStreamItem::FinalResponse(response)) => Some(
-                    Event::default()
-                        .event("done")
-                        .data(response.usage.output_tokens.to_string()),
-                ),
-                // Tool calls, reasoning deltas, retries: nothing a chat UI draws,
-                // so drop them instead of inventing keep-alive comments for them.
-                Ok(_) => None,
-                Err(error) => {
-                    *failed = true;
-                    tracing::error!(%error, "chat stream failed");
-                    Some(Event::default().event("error").data("the assistant failed"))
-                }
-            };
-            futures::future::ready(Some(event))
-        })
-        .filter_map(futures::future::ready)
-        .map(Ok);
+    let run = state.agent.stream_prompt(body.message).max_turns(5).await;
 
     // Real keep-alive comments, on an interval, from the layer that owns them.
-    Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+    Ok(Sse::new(sse_events(run)).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
-/// The service's `build_router`, reduced to the agent routes. `/chat/stream` is
-/// merged **after** the middleware stack: `TimeoutLayer` would cut a live SSE
-/// connection, and `.layer()` wraps only the routes registered before it.
+/// The run as SSE events. Rig does not bound a completion and `TimeoutLayer`
+/// stops at the response head, so every item must arrive within
+/// `REQUEST_TIMEOUT`. `Timeout` yields one `Elapsed` and then waits on the run
+/// again, so the state turns `None` after the last frame: the next poll ends the
+/// stream without touching the run, which drops it and the provider call.
+fn sse_events(
+    run: impl Stream<Item = Result<MultiTurnStreamItem, StreamingError>> + 'static,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    let run = Box::pin(tokio_stream::StreamExt::timeout(run, REQUEST_TIMEOUT));
+    futures::stream::unfold(Some(run), |run| async move {
+        let mut run = run?;
+        loop {
+            match frame(run.next().await?) {
+                Frame::Skip => {}
+                Frame::Send(event) => return Some((Ok::<_, Infallible>(event), Some(run))),
+                Frame::Last(event) => return Some((Ok(event), None)),
+            }
+        }
+    })
+}
+
+/// What one item of the run becomes on the wire.
+enum Frame {
+    /// Tool calls, reasoning deltas, retries: nothing a chat UI draws. Dropped
+    /// rather than relabelled as keep-alive comments, which `KeepAlive` owns.
+    Skip,
+    Send(Event),
+    /// The status line went out with the first token, so a failure can only be
+    /// an event, and it is the last one: a client that keeps reading cannot
+    /// tell a recovered run from a dead one.
+    Last(Event),
+}
+
+fn frame(
+    item: Result<Result<MultiTurnStreamItem, StreamingError>, tokio_stream::Elapsed>,
+) -> Frame {
+    let cause = match item {
+        Ok(Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)))) => {
+            return Frame::Send(Event::default().event("token").data(text.text));
+        }
+        Ok(Ok(MultiTurnStreamItem::FinalResponse(response))) => {
+            let output_tokens = response.usage.output_tokens.to_string();
+            return Frame::Send(Event::default().event("done").data(output_tokens));
+        }
+        Ok(Ok(_)) => return Frame::Skip,
+        Ok(Err(StreamingError::Prompt(error)))
+            if matches!(&*error, PromptError::PromptCancelled { reason, .. } if reason == DECLINED) =>
+        {
+            return Frame::Last(
+                Event::default()
+                    .event("declined")
+                    .data("the assistant declined this request"),
+            );
+        }
+        Ok(Err(error)) => error.to_string(),
+        Err(stalled) => stalled.to_string(),
+    };
+    tracing::error!(%cause, "chat stream failed");
+    Frame::Last(Event::default().event("error").data("the assistant failed"))
+}
+
+/// The service's `build_router`, reduced to the agent routes. Both sit inside the
+/// stack: `TimeoutLayer` races only the future that produces the response, so it
+/// bounds `/chat` and never cuts a stream that has started.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/chat", post(chat))
+        .route("/chat/stream", post(chat_stream))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,
         ))
-        .merge(Router::new().route("/chat/stream", post(chat_stream)))
         .with_state(state)
 }
 
 #[cfg(test)]
 mod tests {
     use axum_test::TestServer;
-    use rig::agent::AgentBuilder;
+    use futures::StreamExt as _;
+    use rig::agent::{
+        AgentBuilder, AgentHook, CompletionCallAction, CompletionCallEvent, HookContext,
+    };
     use rig::completion::Usage;
     use rig::test_utils::{MockCompletionModel, MockStreamEvent, MockTurn};
     use serde_json::json;
@@ -337,14 +390,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_provider_failure_does_not_leak_the_provider_message() {
+    async fn a_provider_outage_is_a_503_without_the_provider_message() {
         let server = server(MockCompletionModel::from_turns([MockTurn::error(
-            "api key sk-live-42 is invalid",
+            "upstream overloaded for account acct-42",
         )]));
 
         let response = server.post("/chat").json(&json!({ "message": "hi" })).await;
 
         response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!response.text().contains("acct-42"), "the body stays generic");
+    }
+
+    #[tokio::test]
+    async fn a_rejected_api_key_is_a_500_not_an_outage() {
+        let server = server(MockCompletionModel::from_turns([
+            MockTurn::provider_response_error(
+                StatusCode::UNAUTHORIZED,
+                "api key sk-live-42 is invalid",
+                "req-2",
+            ),
+        ]));
+
+        let response = server.post("/chat").json(&json!({ "message": "hi" })).await;
+
+        response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
         assert!(!response.text().contains("sk-live-42"), "the body stays generic");
     }
 
@@ -357,6 +426,65 @@ mod tests {
         let response = server.post("/chat").json(&json!({ "message": "hi" })).await;
 
         response.assert_status(StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// A policy hook that declines every request before the model is called.
+    struct DeclineAll;
+
+    impl AgentHook for DeclineAll {
+        async fn on_completion_call(
+            &self,
+            _ctx: &HookContext,
+            _event: CompletionCallEvent<'_>,
+        ) -> CompletionCallAction {
+            CompletionCallAction::stop(DECLINED)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_policy_stop_is_a_400_with_a_constant_body() {
+        let agent = AgentBuilder::new(MockCompletionModel::text("never sent"))
+            .add_hook(DeclineAll)
+            .build();
+        let server = TestServer::new(build_router(AppState {
+            agent: Arc::new(agent),
+        }));
+
+        let response = server.post("/chat").json(&json!({ "message": "hi" })).await;
+
+        response.assert_status(StatusCode::BAD_REQUEST);
+        let body = response.json::<serde_json::Value>();
+        assert_eq!(body["error"], "the assistant declined this request");
+    }
+
+    #[tokio::test]
+    async fn a_policy_stop_on_the_stream_is_a_declined_event() {
+        let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("never sent"),
+        ]]))
+        .add_hook(DeclineAll)
+        .build();
+        let server = TestServer::new(build_router(AppState {
+            agent: Arc::new(agent),
+        }));
+
+        let response = server
+            .post("/chat/stream")
+            .json(&json!({ "message": "hi" }))
+            .await;
+
+        let body = response.text();
+        assert!(body.contains("event: declined"), "{body}");
+        assert!(!body.contains("never sent"), "{body}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_run_ends_the_stream_after_one_error_event() {
+        let stalled = futures::stream::pending::<Result<MultiTurnStreamItem, StreamingError>>();
+
+        let events: Vec<_> = sse_events(stalled).collect().await;
+
+        assert_eq!(events.len(), 1, "one error event, then the stream ends");
     }
 
     #[tokio::test]
@@ -401,24 +529,27 @@ mod tests {
 
 ## Router Wiring
 
-`build_router` above is the shape, reduced to two routes. In a real service the blocking
-route joins the skeleton's `OpenApiRouter` like any other handler — a `#[utoipa::path]`
-attribute on `chat` and `.routes(routes!(chat))` — so it appears in the OpenAPI document,
-while the streaming route stays on a plain `Router` merged in after the middleware stack:
+`build_router` above is the shape, reduced to two routes. In a real service both join the
+skeleton's `OpenApiRouter` like any other handler — a `#[utoipa::path]` attribute on each and
+`.routes(routes!(..))` — so they appear in the OpenAPI document and sit inside the middleware
+stack with every other route: request id, panic handling, tracing, metrics, CORS.
 
 ```rust
-let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
-    .merge(api::chat::router())        // /chat, documented, inside the stack
-    .split_for_parts();
-
-router
-    .layer(/* the ServiceBuilder stack, TimeoutLayer innermost */)
-    .merge(api::chat::stream_router())  // /chat/stream, outside it
-    .with_state(state)
+// api/chat.rs, merged in `api::router()` beside `users::router()`
+pub fn router() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new()
+        .routes(routes!(chat))
+        .routes(routes!(chat_stream))
+}
 ```
 
-Rig does not bound a completion, so the timeout on the blocking route is the only thing
-that does. A stream is bounded by the run itself and by the client dropping the connection.
+Rig does not bound a completion. On `/chat` the stack's `TimeoutLayer` does. On `/chat/stream`
+the layer stops at the response head, which leaves before the first token, so `sse_events` wraps
+the run in `tokio_stream::StreamExt::timeout`. That alone does not end anything: it yields one
+`Elapsed` and then waits on the run again, while the SSE keep-alive, which the timeout never
+sees, stops any proxy from closing the idle connection. So after the `error` event the `unfold`
+state is `None`, and the next poll ends the stream without touching the run, which drops it and
+the provider call with it. `max_turns` bounds how many model calls one run makes.
 
 ## Notes on the Handlers
 
@@ -431,8 +562,18 @@ that does. A stream is bounded by the run itself and by the client dropping the 
   sends on a real interval; the two collide and a client cannot tell them apart.
 - **Cancellation is a drop** — the browser disconnects, axum drops the body, the run ends.
 - **Token text is untrusted model output** — escape it client-side.
-- **`conversation_id` is recorded, the message is not.** Anything you put in a span field
-  is exported; see OpenTelemetry below.
+- **A conversation id is scoped to the caller.** The agent above has no `.memory(..)`, so each
+  request stands alone. With memory, `ChatRequest` gains a `conversation_id`, which is untrusted
+  input: key the store by the authenticated user as well, or one user's guessed id reads another
+  user's history. With axum-service's `AuthUser` as a handler argument before the body extractor:
+
+  ```rust
+  let mut request = state.agent.prompt(body.message).max_turns(5);
+  if let Some(id) = body.conversation_id {
+      // The client names the conversation; the token decides whose it is.
+      request = request.conversation(format!("{}/{id}", user.0.sub));
+  }
+  ```
 
 ## Testing with `axum-test` and `MockCompletionModel`
 

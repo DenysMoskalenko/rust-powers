@@ -1,6 +1,6 @@
 interface:
   display_name: "Rust Tooling"
-  short_description: "Toolchain, lints, test and supply-chain config, hooks, Makefile, Docker and CI"
+  short_description: "Toolchain, lints, hooks, supply chain, Docker and CI config"
 
 policy:
   allow_implicit_invocation: true

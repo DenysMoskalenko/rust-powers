@@ -1,8 +1,8 @@
 ---
 name: rust-nats
-description: "Use when publishing or consuming NATS messages from an axum service — an event bus, work queue or message queue on async-nats: connect options, subjects, request-reply, queue groups, JetStream streams and durable pull consumers, Nats-Msg-Id deduplication, ack, nak and term, KV buckets, tests against a NATS container. Also for no responders, consumer deleted, timed out, MAX_DELIVERIES. Not for Redis caching or pub/sub (rust-redis), nor the readiness endpoint itself (axum-service)."
+description: "Use when publishing or consuming NATS messages, or when events or background work must survive a restart — event bus, pub/sub or durable work queue on async-nats: subjects, request-reply, queue groups, JetStream streams and durable pull consumers, Nats-Msg-Id deduplication, ack, nak and term, dead-letter and poison messages, KV buckets, flaky NATS tests under nextest. Also for no responders, consumer deleted, timed out, MAX_DELIVERIES. Not for Redis caching (rust-redis), nor the readiness endpoint itself (axum-service)."
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 
 # NATS with async-nats
@@ -10,16 +10,32 @@ metadata:
 Assumes Rust 1.98 edition 2024, tokio 1, axum 0.8, async-nats 0.50 with default features,
 NATS server 2.12 with JetStream, testcontainers-modules 0.15.
 
+Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come from the rust-scaffolding template. In a project built differently, use its own types, helpers and tooling, map outcomes onto its nearest existing error variant, and say so when none fits instead of adding one. Apply these rules to new code; when editing existing code, keep its public contract and tuned configuration and report differences instead of rewriting, unless asked. If `Cargo.lock` pins another major or minor version than the line above, follow the project and say which rules may not apply.
+
 ## Important
 
-- Every worker is a **durable pull consumer with explicit ack**; never a push consumer.
 - A JetStream publish is two awaits: `.await?.await?`. One await sends and loses the rejection.
 - The first `Err` item from `consumer.messages()` is terminal for that stream: log, back off,
   rebuild the consumer, loop. `?` kills the worker; `continue` hangs it.
-- Ack after the database commit. `Nats-Msg-Id` deduplicates the publish only; consumer
-  idempotency is a unique key in Postgres.
 - `AppError` gains no variant and no `From<MessagingError>`: map with `messaging_error` onto
   `Unavailable` (503), `BadRequest` (400) or `Other` (500).
+
+## References
+
+- `references/jetstream.md` — read when declaring a stream or choosing core versus JetStream:
+  the three declaration calls, retention, `duplicate_window`, publish errors, KV and
+  `watch_with_history`, object store.
+- `references/consumers.md` — read when writing or debugging a worker: the pull config field by
+  field, `messages()` versus `fetch()`, ack variants, `dead_letter`, redelivery and the
+  dead-letter stream, backpressure, what each `Err` item means, ordered and push consumers.
+- `references/service-integration.md` — read when wiring NATS into the service: state and
+  settings, publishing from handlers, `MessagingError` and `messaging_error`, the worker task,
+  startup retry and bounded shutdown, the readiness check, `traceparent` and `messaging.*`
+  spans, the easy-to-get-wrong table.
+- `references/testing-nats.md` — read when setting up NATS tests: the container and its tag,
+  the two races, prefix isolation, the harness, what is worth a test.
+
+## Decide first
 
 NATS is the message bus, not a cache (`rust-redis`). The legacy `nats` crate is deprecated;
 `async-nats` is the only client.
@@ -31,14 +47,11 @@ async-nats = "0.50"   # jetstream, kv, object-store and service are default feat
 Pre-1.0, a breaking minor every few weeks: pin it. Rustls only. Subscriptions and
 consumer streams are `Stream`s, driven with `tokio_stream::StreamExt`.
 
-## Decide first
-
 | Need | Use | Because |
 |---|---|---|
 | Fire-and-forget notification, RPC, fan-out | core `Client` | routed to whoever is subscribed now, then forgotten |
 | Anything whose loss is a bug | JetStream stream + durable pull consumer | persisted, acked, redelivered |
 | Flags, small config, last value per key | KV bucket with `watch_with_history` | the current value first, then every change |
-| Blobs up to tens of MB | object store | past that, S3 and a message with the key |
 
 ## The core pattern
 
@@ -66,8 +79,11 @@ pub async fn publish_order_placed(ctx: &Context, order_id: &str, event_id: &str)
     Ok(ack.sequence)
 }
 
-/// Runs until the first `Err` item, then returns so the caller can back off,
-/// rebuild the consumer and call again. Never `?` inside the loop, never `continue`.
+/// Returns at the first `Err` item: after `ConsumerDeleted` the stream ends;
+/// after `NoResponders`, `MissingHeartbeat` or `Pull` it stays pending; either
+/// way the caller's loop backs off, rebuilds the consumer and calls again. An
+/// `Err` item never escapes the worker task through `?` and is never skipped
+/// with `continue`.
 pub async fn consume_until_error(stream: &stream::Stream) -> anyhow::Result<()> {
     let consumer = stream
         .get_or_create_consumer(
@@ -133,9 +149,15 @@ inside the stream's `duplicate_window` (2 min default) returns the original sequ
 `duplicate: true`. During an outage the second await fails with `TimedOut` after the context
 timeout (5 s). `jetstream::context::Publish` is deprecated since 0.44 and fails `-D warnings`.
 
+An event that must match a database write goes through an outbox row committed with the write,
+relayed by a worker (`sea-orm-postgres`).
+
 Streams are declared at startup by the service that owns the subjects: `get_or_create_stream`
 returns an existing stream untouched, `create_stream` fails on a changed config (err 10058),
-`create_or_update_stream` reconciles.
+`create_or_update_stream` reconciles. A stream managed as infrastructure-as-code (NACK, Terraform)
+is not redeclared at startup. A stream at a limit silently drops its oldest message under the
+default `DiscardPolicy::Old`; `DiscardPolicy::New` refuses the publish instead, the honest answer
+for work that must not be lost.
 
 ## Consume
 
@@ -164,10 +186,11 @@ The copy carries payload and headers; `Term` alone fires `MSG_TERMINATED`, not
 `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.<stream>.<consumer>` on the next delivery attempt; one
 stream capturing `dlq.orders.>` and that advisory is the DLQ.
 
-Trouble arrives as `Err` items — `ConsumerDeleted`, `NoResponders` (consumer gone),
-`MissingHeartbeat`, `Pull` — after which the stream stays pending; the outer loop rebuilds. Only
-the shutdown signal (a `tokio::sync::watch`, one task per consumer) ends it. After HTTP has
-drained: flip the watch, join, `flush()`, `drain()`, each under `tokio::time::timeout`.
+Trouble arrives as `Err` items: after `ConsumerDeleted` the stream ends; after `NoResponders`
+(consumer gone), `MissingHeartbeat` or `Pull` it stays pending; either way the outer loop
+rebuilds. Only the shutdown signal (a `tokio::sync::watch`, one task per consumer) ends that loop.
+After HTTP has drained: flip the watch, join, `flush()`, `drain()`, each under
+`tokio::time::timeout`.
 
 ## Request-reply
 
@@ -176,7 +199,6 @@ Request::new().payload(..).timeout(Some(..)))` sets one per call. `no responders
 immediately from a connected server; a disconnected client waits out the timeout and gets
 `TimedOut`. The responder is a `queue_subscribe` loop that publishes to `message.reply` — there
 is no `Message::respond`, and `reply` is `None` when the sender used `publish`.
-`client.service_builder()` (`service::ServiceExt as _`) adds `nats.micro` endpoints.
 
 ## Errors
 
@@ -207,11 +229,9 @@ One serde JSON struct per subject family with its own `event_id: Uuid`: the `Nat
 publish, and on the consumer side a unique column written in the same transaction as the work, a
 unique violation being `Done` (`sea-orm-postgres`). A decode failure is `Poison`, never `Retry`.
 
-The producer span injects `traceparent` into the `HeaderMap` with the global propagator; the
-consumer span extracts it and `set_parent`s, so request and worker are one trace. Fields follow
-the OTel `messaging.*` conventions; the span name is `{operation} {family}` — `process
-orders.placed`, never the full subject. Counters `nats_messages_published_total` and
-`nats_messages_consumed_total` by family. Propagator and exporter belong to `axum-service`.
+`traceparent` rides in the message headers, spans follow the OTel `messaging.*` conventions and
+counters label by subject family: `references/service-integration.md`. Propagator and exporter
+belong to `axum-service`.
 
 ## Testing
 
@@ -228,32 +248,14 @@ are tested without a broker.
 | About to… | Rule |
 |---|---|
 | Put `Arc<async_nats::Client>` in state, or connect per request | A cheap `Clone` handle; one connection per process |
-| Await a JetStream publish once | The first await only sends; `.await?.await?` or the rejection is lost |
 | Treat core `publish` as delivered | It queued bytes locally; JetStream for anything that must arrive |
-| `?` on an item from `consumer.messages()` | The stream never ends; the first `Err` means rebuild and loop — `?` kills the worker, `continue` hangs it |
+| Consume work that must not be lost with a push or ephemeral consumer | A durable pull consumer with explicit ack; an ordered consumer suits a rebuildable read model |
 | `ack()` before the transaction commits | A crash in between loses the message; ack after |
+| Rely on `Nats-Msg-Id` for consumer idempotency | It deduplicates the publish only; the consumer needs a unique key in Postgres |
 | Leave `max_deliver` unset | A poison message is redelivered forever; set it, capture the advisory |
 | `Term` poison and call that the DLQ | `Term` fires `MSG_TERMINATED` only; copy to `dlq.<subject>` first |
-| Rely on `Nats-Msg-Id` for consumer idempotency | It dedups the publish only; unique key in Postgres |
-| Create a push consumer | Flow control is opt-in and per subscription there; durable pull has it built in |
 | Reconcile a consumer with `delete_consumer` + create | Drops the cursor and every pending message; `create_consumer` updates in place |
-| Add a `Messaging` variant or `From<MessagingError>` to `AppError` | `AppError` is `axum-service`'s; map at the call site with `messaging_error` |
 | Map `TimedOut` to 502 or 504 | 503 `Unavailable`; a disconnected client times out too |
 | `flush()` or `drain()` at shutdown without a timeout | `flush()` blocks while NATS is down; `tokio::time::timeout` around every shutdown wait |
-| `watch(key)` to read a flag | Yields only changes after the call; `watch_with_history`, or `get` then `watch` |
+| `watch(key)` to read a flag | Yields only changes after the call; `watch_with_history` (`get` then `watch` loses a change between the two) |
 | Use Redis pub/sub for events | No persistence, acks or replay; NATS — caching stays in `rust-redis` |
-
-## References
-
-- `references/jetstream.md` — read when declaring a stream or choosing core versus JetStream:
-  the three declaration calls, retention, `duplicate_window`, publish errors, KV and
-  `watch_with_history`, object store.
-- `references/consumers.md` — read when writing or debugging a worker: the pull config field by
-  field, `messages()` versus `fetch()`, ack variants, `dead_letter`, redelivery and the
-  dead-letter stream, backpressure, what each `Err` item means, ordered and push consumers.
-- `references/service-integration.md` — read when wiring NATS into the service: state and
-  settings, publishing from handlers, `MessagingError` and `messaging_error`, the worker task,
-  startup retry and bounded shutdown, the readiness check, `traceparent` and `messaging.*`
-  spans, the easy-to-get-wrong table.
-- `references/testing-nats.md` — read when setting up NATS tests: the container and its tag,
-  the two races, prefix isolation, the harness, what is worth a test.

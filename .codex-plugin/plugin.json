@@ -1,6 +1,6 @@
 {
   "name": "rust-powers",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Reusable engineering skills for AI-assisted Rust web development: axum, sea-orm, PostgreSQL, testing, telemetry, tooling, scaffolding, NATS, Redis, and rig agents.",
   "author": {
     "name": "Denys Moskalenko",
@@ -47,20 +47,17 @@
     "shortDescription": "Reusable Rust, axum, sea-orm, testing, telemetry, scaffolding, NATS, Redis, and AI-agent engineering skills",
     "longDescription": "Rust Powers gives Codex focused engineering guidance for Rust 1.98 edition 2024 web services - axum, sea-orm and PostgreSQL, nextest and rstest testing, cargo tooling, OpenTelemetry, NATS messaging, Redis caching and rate limiting, and rig agents - plus scaffolding a brand-new service from a buildable template.",
     "developerName": "Denys Moskalenko",
-    "category": "Coding",
+    "category": "Developer Tools",
     "capabilities": [
       "Interactive",
       "Read",
       "Write"
     ],
     "websiteURL": "https://github.com/DenysMoskalenko/rust-powers",
-    "privacyPolicyURL": "https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement",
-    "termsOfServiceURL": "https://docs.github.com/en/site-policy/github-terms/github-terms-of-service",
     "defaultPrompt": [
       "Scaffold a brand-new axum service from scratch.",
       "Use Rust Powers for this axum change.",
-      "Review this service against Rust Powers.",
-      "Add tests using the Rust Powers patterns."
+      "Review this service against Rust Powers."
     ],
     "brandColor": "#CE422B",
     "screenshots": []
