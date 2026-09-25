@@ -171,3 +171,9 @@
 **Prompt**: "Let users continue a conversation by sending a `conversation_id` with each `POST /chat`; the agent already has `.memory(..)`."
 
 **Wrong answer**: `\.conversation\(\s*&?\s*(?:body|req|request|payload|input|params)\.conversation_id\b|(?:Some\(|let\s+(?:mut\s+)?)\s*(\w+)\s*\)?\s*=\s*&?\s*(?:\w+\.)?conversation_id\b(?:(?!let\s+(?:mut\s+)?\1\b)[\s\S]){0,400}?\.conversation\(\s*&?\s*\1(?:\.clone\(\))?\s*\)`
+
+### Probe 6 - no forced tool choice on Claude Opus 5.5
+
+**Prompt**: "Our support agent runs on `claude-opus-5-5` through rig's Anthropic client and sometimes answers without looking the order up. Make it call `lookup_order` before every answer."
+
+**Wrong answer**: `\.tool_choice\(\s*(?:rig::message::)?ToolChoice::(?:Required|Specific)`

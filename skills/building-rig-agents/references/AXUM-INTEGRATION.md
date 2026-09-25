@@ -63,6 +63,10 @@ pub enum Provider {
     Gemini,
 }
 
+/// rig 0.42 has no Anthropic default for Opus 5, Sonnet 5 or Fable ids, and thinking
+/// counts toward the limit.
+const MAX_TOKENS: u64 = 16_000;
+
 /// Built once in `main`, held as `Arc<Agent>` in `AppState`. Every arm yields the
 /// same `AgentBuilder`: the model type is erased at `.agent(..)`.
 pub fn build_agent(settings: &AgentSettings) -> anyhow::Result<Agent> {
@@ -72,7 +76,7 @@ pub fn build_agent(settings: &AgentSettings) -> anyhow::Result<Agent> {
         Provider::Anthropic => anthropic::Client::new(key)?.agent(&settings.model),
         Provider::Gemini => gemini::Client::new(key)?.agent(&settings.model),
     };
-    Ok(builder.name("chat").preamble("You are terse.").build())
+    Ok(builder.name("chat").preamble("You are terse.").max_tokens(MAX_TOKENS).build())
 }
 
 #[test]

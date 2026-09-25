@@ -1,6 +1,6 @@
 {
   "name": "rust-powers",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Reusable engineering skills for AI-assisted Rust web development: axum, sea-orm, PostgreSQL, testing, telemetry, tooling, scaffolding, NATS, Redis, and rig agents.",
   "author": {
     "name": "Denys Moskalenko",

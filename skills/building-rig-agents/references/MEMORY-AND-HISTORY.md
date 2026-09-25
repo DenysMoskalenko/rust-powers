@@ -178,6 +178,14 @@ Bounding by estimated tokens tracks what you actually pay for; bounding by messa
 simpler and more predictable. Both drop a leading orphaned tool result when its paired tool
 call is truncated away, since most providers reject unpaired tool results.
 
+Neither window, and neither adapter below, suits Claude Opus 5.5 or Fable 5.1. Each thinking
+block those models return is bound to every message before it, and rig stores the blocks in
+memory and replays them. Dropping the oldest turns, or splicing a summary in their place,
+changes that prefix under every block that stays, so the next request is a 400 wherever the
+API enforces the check, which includes every account created from 31 August 2026. On those
+models, bound history with the summarize-and-restart shape in Rolling Your Own Compaction,
+which replays nothing from before the summary.
+
 ### Keeping what you truncate
 
 Truncation silently discards turns. Two adapters turn that loss into something useful:
