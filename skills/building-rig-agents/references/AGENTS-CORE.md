@@ -103,8 +103,7 @@ hooks; see Hooks and Runner.
 let agent = client
     .agent(MODEL)
     .preamble("You are a helpful assistant.")
-    .temperature(0.7)
-    .max_tokens(1024)
+    .max_tokens(16_000)
     .build();
 ```
 
@@ -127,7 +126,7 @@ plain `Agent` — no type parameter, and agents from different providers share o
 | `context(&str)` | Add one static context document, sent on every request |
 | `dynamic_context(samples, index)` | Retrieve `samples` documents from a vector index per model call |
 | `name(&str)` / `description(&str)` | Become the tool name and description when this agent is handed to another via `into_tool()`; also label telemetry spans |
-| `temperature(f64)`, `max_tokens(u64)` | Model parameters |
+| `temperature(f64)`, `max_tokens(u64)` | Model parameters. Claude Opus 4.7 and later, Sonnet 5 and Fable reject `temperature` with a 400. On Claude, `max_tokens` covers thinking plus the reply, and rig 0.42 has no default for Opus 5, Sonnet 5 or Fable ids |
 | `tool(T)` | Add a static tool (see Tools) |
 | `tool_choice(ToolChoice)` | Force, forbid, or restrict tool use |
 | `default_max_turns(usize)` | Default total model-call budget for every request |
@@ -208,8 +207,7 @@ let model = client.completion_model(MODEL);
 let response = model
     .completion_request("What is Rust?")
     .preamble("You are a helpful assistant.".to_string())
-    .temperature(0.7)
-    .max_tokens(1000)
+    .max_tokens(16_000)
     .send()
     .await?;
 ```
@@ -240,13 +238,10 @@ new one.
 ## Steering Tool Use
 
 ```rust
-use rig::message::ToolChoice;
-
 let agent = client
     .agent(MODEL)
-    .preamble("You are a calculator. Always compute with tools.")
+    .preamble("You are a calculator. Compute every sum with the `add` tool.")
     .tool(Adder)
-    .tool_choice(ToolChoice::Required)
     .build();
 ```
 
@@ -257,9 +252,11 @@ let agent = client
 - `Required` — the model must call at least one tool.
 - `Specific { function_names }` — the model must call one of the named tools.
 
-`Required` and `Specific` are how you force a deterministic first step ("always search
-before answering"). If you also narrow the advertised tool list, make sure the tool choice
-still names a tool that is actually on offer.
+`Required` and `Specific` force a call. rig sends them to Anthropic as `any` and `tool`, and
+Claude Opus 5.5 and Fable 5.1 reject both with a 400. For a step that must come first on
+every provider ("always search before answering"), name the tool in the preamble under
+`Auto` and check in an `on_tool_call` hook that the call happened. If you also narrow the
+advertised tool list, make sure the tool choice still names a tool that is actually on offer.
 
 ## Token Usage and Run Details
 

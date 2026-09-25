@@ -5,10 +5,10 @@
     "email": "denysmoskalenko11@gmail.com"
   },
   "description": "Reusable Rust, axum, sea-orm, PostgreSQL, testing, telemetry, tooling, project scaffolding, NATS messaging, Redis caching, and AI-agent engineering skills",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "metadata": {
     "description": "Reusable Rust, axum, sea-orm, PostgreSQL, testing, telemetry, tooling, project scaffolding, NATS messaging, Redis caching, and AI-agent engineering skills",
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "plugins": [
     {

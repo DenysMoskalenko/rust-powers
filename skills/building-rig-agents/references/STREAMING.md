@@ -32,7 +32,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent = openai::Client::from_env()?
         .agent(MODEL)
         .preamble("You are a storyteller.")
-        .temperature(0.9)
         .build();
 
     let mut stream = agent.stream_prompt("Tell me a short story about a robot.").await;
@@ -149,7 +148,6 @@ let model = client.completion_model(MODEL);
 let response = model
     .completion_request("Explain ownership in Rust.")
     .preamble("You are a patient teacher.".to_string())
-    .temperature(0.9)
     .stream()
     .await?;
 ```

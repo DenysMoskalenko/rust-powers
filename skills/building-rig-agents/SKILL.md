@@ -2,7 +2,7 @@
 name: building-rig-agents
 description: "Use when adding an LLM, assistant, or chatbot endpoint to an axum service, or building, testing, or debugging rig agents against OpenAI, Anthropic or Gemini — AgentBuilder, tools, structured extraction, streaming, RAG, conversation history, MCP tools via rmcp, mapping PromptError onto AppError. Also for MaxTurnsError, ToolCallError, rig-core versus rig, or E0599 no method named agent. Not for SSE framing or routes (axum-service), nor rate limits or caching around the model call (rust-redis)."
 metadata:
-  version: "0.2.0"
+  version: "0.2.1"
 ---
 
 # Building AI Agents with Rig
@@ -122,7 +122,6 @@ async fn main() -> anyhow::Result<()> {
     let agent = openai::Client::from_env()?
         .agent(MODEL)
         .preamble("You are a calculator. Use the tools to answer arithmetic questions.")
-        .temperature(0.7)
         .tool(Subtract)
         .build();
 
@@ -191,3 +190,6 @@ async fn main() -> anyhow::Result<()> {
 | Pass a request's `conversation_id` straight to `.conversation(..)` | Scope it to the authenticated user, or one user reads another's history |
 | Set `record_content_telemetry(true)` on every agent | Content goes to the trace backend: one agent or one request, never globally |
 | Write `fn definition`, `ToolError`, `with_history(..)` or `dynamic_tools(n, index, ..)` | Pre-0.42 shapes: `description()` + `parameters()`, `ToolExecutionError`, `history(..)`, `retrieved_tools(..)` |
+| Force a tool with `ToolChoice::Required` or `Specific`, or call `extractor`, on Claude Opus 5.5 or Fable 5.1 | A 400 on both; `ToolChoice::Auto` with the tool named in the preamble, `prompt_typed` for a struct |
+| Set `.temperature(..)` on a Claude agent | A 400 from Opus 4.7 on, Sonnet 5 and Fable; leave it unset |
+| Skip `.max_tokens(n)` on a Claude Opus 5, Sonnet 5 or Fable agent | rig 0.42 has no default for them and fails every prompt; size `n` for thinking plus the reply |

@@ -384,8 +384,9 @@ problem until you have ruled that out.
 
 - **Name descriptively, in snake_case, no abbreviations.** `search_orders`, not `so`.
 - **Write the description for the model.** Say what the tool does, when to use it, and
-  when *not* to — the negative case is what stops a near-miss tool from being picked. A
-  one-line example of a valid call costs little and removes a class of malformed arguments.
+  when *not* to — the negative case is what stops a near-miss tool from being picked. Let
+  the parameters carry the contract instead of an example call: an enum for a fixed set, a
+  unit and a range in each number's description.
 - **Describe every parameter and keep parameters few and primitive.** Every nested object
   is one more shape the model has to get right in a single pass; a flat set of described
   scalars gives it fewer ways to be wrong.

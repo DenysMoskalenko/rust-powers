@@ -276,41 +276,42 @@ implementation and the downstream service as well.
 
 ## Request Patches
 
-`on_completion_call` can patch one turn of the request without mutating the agent — force
-a search on the first turn, drop the temperature for a critical step, or shrink the
-advertised tool list.
+`on_completion_call` can patch one turn of the request without mutating the agent — forbid
+tool calls on the last turn of the budget, or raise `max_tokens` for one long answer.
 
 ```rust,verify
 use rig::agent::{AgentHook, CompletionCallAction, CompletionCallEvent, HookContext,
                  RequestPatch};
 use rig::message::ToolChoice;
 
-struct ForceSearchFirst;
+/// With `.max_turns(3)` the third model call is the last one, and a tool call there ends
+/// the run in `MaxTurnsError`.
+struct AnswerOnLastTurn;
 
-impl AgentHook for ForceSearchFirst {
+impl AgentHook for AnswerOnLastTurn {
     async fn on_completion_call(
         &self,
         ctx: &HookContext,
         _event: CompletionCallEvent<'_>,
     ) -> CompletionCallAction {
-        if ctx.turn() != 1 {
+        if ctx.turn() < 3 {
             return CompletionCallAction::continue_run();
         }
 
-        CompletionCallAction::patch(
-            RequestPatch::new()
-                .active_tools(["search_web"])
-                .tool_choice(ToolChoice::Specific {
-                    function_names: vec!["search_web".to_string()],
-                })
-                .temperature(0.0),
-        )
+        CompletionCallAction::patch(RequestPatch::new().tool_choice(ToolChoice::None))
     }
 }
 ```
 
 `RequestPatch` builders: `preamble`, `context`, `extra_context`, `history`,
 `active_tools`, `tool_choice`, `temperature`, `max_tokens`, `additional_params`.
+
+On Claude Opus 5.5 and Fable 5.1 every thinking block is bound to the `system` prompt, the
+tool set and the messages before it. A patch to `preamble`, `active_tools` or `history`
+changes that prefix, so the next request that replays the block gets a 400 wherever the API
+enforces the check, which includes every account created from 31 August 2026.
+`tool_choice`, `max_tokens` and `additional_params` sit outside the prefix. A forced
+`ToolChoice::Required` or `Specific` is a 400 on both models regardless.
 
 Patches are per-turn and non-sticky. If you narrow `active_tools`, make sure any
 `tool_choice` still names a tool that is advertised — otherwise the model's only legal move

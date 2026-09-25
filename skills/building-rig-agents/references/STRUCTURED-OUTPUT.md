@@ -25,6 +25,13 @@ Verified against `rig` 0.42.0.
 | One step of a broader agent workflow returns a type | `TypedPrompt` — `agent.prompt_typed::<T>(..)` |
 | An agent whose every answer matches a schema | `AgentBuilder::output_schema::<T>()` |
 
+On Claude Opus 5.5 and Fable 5.1 every `Extractor<T>` call is a 400: the extractor forces
+its submit tool with `ToolChoice::Required`, and those models reject a forced tool choice.
+Use `prompt_typed` there. It always runs in `OutputMode::Native`, which rig sends to
+Anthropic as `output_config.format`, so the provider guarantees the schema.
+`.tool_choice(ToolChoice::Auto)` on the extractor also avoids the 400, but then the submit
+call is best effort and `NoData` becomes possible.
+
 All three require the target type to derive `serde::Deserialize` and
 `schemars::JsonSchema`; `Extractor` additionally requires `Serialize`.
 

@@ -283,7 +283,9 @@ override it.
 
 - Set `max_turns` deliberately on every tool-using prompt; do not rely on the default.
 - Bound every autonomous or evaluator loop with a retry budget.
-- Cap `max_tokens` to bound cost and response length.
+- Set `max_tokens` on every Claude agent, sized for thinking plus the reply: thinking is
+  always on for Claude Opus 5.5 and Fable 5.1 and counts toward the limit, so a cap sized
+  for the answer truncates it. Bound cost with `max_turns`, not a small `max_tokens`.
 - Put a concurrency limiter in front of the provider.
 - Time out external calls inside tools.
 - Leave `record_content_telemetry` off unless you have decided the exposure is acceptable.
