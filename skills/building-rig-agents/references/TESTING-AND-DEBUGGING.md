@@ -3,7 +3,7 @@
 Read this file when the user wants deterministic tests without a provider, wants to score
 real model output, or needs to see what an agent is doing in production.
 
-Verified against `rig` 0.42.0.
+Verified against `rig` 0.43.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -26,12 +26,12 @@ Verified against `rig` 0.42.0.
 
 ## Testing Without a Provider
 
-Rig models are just types implementing `CompletionModel` / `EmbeddingModel`, so a mock
-substitutes cleanly. Tests run offline, cost nothing, and are deterministic.
+Rig models are `Model` values and `AgentBuilder::new` takes any
+`impl Into<DynModel<..>>`, so a mock substitutes cleanly. Tests run offline, cost nothing, and are deterministic.
 
 ```toml
 [dev-dependencies]
-rig = { version = "0.42", features = ["test-utils"] }
+rig = { version = "0.43", features = ["test-utils"] }
 ```
 
 Keep `test-utils` in `[dev-dependencies]` — mocks in a release build are dead weight and a
@@ -41,7 +41,6 @@ footgun.
 
 ```rust,verify,test
 use rig::agent::AgentBuilder;
-use rig::prelude::*;
 use rig::test_utils::MockCompletionModel;
 
 #[tokio::test]
@@ -49,23 +48,22 @@ async fn agent_returns_the_scripted_reply() {
     let model = MockCompletionModel::text("Hello from a mocked model!");
     let agent = AgentBuilder::new(model).preamble("You are friendly.").build();
 
-    let reply = agent.prompt("Hi").await.unwrap();
-    assert_eq!(reply, "Hello from a mocked model!");
+    let reply = agent.prompt("Hi").max_turns(1).await.unwrap();
+    assert_eq!(reply.output, "Hello from a mocked model!");
 }
 ```
 
-No API key required. Note the agent is built with `AgentBuilder::new(model)` rather than
-`client.agent(..)` — there is no client involved.
+No API key required. The agent is built with the same `AgentBuilder::new(..)` as in
+production, given the mock in place of `client.completion(..)` — there is no client involved.
 
 ### Script a multi-turn tool loop
 
 ```rust,verify,test
 use rig::agent::AgentBuilder;
-use rig::prelude::*;
 use rig::tool::ToolExecutionError;
 
 /// The provider-facing name is `add`; the generated tool type is `Adder`.
-#[rig::tool_macro(name = "add", description = "Add x and y")]
+#[rig::rig_tool(name = "add", description = "Add x and y")]
 async fn adder(x: i32, y: i32) -> Result<i32, ToolExecutionError> {
     Ok(x + y)
 }
@@ -86,14 +84,16 @@ async fn agent_runs_the_tool_loop() {
 
     let answer = agent.prompt("What is 2 + 3?").max_turns(3).await.unwrap();
 
-    assert!(answer.contains('5'));
+    assert!(answer.output.contains('5'));
     assert_eq!(probe.request_count(), 2);
 }
 ```
 
-Each completion or stream call consumes exactly one scripted turn. Running out of turns
-produces a `CompletionError::ProviderError` with a clear message rather than silently
-repeating the last response — a test that under-scripts fails loudly.
+Each completion call consumes exactly one `from_turns` turn, and each stream call one
+`from_stream_turns` turn. Running out of turns
+fails the call with a provider error ("mock completion model has no scripted completion
+turn") rather than silently repeating the last response — a test that under-scripts fails
+loudly.
 
 `.max_turns(3)` is required here: the default budget of one model call cannot fit a tool
 call plus an answer.
@@ -108,7 +108,7 @@ call plus an answer.
 | `provider_response_error(status, body, request_id)` | A provider error carrying a transport request id |
 | `request_error(msg)` | A request-error response |
 | `from_content(..)` / `from_contents(..)` | Arbitrary assistant content, including an empty turn |
-| `.with_call_id(..)` / `.with_usage(..)` | Modifiers on a built turn |
+| `.with_call_id(..)` / `.with_usage(..)` / `.with_finish_reason(..)` | Modifiers on a built turn; `.with_finish_reason(FinishReason::Length)` scripts a truncated one |
 
 The error constructors are how you test the paths that matter most: rate limits, retries,
 and truncated turns. Do not only script the happy path.
@@ -117,7 +117,6 @@ and truncated turns. Do not only script the happy path.
 
 ```rust,verify,test
 use rig::agent::AgentBuilder;
-use rig::prelude::*;
 use rig::test_utils::MockCompletionModel;
 use rig::completion::Message;
 
@@ -127,12 +126,12 @@ async fn preamble_is_sent_to_the_model() {
     let probe = model.clone();
 
     let agent = AgentBuilder::new(model).preamble("You are a pirate.").build();
-    let _ = agent.prompt("Ahoy").await.unwrap();
+    let _ = agent.prompt("Ahoy").max_turns(1).await.unwrap();
 
     let sent = probe.requests();
     assert_eq!(sent.len(), 1);
 
-    // The preamble arrives as a leading system message, not in `request.preamble`.
+    // The preamble arrives as a leading system message in `chat_history`.
     let system = sent[0].chat_history.first().expect("a leading system message");
     assert!(matches!(system, Message::System { content } if content == "You are a pirate."));
 }
@@ -143,20 +142,20 @@ system prompts, injected context, retrieved documents, and tool wiring without a
 non-deterministic model text. Asserting on the *output* of a real model tests the model;
 asserting on the *input* your code constructed tests your code.
 
-**Do not assert on `CompletionRequest::preamble`.** The field still exists and is
-`Option<String>`, so the assertion compiles — but request construction hard-codes it to
-`None` and prepends the preamble as a `Message::System` in `chat_history` instead. A test
-written against the legacy field passes `None == None` and proves nothing.
+**Do not look for a `CompletionRequest::preamble` field.** rig 0.43 removed it (a
+`.preamble(..)` setter remains); the preamble is the leading `Message::System` in
+`chat_history`, and `request.system_instructions()` reads it.
 
 ### Streaming and embeddings
 
 `MockCompletionModel::from_stream_turns(..)` scripts streaming turns from
-`MockStreamEvent` sequences. `MockEmbeddingModel` produces deterministic vectors, so
-ingestion and retrieval can both be tested without an embeddings provider:
+`MockStreamEvent` sequences. `MockEmbeddings::model()` (a `MockEmbeddingModel`) gives every
+text the same fixed vector, so ingestion can be tested without an embeddings provider, but
+nothing can be ranked with it:
 
 ```rust,verify,test
 use rig::embeddings::EmbeddingsBuilder;
-use rig::test_utils::{MockEmbeddingModel, MockTextDocument};
+use rig::test_utils::{MockEmbeddings, MockTextDocument};
 
 #[tokio::test]
 async fn builds_embeddings_offline() {
@@ -165,7 +164,7 @@ async fn builds_embeddings_offline() {
         MockTextDocument::new("doc-2", "an ancient farming tool"),
     ];
 
-    let embeddings = EmbeddingsBuilder::new(MockEmbeddingModel)
+    let embeddings = EmbeddingsBuilder::new(MockEmbeddings::model())
         .documents(docs)
         .unwrap()
         .build()
@@ -176,12 +175,11 @@ async fn builds_embeddings_offline() {
 }
 ```
 
-That much only exercises ingestion. The half worth testing is retrieval: feed the same
-`MockEmbeddingModel` to `store.index(..)` and assert on what `top_n` ranks first for a
-given query — see RAG and Embeddings
-for the index and search calls. Because the vectors are deterministic, the ranking is a
-property of your chunking and indexing code rather than of a provider, which is exactly the
-part a test should pin.
+That only exercises ingestion plumbing. Every document scores the same against every
+query under this model, so a `top_n` assertion on an index built from it passes or fails by
+accident. To pin ranking, build the store from `(document, embeddings)` pairs whose vectors
+you choose, relative to the fixed vector the mock gives the query — see RAG and Embeddings
+for the index and search calls.
 
 `rig::test_utils` also ships memory doubles — `CountingMemory`, `AppendFailingMemory` — for
 testing the memory paths, including the failure branch most code forgets.
@@ -204,15 +202,15 @@ just a method, and its typed `Error` survives to your assertions.
 Mocks cannot tell you whether a real model produces *good* answers. For that you score live
 output against expectations.
 
-**There is no `rig::evals` module in 0.42.** An experimental one existed in 0.39 behind an
+**There is no `rig::evals` module in 0.43.** An experimental one existed in 0.39 behind an
 `experimental` feature and was removed by 0.41; the Evals page on rig.rs still documents it.
-`cargo add rig -F experimental` fails — that feature does not exist on `rig` 0.42.
+`cargo add rig -F experimental` fails — that feature does not exist on `rig` 0.43.
 
 Build the same three metrics on top of extractors, which are fully supported. An
 LLM-as-a-judge is an extractor with a verdict schema:
 
 ```rust
-use rig::prelude::*;
+use rig::extractor::ExtractorBuilder;
 use rig::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 
@@ -224,14 +222,14 @@ struct FactualityJudgment {
     reasoning: String,
 }
 
-let judge = client
-    .extractor::<FactualityJudgment>(MODEL)
-    .preamble("You are a strict grader. Judge only factual accuracy.")
+let judge = ExtractorBuilder::<FactualityJudgment>::new(client.completion(MODEL))
+    .append_preamble("You are a strict grader. Judge only factual accuracy.")
     .build();
 
 let verdict = judge
     .extract("Claim: The capital of France is Paris.")
-    .await?;
+    .await?
+    .output;
 
 assert!(verdict.is_factual, "{}", verdict.reasoning);
 ```
@@ -242,8 +240,8 @@ reference answer with the same embedding model and compare the vectors.
 
 Distinguish three outcomes, not two: **pass**, **fail**, and **could not evaluate** (the
 judge errored or returned unparseable output). Collapsing the third into "fail" turns a
-broken judge into a phantom regression; collapsing it into "pass" hides real ones. An
-`ExtractionError` from the judge is the third case, not the second.
+broken judge into a phantom regression; collapsing it into "pass" hides real ones. A
+`StructuredOutputError` from the judge is the third case, not the second.
 
 ### Eval practice
 
@@ -283,15 +281,17 @@ tracing_subscriber::registry()
 
 The `EnvFilter` default means you get useful output without setting `RUST_LOG` every run,
 while `RUST_LOG` still overrides it. Add `.json()` to the fmt layer for structured logs in
-production.
+production, but not `rig=trace`: at TRACE rig logs whole provider requests, prompts and tool
+arguments included, whatever `record_content_telemetry` says.
 
 Attach your own spans with `#[tracing::instrument]`; Rig's completion spans nest under
-them automatically.
+them automatically. Inside an enabled span of yours, rig adopts it as the run span and opens
+no `invoke_agent` span of its own.
 
 ### Content telemetry is opt-in
 
 `record_content_telemetry` defaults to **false**, on both `AgentBuilder` and
-`PromptRequest`. Enabling it puts prompts, retrieved context, tool arguments, tool results,
+`AgentRunner`. Enabling it puts prompts, retrieved context, tool arguments, tool results,
 and model responses onto span attributes.
 
 That is exactly what you want when debugging one agent, and exactly what you do not want by
@@ -318,6 +318,9 @@ processors:
           - set(name, attributes["gen_ai.agent.name"])
             where name == "invoke_agent" and attributes["gen_ai.agent.name"] != nil
 ```
+
+With no `invoke_agent` span, as inside a request span, the agent name is on the `chat` and
+`chat_streaming` spans, which carry `gen_ai.agent.name` too.
 
 Set `AgentBuilder::name(..)` on every agent — it is what makes traces distinguishable when
 several agents run in one service.

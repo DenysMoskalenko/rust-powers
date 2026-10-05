@@ -6,8 +6,11 @@
 - [Password hashing with argon2 0.6](#password-hashing-with-argon2-06)
 
 Needs two crates beyond the base set: `axum-extra = { version = "0.12", features = ["typed-header"] }`
-(0.10 is a year stale and does not declare axum 0.8), `jsonwebtoken = "11"` and, for passwords,
-`argon2 = "0.6"`.
+(0.10 is a year stale and does not declare axum 0.8), `jsonwebtoken = { version = "11", features =
+["aws_lc_rs"] }` and, for passwords, `argon2 = "0.6"`. jsonwebtoken 11 needs exactly one crypto backend:
+`aws_lc_rs` is already in the graph through rustls, while `rust_crypto` pulls `rsa`, which cargo-deny
+rejects as RUSTSEC-2023-0071. With neither it compiles, then the first `encode` or `decode` panics with `Could
+not automatically determine the process-level CryptoProvider`.
 
 ## Keys, claims and the AuthUser extractor
 

@@ -2,12 +2,12 @@
 name: rust-redis
 description: "Use when caching or coordinating through Redis in an axum service with redis-rs — ConnectionManager setup, cache-aside and TTLs, serde values, invalidation, SCAN over KEYS, pipelines, Lua scripts, distributed locks and leases, rate limiting as an axum layer, idempotency keys, testcontainers Redis. Also for Connection refused, NOSCRIPT, WRONGTYPE, the trait bound FromRedisValue is not satisfied, multiple applicable items in scope. Not for pub/sub, queues or events (rust-nats), nor transactional exclusion with advisory locks (sea-orm-postgres)."
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 ---
 
 # Redis with redis-rs
 
-Assumes Rust 1.98 edition 2024, tokio, axum 0.8, redis 1.7 with the `tokio-comp`,
+Assumes Rust 1.99 edition 2024, tokio, axum 0.8, redis 1.7 with the `tokio-comp`,
 `tokio-rustls-comp`, `connection-manager` and `script` features, testcontainers-modules 0.15.
 
 Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come from the rust-scaffolding template. In a project built differently, use its own types, helpers and tooling, map outcomes onto its nearest existing error variant, and say so when none fits instead of adding one. Apply these rules to new code; when editing existing code, keep its public contract and tuned configuration and report differences instead of rewriting, unless asked. If `Cargo.lock` pins another major or minor version than the line above, follow the project and say which rules may not apply.
@@ -45,7 +45,7 @@ are `rust-nats`'s.
 
 ```toml
 redis = { version = "1.7", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager", "script"] }
-# deadpool-redis = "0.23"   # only for a module that issues blocking commands
+# deadpool-redis = "0.23.1"   # only for a module that issues blocking commands
 ```
 
 The `json` feature is the RedisJSON *server module*, not serde support — caching a struct needs

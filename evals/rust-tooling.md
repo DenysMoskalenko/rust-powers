@@ -94,7 +94,7 @@
 
 - chef, planner, builder and runtime stages in that order.
 - `cargo chef cook` before `COPY . .` in the builder stage.
-- The same toolchain name, patch version included, in the chef image tag and in `rust-toolchain.toml` (`latest-rust-1.98.1` and `channel = "1.98.1"`).
+- The same toolchain name, patch version included, in the chef image tag and in `rust-toolchain.toml` (`latest-rust-1.99.0` and `channel = "1.99.0"`).
 - A `debian:trixie-slim` runtime stage with `ca-certificates` installed.
 - A non-root user in the runtime stage.
 - `ENV APP__SERVER__HOST=0.0.0.0` in the runtime stage.

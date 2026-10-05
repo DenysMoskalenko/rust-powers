@@ -1,6 +1,6 @@
 {
   "name": "rust-powers",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Reusable engineering skills for AI-assisted Rust web development: axum, sea-orm, PostgreSQL, testing, telemetry, tooling, scaffolding, NATS, Redis, and rig agents.",
   "author": {
     "name": "Denys Moskalenko",
@@ -45,7 +45,7 @@
   "interface": {
     "displayName": "Rust Powers",
     "shortDescription": "Reusable Rust, axum, sea-orm, testing, telemetry, scaffolding, NATS, Redis, and AI-agent engineering skills",
-    "longDescription": "Rust Powers gives Codex focused engineering guidance for Rust 1.98 edition 2024 web services - axum, sea-orm and PostgreSQL, nextest and rstest testing, cargo tooling, OpenTelemetry, NATS messaging, Redis caching and rate limiting, and rig agents - plus scaffolding a brand-new service from a buildable template.",
+    "longDescription": "Rust Powers gives Codex focused engineering guidance for Rust 1.99 edition 2024 web services - axum, sea-orm and PostgreSQL, nextest and rstest testing, cargo tooling, OpenTelemetry, NATS messaging, Redis caching and rate limiting, and rig agents - plus scaffolding a brand-new service from a buildable template.",
     "developerName": "Denys Moskalenko",
     "category": "Developer Tools",
     "capabilities": [

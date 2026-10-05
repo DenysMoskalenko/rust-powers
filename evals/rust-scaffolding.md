@@ -35,7 +35,7 @@
 - `cargo fmt --all` after the rename.
 - `.env` copied from `.env.example`, with an instruction to set `APP__AUTH__JWT_SECRET`.
 - `make install-tools`.
-- `docker compose up -d postgres`, then `make migrate`.
+- `docker compose up -d --wait postgres`, then `make migrate`.
 - `make check && make test` run before any feature code, a red result treated as a copy problem.
 - A first commit that includes `Cargo.lock`.
 - Replacing the `users` resource with `books` rather than adding a second resource beside it.
@@ -58,7 +58,7 @@
 
 - The template copied from `assets/app/`.
 - `sea-orm-cli migrate generate create_books` to create the migration.
-- The generated `todo!()` body rewritten in the style of the template's `create_users` or `create_posts` migration.
+- The generated file replaced, imports and `todo!()` body included, in the style of the template's `create_users` or `create_posts` migration.
 - `make migrate` then `make entity`.
 - The `users` example replaced by `books`.
 

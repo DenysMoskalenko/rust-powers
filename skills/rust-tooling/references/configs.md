@@ -23,16 +23,16 @@ values. Each comment explains a choice that is not obvious from the key name.
 
 ```toml
 [toolchain]
-channel = "1.98.1"
+channel = "1.99.0"
 components = ["rustfmt", "clippy", "llvm-tools-preview"]
 ```
 
 `llvm-tools-preview` is what cargo-llvm-cov instruments with; without it coverage fails at the first run.
 
-The channel is patch-exact, not `"1.98"`, because the cargo-chef base image is tagged with a full version
-(`latest-rust-1.98.1`) and rustup matches toolchain names literally: a `"1.98"` channel is a different name
-from the `1.98.1` toolchain baked into the image, so both Docker stages download a second toolchain before
-they build anything. Keep the minor version equal to `rust-version` in `Cargo.toml`, which stays `"1.98"`
+The channel is patch-exact, not `"1.99"`, because the cargo-chef base image is tagged with a full version
+(`latest-rust-1.99.0`) and rustup matches toolchain names literally: a `"1.99"` channel is a different name
+from the `1.99.0` toolchain baked into the image, so both Docker stages download a second toolchain before
+they build anything. Keep the minor version equal to `rust-version` in `Cargo.toml`, which stays `"1.99"`
 because it is the MSRV, not a pin.
 
 ## Cargo.toml — the lints table
@@ -109,7 +109,7 @@ from `dev`, so `cargo nextest run` gets the same setting. On the scaffold's ~900
 `target/` never shrinks on its own: cargo keeps every artifact from every dependency version, feature set and
 toolchain it has ever built there. When `du -sh target` surprises you, `cargo clean` is the whole remedy;
 the next build re-fetches nothing, because the sources stay in the global cache. Cargo's own `cargo clean gc`
-size limits (`--max-crate-size` and friends) are nightly-only in 1.98 and clean only that global cache under
+size limits (`--max-crate-size` and friends) are nightly-only in 1.99 and clean only that global cache under
 `~/.cargo`, never `target/`.
 
 ## clippy.toml
@@ -145,7 +145,7 @@ use_try_shorthand = true
 newline_style = "Unix"
 ```
 
-Both edition keys are stable on 1.98 and both are worth setting: `style_edition` selects the formatting rules,
+Both edition keys are stable on 1.99 and both are worth setting: `style_edition` selects the formatting rules,
 while `edition` is what a bare `rustfmt some_file.rs` outside cargo parses with — dropping it makes that
 invocation parse as edition 2015.
 
@@ -156,7 +156,7 @@ and ignores them, so the repo is silently unformatted in exactly the way that wa
 ## .config/nextest.toml
 
 ```toml
-nextest-version = { required = "0.9.120", recommended = "0.9.144" }
+nextest-version = { required = "0.9.120", recommended = "0.9.146" }
 
 [profile.default]
 retries = 0
@@ -376,7 +376,7 @@ test:
 
 cov:
 	cargo llvm-cov nextest --workspace --all-features --no-report
-	cargo llvm-cov report --lcov --output-path target/lcov.info --ignore-filename-regex '(entities|migration)/|main\.rs|telemetry\.rs'
+	cargo llvm-cov report --lcov --output-path $(or $(CARGO_TARGET_DIR),target)/lcov.info --ignore-filename-regex '(entities|migration)/|main\.rs|telemetry\.rs'
 	cargo llvm-cov report --summary-only --fail-under-lines 80 --ignore-filename-regex '(entities|migration)/|main\.rs|telemetry\.rs'
 
 dev:
@@ -398,7 +398,8 @@ found" on a binary-only crate — the service keeps `src/lib.rs` for this reason
 `--workspace` belongs on every cargo command here. Without it clippy skips member crates' `#[cfg(test)]` code
 and nextest never runs a member's tests, so the Makefile and CI stop agreeing with each other.
 
-`cov` writes `target/lcov.info` **before** the gate runs, because `--fail-under-lines` exits non-zero and make
+`cov` writes `lcov.info` into the target directory (`CARGO_TARGET_DIR` when set; a hard-coded `target/` then
+does not exist and the step fails) **before** the gate runs, because `--fail-under-lines` exits non-zero and make
 stops at the first failing line: with the two in the other order a failing gate leaves no report to look at.
 `--fail-under-lines` is the number, `--ignore-filename-regex` is the denominator — CI's coverage step repeats
 both, so change the two together or the Makefile and CI drift apart. For which files to exclude and why, see
@@ -416,7 +417,7 @@ inside `Cargo.lock`.
 
 ```yaml
   - repo: https://github.com/crate-ci/typos
-    rev: v1.50.1
+    rev: v1.50.3
     hooks:
       - id: typos
         args: [--force-exclude]        # replaces the baked-in --write-changes

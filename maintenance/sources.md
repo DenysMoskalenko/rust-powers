@@ -78,7 +78,7 @@ Companion to `release-audit.md`, which reads this table in its inventory and res
 | tracing-opentelemetry | STACK.md version set, scaffold `Cargo.toml` | https://github.com/tokio-rs/tracing-opentelemetry/blob/v0.1.x/CHANGELOG.md | https://docs.rs/tracing-opentelemetry | none |
 | opentelemetry, opentelemetry_sdk | same, `axum-service` pin line | https://github.com/open-telemetry/opentelemetry-rust/blob/main/opentelemetry/CHANGELOG.md, https://github.com/open-telemetry/opentelemetry-rust/blob/main/opentelemetry-sdk/CHANGELOG.md, https://github.com/open-telemetry/opentelemetry-rust/releases | https://docs.rs/opentelemetry | `CLAUDE.md`, `AGENTS.md` |
 | opentelemetry-otlp | same | https://github.com/open-telemetry/opentelemetry-rust/blob/main/opentelemetry-otlp/CHANGELOG.md | https://docs.rs/opentelemetry-otlp | same |
-| axum-tracing-opentelemetry | same | https://github.com/davidB/tracing-opentelemetry-instrumentation-sdk/blob/main/CHANGELOG.md | https://docs.rs/axum-tracing-opentelemetry | none |
+| axum-tracing-opentelemetry | same | https://github.com/davidB/tracing-opentelemetry-instrumentation-sdk/blob/main/axum-tracing-opentelemetry/CHANGELOG.md (stops at 0.39; the 0.42 releases have empty bodies, so read https://github.com/davidB/tracing-opentelemetry-instrumentation-sdk/commits/main) | https://docs.rs/axum-tracing-opentelemetry | none |
 | reqwest-middleware, reqwest-tracing | same | https://github.com/TrueLayer/reqwest-middleware/blob/main/reqwest-middleware/CHANGELOG.md, https://github.com/TrueLayer/reqwest-middleware/blob/main/reqwest-tracing/CHANGELOG.md | https://docs.rs/reqwest-middleware, https://docs.rs/reqwest-tracing | none |
 | axum-prometheus | same | https://github.com/Ptrskay3/axum-prometheus/blob/master/CHANGELOG.md | https://docs.rs/axum-prometheus | none |
 | metrics | same | https://github.com/metrics-rs/metrics/blob/main/metrics/CHANGELOG.md | https://docs.rs/metrics | none |
@@ -114,7 +114,7 @@ Companion to `release-audit.md`, which reads this table in its inventory and res
 
 | Item | Pinned where | Changelog / releases | API docs | Agent docs |
 |---|---|---|---|---|
-| rig (facade), rig-core, rig-agent | STACK.md `### AI`, add-when-needed comment, `building-rig-agents` pin line and references | https://github.com/0xPlaygrounds/rig/blob/main/CHANGELOG.md, https://github.com/0xPlaygrounds/rig/blob/main/crates/rig-core/CHANGELOG.md, https://github.com/0xPlaygrounds/rig/blob/main/crates/rig-agent/CHANGELOG.md, https://github.com/0xPlaygrounds/rig/blob/main/MIGRATING.md | https://docs.rs/rig, https://docs.rig.rs/ | https://github.com/0xPlaygrounds/rig/blob/main/AGENTS.md |
+| rig (facade), rig-core, rig-agent, rig-rmcp | STACK.md `### AI`, add-when-needed comment, `building-rig-agents` pin line and references | https://github.com/0xPlaygrounds/rig/blob/main/CHANGELOG.md, https://github.com/0xPlaygrounds/rig/blob/main/crates/rig-core/CHANGELOG.md, https://github.com/0xPlaygrounds/rig/blob/main/crates/rig-agent/CHANGELOG.md, https://github.com/0xPlaygrounds/rig/blob/main/crates/rig-rmcp/CHANGELOG.md, https://github.com/0xPlaygrounds/rig/blob/main/MIGRATING.md | https://docs.rs/rig, https://docs.rig.rs/ | https://github.com/0xPlaygrounds/rig/blob/main/AGENTS.md |
 | rmcp | same | https://github.com/modelcontextprotocol/rust-sdk/releases | https://docs.rs/rmcp | none |
 | jsonwebtoken | STACK.md `### Auth`, `axum-service` pin line and `references/auth.md` | https://github.com/Keats/jsonwebtoken/blob/master/CHANGELOG.md | https://docs.rs/jsonwebtoken | none |
 | argon2 | same | https://github.com/RustCrypto/password-hashes/blob/master/argon2/CHANGELOG.md | https://docs.rs/argon2 | none |
@@ -131,8 +131,8 @@ Companion to `release-audit.md`, which reads this table in its inventory and res
 |---|---|---|---|---|
 | Postgres `postgres:18-alpine` | scaffold `docker-compose.yml`, scaffold `ci.yml`, `tests/common/mod.rs` `with_tag`, `rust-tooling/references/docker.md` and `ci.md`, `sea-orm-postgres` pin line and `references/testing-db.md` | https://www.postgresql.org/docs/release/ | https://www.postgresql.org/docs/current/ | none |
 | Redis `redis:8-alpine` | `rust-tooling/references/docker.md` and `ci.md` optional blocks, `rust-redis` SKILL.md and `references/testing-redis.md` | https://github.com/redis/redis/blob/unstable/00-RELEASENOTES, https://github.com/redis/redis/releases | https://redis.io/docs/latest/commands/ | none |
-| NATS `nats:2.12-alpine` | `rust-tooling/references/docker.md` optional block, `rust-nats` SKILL.md and `references/testing-nats.md` | https://github.com/nats-io/nats-server/releases | https://docs.nats.io/ | none |
-| otel collector `otel/opentelemetry-collector-contrib` | scaffold `docker-compose.yml`, `rust-tooling/references/docker.md` | https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/CHANGELOG.md, https://github.com/open-telemetry/opentelemetry-collector-contrib/releases | https://opentelemetry.io/docs/collector/ | `CLAUDE.md`, `AGENTS.md` (contributor-facing) |
+| NATS `nats:2.14-alpine` | `rust-tooling/references/docker.md` optional block, `rust-nats` SKILL.md and `references/testing-nats.md` | https://github.com/nats-io/nats-server/releases | https://docs.nats.io/ | none |
+| otel collector `otel/opentelemetry-collector-contrib` | scaffold `docker-compose.yml`, `rust-tooling/references/docker.md` | https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/CHANGELOG.md, https://github.com/open-telemetry/opentelemetry-collector/blob/main/CHANGELOG.md (core: otlp receiver, debug exporter), https://github.com/open-telemetry/opentelemetry-collector-releases/blob/main/CHANGELOG.md (images; a tag can be missing from Docker Hub, check before pinning) | https://opentelemetry.io/docs/collector/ | `CLAUDE.md`, `AGENTS.md` (contributor-facing) |
 
 ## Actions and hooks
 
@@ -171,7 +171,7 @@ Docker Hub tags, `name=` being a substring filter:
 curl -s 'https://hub.docker.com/v2/repositories/library/postgres/tags?page_size=100&name=18-alpine' \
   | jq -r '.results[].name'
 # non-library images: repositories/<org>/<image>/tags
-curl -s 'https://hub.docker.com/v2/repositories/lukemathwalker/cargo-chef/tags?page_size=100&name=latest-rust-1.98' \
+curl -s 'https://hub.docker.com/v2/repositories/lukemathwalker/cargo-chef/tags?page_size=100&name=latest-rust-1.99' \
   | jq -r '.results[].name'
 ```
 

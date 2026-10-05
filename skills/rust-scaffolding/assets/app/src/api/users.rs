@@ -83,9 +83,9 @@ fn default_limit() -> u64 {
     post, path = "/users", tag = "users",
     request_body = CreateUser,
     responses(
-        (status = 201, body = UserResponse),
-        (status = 409, body = ErrorBody),
-        (status = 422, body = ErrorBody),
+        (status = 201, body = UserResponse, description = "The created user"),
+        (status = 409, body = ErrorBody, description = "The email is taken"),
+        (status = 422, body = ErrorBody, description = "The body failed validation"),
     )
 )]
 // House style: `skip_all` plus the fields worth having. `skip(state)` would still
@@ -119,7 +119,10 @@ pub async fn create_user(
 #[utoipa::path(
     get, path = "/users/{id}", tag = "users",
     params(("id" = Uuid, Path, description = "User id")),
-    responses((status = 200, body = UserResponse), (status = 404, body = ErrorBody))
+    responses(
+        (status = 200, body = UserResponse, description = "The user"),
+        (status = 404, body = ErrorBody, description = "No user has that id"),
+    )
 )]
 #[tracing::instrument(skip_all, fields(user_id = %id))]
 pub async fn get_user(
@@ -140,7 +143,10 @@ pub async fn get_user(
 #[utoipa::path(
     get, path = "/users", tag = "users",
     params(ListUsers),
-    responses((status = 200, body = Page<UserResponse>), (status = 422, body = ErrorBody))
+    responses(
+        (status = 200, body = Page<UserResponse>, description = "One page of users"),
+        (status = 422, body = ErrorBody, description = "`limit` is outside 1..=100"),
+    )
 )]
 #[tracing::instrument(skip_all, fields(limit = query.limit, offset = query.offset))]
 pub async fn list_users(

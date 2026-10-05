@@ -605,12 +605,25 @@ So the rule is one `ConnectionManager` for everything, and a small pool only for
 issues `BLPOP`, `BRPOP`, `BLMOVE`, `BZPOPMIN`, `XREAD BLOCK` or `WAIT`. In this stack a queue is a
 NATS subject, so that module usually does not exist.
 
+The pool's response timeout must outlast the longest block. `Config::from_url(..).create_pool(..)`
+keeps redis-rs's 500 ms default, so a `BLPOP key 2` on it fails with `timed out` after 0.5 s
+(measured); `Manager::new_with_config`, new in deadpool-redis 0.23.1, takes the timeout. A block
+of `0` waits forever, which no finite timeout outlasts, and a value popped after the client gave
+up is lost: block for a bounded time and loop.
+
 ```rust,verify
-/// Only for a module that blocks. `deadpool-redis = "0.23"` is an extra
-/// dependency; adding it for anything else pools connections that already
-/// multiplex, which buys nothing.
-pub fn blocking_pool(url: &str) -> Result<deadpool_redis::Pool, deadpool_redis::CreatePoolError> {
-    deadpool_redis::Config::from_url(url).create_pool(Some(deadpool_redis::Runtime::Tokio1))
+use std::time::Duration;
+
+/// Only for a module that blocks. `deadpool-redis` is an extra dependency;
+/// adding it for anything else pools connections that already multiplex,
+/// which buys nothing.
+pub fn blocking_pool(url: &str, longest_block: Duration) -> anyhow::Result<deadpool_redis::Pool> {
+    let config = redis::AsyncConnectionConfig::new()
+        .set_response_timeout(Some(longest_block + Duration::from_secs(1)));
+    let manager = deadpool_redis::Manager::new_with_config(url, config)?;
+    Ok(deadpool_redis::Pool::builder(manager)
+        .runtime(deadpool_redis::Runtime::Tokio1)
+        .build()?)
 }
 ```
 

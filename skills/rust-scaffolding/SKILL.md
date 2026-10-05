@@ -2,12 +2,12 @@
 name: rust-scaffolding
 description: "Use when creating a brand-new Rust axum service from nothing — 'create a service that...', an empty directory with no Cargo.toml, a new API or microservice that needs migrations, tests, lints, Docker and CI green from the first commit, or a repo that still errors with could not find Cargo.toml. Greenfield only. Not for adding a route (axum-service), entity (sea-orm-postgres) or test (rust-testing) to an existing crate, nor changing tooling in an existing service (rust-tooling)."
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 ---
 
 # Rust Scaffolding (Greenfield Only)
 
-Assumes Rust 1.98.1 edition 2024, axum 0.8, sea-orm 2.0, utoipa 5, cargo-nextest, Docker.
+Assumes Rust 1.99.0 edition 2024, axum 0.8, sea-orm 2.0, utoipa 6, cargo-nextest, Docker.
 
 ## Important
 
@@ -29,14 +29,15 @@ Assumes Rust 1.98.1 edition 2024, axum 0.8, sea-orm 2.0, utoipa 5, cargo-nextest
 
 ## 1. Prerequisites
 
-`rustup` (the template's `rust-toolchain.toml` fetches 1.98.1 on the first cargo command),
+`rustup` (the template's `rust-toolchain.toml` fetches 1.99.0 on the first cargo command),
 Docker and `git`; step 4 installs everything else.
 
 ## 2. Copy the template and rename the crate
 
 `<name>` is a cargo package name (`orders-svc`, `notifications`: lowercase, digits, `-`,
 `_`); `<snake>` is the same with `-` turned into `_`, which is the crate's library path.
-The destination `<dest>` must not exist yet: this skill never copies over an existing tree.
+The destination `<dest>` must not exist yet, but its parent must: this skill never copies over an
+existing tree.
 
 ```bash
 mkdir <dest> && cp -R <this skill's directory>/assets/app/. <dest>/  # the /. keeps dotfiles
@@ -84,11 +85,14 @@ sea-orm-cli and prek as prebuilt binaries, and prek's git hook.
 ## 5. Start Postgres and migrate
 
 ```bash
-docker compose up -d postgres
+docker compose up -d --wait postgres
 make migrate
 ```
 
-Set `POSTGRES_PORT` in `.env` first if 5432 is taken, and keep both URLs in step with it.
+`--wait` returns once the healthcheck passes; without it the first `make migrate` stalls on a
+booting server. Set `POSTGRES_PORT` in `.env` first if 5432 is taken, and keep both URLs in step
+with it. To use a Postgres that is already running instead, point both URLs at it and create the
+`<snake>` database first: `make migrate` fails with `database "<snake>" does not exist`.
 `main.rs` also runs `Migrator::up` at startup, which is right for one replica; `make migrate`
 is what a deploy pipeline calls when several replicas would otherwise race.
 
@@ -128,19 +132,26 @@ Step 2 already ran `git init`. `-A` includes `Cargo.lock`, which CI's `--locked`
 The template ships `users` and `posts` as a worked example of every layer. Replace them
 rather than adding beside them.
 
-1. **Rename the resource.** `git mv src/api/users.rs src/api/<resource>.rs`, update
-   `src/api/mod.rs`, then rename `CreateUser`, `UserResponse` and the route paths. Keep
-   `Page` as it is, so every list endpoint shares one wire shape.
+1. **Rename the resource.** `git mv src/api/users.rs src/api/<resource>.rs` and
+   `git mv tests/users.rs tests/<resource>.rs`, update `src/api/mod.rs`, then rename
+   `CreateUser`, `UserResponse`, `ListUsers`, the route paths, the `tag = "users"` attributes
+   and the `users` tag in `src/lib.rs`. Keep `Page` as it is, so every list endpoint shares one
+   wire shape; once a second resource lists, move it to `src/api/mod.rs`.
 2. **Add an entity.** Write the migration first: sea-orm-cli has no autogenerate and can
    only point database to entities. `sea-orm-cli migrate generate <name>` creates the
-   timestamped file and registers it in `migration/src/lib.rs`; rewrite its body (`todo!()`
-   fails `-D warnings`) in the style of `migration/src/m20260913_000002_create_posts.rs`.
+   timestamped file and registers it in `migration/src/lib.rs`; replace the whole file, imports
+   included, in the style of `migration/src/m20260913_000002_create_posts.rs`; the generated
+   template fails `-D warnings` (`sea-orm-postgres` says which lines).
    If you copied that file by hand instead, add the `mod` line and the `Box::new(..)` entry
    in `migration/src/lib.rs` yourself. Then `make migrate`, then `make entity`.
 3. **Add a route.** Copy the shape of `src/api/users.rs` and register the handler with
    `routes!` in the module's `router()`; the OpenAPI document follows from the attribute.
 4. **Delete what you do not use.** `posts` exists to show a foreign key and an index. If
-   the domain has no second table, drop the entity, the migration and the `HasMany` field.
+   the domain has no second table, delete `m20260913_000002_create_posts.rs` with its `mod`
+   line and `Box::new(..)` entry, run `sea-orm-cli migrate fresh` (it drops every table of the
+   development database), `make entity` and `cargo fmt --all`, then delete
+   `src/entities/post.rs`: codegen rewrites `user.rs` without the `HasMany` field but never
+   deletes a file.
 
 For handlers, extractors, errors, the readiness body, OpenAPI and telemetry see
 `axum-service`; for queries, relations and migrations see `sea-orm-postgres`; for test

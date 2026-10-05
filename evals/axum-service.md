@@ -40,7 +40,7 @@
 - `customer_email` carries `#[validate(email)]`.
 - `quantity` carries `#[validate(range(min = 1, max = 50))]`.
 - The quantity bounds are repeated as `#[schema(...)]` constraints, so the OpenAPI document shows them.
-- `#[utoipa::path(post, path = "/orders", ...)]` documents the 422 response with `body = ErrorBody`.
+- `#[utoipa::path(post, path = "/orders", ...)]` documents the 422 response with `body = ErrorBody`, and every response tuple carries a `description`.
 - The routes are registered through `routes!` on an `OpenApiRouter<AppState>` merged into `api::router()`.
 - The fetch route is spelled `/orders/{id}`.
 - The fetch handler takes the id through the crate's own `Path` extractor, not a bare `axum::extract::Path`.
@@ -64,12 +64,12 @@ The fixture has neither the column nor the endpoint, so the answer writes the fi
 
 **Must produce**:
 
-- A response DTO (`ProfileResponse`, or the existing `UserResponse`) with an explicit `From<user::Model>` that omits `password_hash`.
+- The handler returns a response DTO, never the entity: the existing `UserResponse`, whose `From<user::Model>` already leaves `password_hash` out, or a new one with an explicit `From<user::Model>` that omits it.
 - A miss returns `AppError::NotFound(..)` from `find_by_id(..).one(..).await?.ok_or_else(..)`, answered 404 by the existing `IntoResponse`.
 - The `NotFound` message is the full sentence (`format!("user {id} not found")`), not a bare noun.
 - The id is taken through the crate's own `Path<Uuid>` (`crate::extract::Path`), so `/users/not-a-uuid` is a 400 in the `ErrorBody` shape.
 - `#[tracing::instrument(skip_all, fields(user_id = %id))]` on the handler, without `err`.
-- The 404 is documented as `(status = 404, body = ErrorBody)`.
+- The 404 is documented as `(status = 404, body = ErrorBody, description = "..")`.
 
 **Must not produce**:
 

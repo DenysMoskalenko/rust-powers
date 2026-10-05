@@ -91,7 +91,7 @@
 
 **Must produce**:
 - A reused container (`with_container_name` + `ReuseDirective::Always`).
-- `.with_tag("2.12-alpine")` on the NATS image.
+- `.with_tag("2.14-alpine")` on the NATS image.
 - `NatsServerCmd::default().with_jetstream()` passed by reference through `with_cmd`.
 - A retry loop around `start()`, with the nextest process-per-test race as the reason.
 - A retry loop around `connect()` for the early-attacher race.

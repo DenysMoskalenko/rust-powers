@@ -2,13 +2,13 @@
 name: rust-tooling
 description: "Use when changing or debugging the tooling of an existing Rust service — rust-toolchain.toml, cargo add, upgrading one dependency, the lockfile, the workspace lints table or a member clippy skips, clippy.toml, rustfmt.toml, nextest, llvm-cov and the coverage gate, cargo-deny, cargo-machete, bacon, prek or pre-commit hooks, the Makefile, a Dockerfile rebuilding every dependency, docker-compose, CI recompiling, target/ size, unknown lint warnings. Not for a new repository (rust-scaffolding), one clippy finding (rust-code-style), or what coverage measures (rust-testing)."
 metadata:
-  version: "0.2.0"
+  version: "0.2.1"
 ---
 
 # Rust Tooling
 
-Assumes Rust 1.98.1 edition 2024 with resolver 3, cargo-nextest 0.9, cargo-llvm-cov 0.8, cargo-deny 0.20,
-cargo-machete 0.9, bacon 3.25, prek 0.5.
+Assumes Rust 1.99.0 edition 2024 with resolver 3, cargo-nextest 0.9, cargo-llvm-cov 0.9, cargo-deny 0.20,
+cargo-machete 0.9, bacon 3.26, prek 0.5.
 
 Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come from the rust-scaffolding template. In a project built differently, use its own types, helpers and tooling, map outcomes onto its nearest existing error variant, and say so when none fits instead of adding one. Apply these rules to new code; when editing existing code, keep its public contract and tuned configuration and report differences instead of rewriting, unless asked. If `Cargo.lock` pins another major or minor version than the line above, follow the project and say which rules may not apply.
 
@@ -53,9 +53,9 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
 `rust-toolchain.toml` pins the channel and the components; rustup honours it for every cargo command inside
 the repository and installs that channel, components included, on first use — so no CI step restates the list.
 
-The channel is patch-exact (`1.98.1`) because the cargo-chef image tag names a full version and rustup matches
-toolchain names literally: a `"1.98"` channel is a second toolchain, downloaded in every Docker stage.
-`rust-version` in `Cargo.toml` stays `"1.98"`: it is the MSRV, and the edition 2024 resolver prefers dependency
+The channel is patch-exact (`1.99.0`) because the cargo-chef image tag names a full version and rustup matches
+toolchain names literally: a `"1.99"` channel is a second toolchain, downloaded in every Docker stage.
+`rust-version` in `Cargo.toml` stays `"1.99"`: it is the MSRV, and the edition 2024 resolver prefers dependency
 versions that build on it, so an MSRV set too low silently holds dependencies back; the lock step prints
 `(available: vX, requires Rust Y)` and moves on.
 
@@ -119,7 +119,7 @@ nextest cannot run doctests, so `make test` runs `cargo test --doc` as a second 
 Coverage is `cargo llvm-cov nextest --no-report` then `cargo llvm-cov report`. `--fail-under-lines` is the
 threshold and `--ignore-filename-regex` the denominator; the `cov` recipe and CI's coverage step each carry
 both, so change them together. Write the lcov file before the gate, or a failure leaves no report. `report`
-accepts `-p`, not `--workspace`; `--branch` (top-level, not a `report` flag) and `--doctests` are unstable.
+accepts `-p` and, since 0.9, `--workspace`; `--branch` (top-level, not a `report` flag) and `--doctests` are unstable.
 For which files to leave out of coverage and why, see `rust-testing`.
 
 Snapshots: `cargo insta review` steps through pending `.snap.new` files, `cargo insta accept` takes them all,
@@ -168,5 +168,5 @@ same commands as the Makefile, so a hook cannot pass while CI fails.
 | Coverage gate fails with `TOTAL 0` | the ignore regex excluded every file | Narrow the regex; with no lines left the gate cannot pass. |
 | `cargo test --doc`: no library targets | binary-only crate | The service keeps `src/lib.rs`; drop the step otherwise. |
 | CI recompiles everything in every job | job-wide `RUSTFLAGS` changes both the cargo fingerprint and the rust-cache key | Pass `-D warnings` to clippy instead. See `references/ci.md`. |
-| Docker rebuilds all dependencies every time | the chef image tag and `rust-toolchain.toml` name different toolchains | Make the tag match the channel, patch version included (`latest-rust-1.98.1` and `1.98.1`). |
+| Docker rebuilds all dependencies every time | the chef image tag and `rust-toolchain.toml` name different toolchains | Make the tag match the channel, patch version included (`latest-rust-1.99.0` and `1.99.0`). |
 | rustfmt: unstable features are nightly-only | a nightly-only key in `rustfmt.toml` | Remove it; that key is doing nothing. |

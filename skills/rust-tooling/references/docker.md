@@ -20,10 +20,10 @@ layer. cargo-chef produces that layer from the manifests alone, so the expensive
 # cargo-chef caches the dependency build: the expensive layer is only rebuilt when
 # Cargo.toml or Cargo.lock changes, not when a source file does.
 #
-# The tag must match `rust-toolchain.toml` EXACTLY. `1.98` and `1.98.1` are two
+# The tag must match `rust-toolchain.toml` EXACTLY. `1.99` and `1.99.0` are two
 # different rustup toolchain names, so a mismatch makes every stage download a
 # second complete toolchain before it compiles anything.
-FROM lukemathwalker/cargo-chef:latest-rust-1.98.1 AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.99.0 AS chef
 WORKDIR /build
 
 FROM chef AS planner
@@ -53,8 +53,8 @@ CMD ["app"]
 Rules that keep the cache working:
 
 - The chef tag and the `channel` in `rust-toolchain.toml` name the same toolchain, patch version included.
-  The image tag carries a full version (`latest-rust-1.98.1`) and rustup matches toolchain names literally,
-  so a `"1.98"` channel is a different name: `COPY . .` brings the file in, rustup sees a toolchain it does
+  The image tag carries a full version (`latest-rust-1.99.0`) and rustup matches toolchain names literally,
+  so a `"1.99"` channel is a different name: `COPY . .` brings the file in, rustup sees a toolchain it does
   not have, and both the planner and the builder stage download a second one before compiling anything. A
   mismatch never errors, it just costs minutes per build. With the names equal, rustup only fetches the three
   components the file lists (`rustfmt`, `clippy`, `llvm-tools-preview`) — a few seconds, not a toolchain.
@@ -159,7 +159,7 @@ services:
   # Off by default. `docker compose --profile otel up -d` starts it; the app only
   # exports once APP__TELEMETRY__OTLP_ENDPOINT points at it.
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.140.0
+    image: otel/opentelemetry-collector-contrib:0.161.0
     profiles: ["otel"]
     command: ["--config=/etc/otel-config.yaml"]
     configs:
@@ -213,7 +213,7 @@ client side and the tests; the tests read `TEST_REDIS_URL` / `TEST_NATS_URL` the
       retries: 10
 
   nats:
-    image: nats:2.12-alpine
+    image: nats:2.14-alpine
     # `-js` turns JetStream on; the image default is core NATS only.
     command: ["-js", "-m", "8222"]
     ports:

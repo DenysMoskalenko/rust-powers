@@ -23,8 +23,8 @@ Your app
   │
   ├─ Extractor<T> ────── agent + submit tool, for typed extraction
   │
-  ├─ CompletionModel ─── one request, full control
-  ├─ EmbeddingModel ──── text → vectors
+  ├─ completion model ── one request, full control
+  ├─ embedding model ─── text → vectors
   └─ VectorStoreIndex ── similarity search
        │
     Provider clients (OpenAI, Anthropic, Gemini, Cohere, Ollama, …)
@@ -61,15 +61,15 @@ Need typed output?
 │   ├── Yes → Extractor<T>
 │   └── No  → agent.prompt_typed::<T>(..)   (or output_schema on the builder)
 └── No → Need tokens as they arrive?
-    ├── Yes → agent.stream_prompt(..)
+    ├── Yes → agent.prompt(..).stream()
     └── No  → Carrying conversation history?
         ├── Yes, and Rig should persist it → memory + .conversation(id)
         ├── Yes, and I own the Vec         → agent.chat(prompt, &mut history)
         └── No                             → agent.prompt(..)
 ```
 
-There is no `Completion` trait in 0.42 — it was removed after 0.39. Drop to
-`CompletionModel::completion_request(..)` when you want full control of one request.
+There is no `Completion` trait in 0.43 — it was removed after 0.39. Drop to a model's
+`call(CompletionRequest::new(..))` when you want full control of one request.
 
 ### Which tool form?
 
@@ -80,12 +80,12 @@ Does it need runtime values the model must not see (auth, tenant, session)?
          the macro cannot express?
     ├── Yes, and it never needs context → impl PortableTool
     ├── Yes, otherwise                  → impl Tool
-    └── No                              → #[rig::tool_macro]
+    └── No                              → #[rig::rig_tool]
 
 Then:
   Many tools, only a few relevant per request? → retrieved_tools(n, index, toolset)
   Tools defined at runtime?                    → dynamic_tool / dynamic_tools
-  Tools served by another process?             → rmcp_tools
+  Tools served by another process?             → tools_from_server → DynamicTool::from → dynamic_tools
   Several agents sharing one mutable set?      → ToolServer + tool_server_handle
 ```
 
@@ -109,7 +109,7 @@ or a tool.
 Should the model be able to choose whether it happens?
 ├── Yes → a tool
 └── No → Does it need to inspect or change a run in flight?
-    ├── Yes → a hook (on_tool_call, on_completion_call, …)
+    ├── Yes → a hook (on_dispatch, on_completion_call, …)
     └── No  → ordinary Rust around the call
 ```
 
@@ -119,8 +119,9 @@ policy, redaction, request shaping. A tool is the right home for capability.
 ### Which output mode?
 
 `OutputMode::Native` when you need a hard guarantee the response matches the schema and the
-provider supports it; otherwise leave `Auto`, which picks `Tool` where tools work and
-`Prompted` where they do not. Both fallbacks are best-effort — validate the JSON.
+provider supports it; otherwise leave `Auto`, which picks native output, or `Tool` when the
+agent has executable tools and the provider cannot combine native output with them; it never
+picks `Prompted`. `Tool` and `Prompted` are best-effort — validate the JSON.
 
 ### How much memory?
 
@@ -167,7 +168,7 @@ Knowing which layer owns a value answers most "why did it not persist" questions
 | State | Owner | Lifetime |
 |---|---|---|
 | Preamble, static context, tools, default hooks | `Agent` | The agent |
-| Turn budget, tool concurrency, per-run overrides, hooks | `AgentRunner` / `PromptRequest` | One run |
+| Turn budget, tool concurrency, per-run overrides, hooks | `AgentRunner` | One run |
 | Conversation history | `ConversationMemory` backend, or your `Vec<Message>` | Per conversation id |
 | Values passed to tools, invisible to the model | `ToolContext` | One run's tool dispatches |
 | Cross-hook state within a run | `HookContext::scratchpad()` | One run |

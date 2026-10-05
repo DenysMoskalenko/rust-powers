@@ -2,12 +2,12 @@
 name: rust-code-style
 description: "Use when writing or reviewing Rust for an axum or tokio backend service — ownership and cloning, thiserror versus anyhow, no-panic rules, newtypes, derive_more and strum, async discipline, module layout, dependency injection. Also for E0502, E0499, a clone added to satisfy the borrow checker, future cannot be sent between threads safely, or a clippy finding in code such as ptr_arg or needless_pass_by_value. Not for lint configuration (rust-tooling), framework patterns (axum-service), or tests (rust-testing)."
 metadata:
-  version: "0.2.0"
+  version: "0.2.1"
 ---
 
 # Rust Code Style
 
-Assumes Rust 1.98 edition 2024, tokio 1.53, thiserror 2, anyhow 1, serde 1, bon 3, derive_more 2, strum 0.28, itertools 0.15.
+Assumes Rust 1.99 edition 2024, tokio 1.53, thiserror 2, anyhow 1, serde 1, bon 3, derive_more 2, strum 0.28, itertools 0.15.
 
 Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come from the rust-scaffolding template. In a project built differently, use its own types, helpers and tooling, map outcomes onto its nearest existing error variant, and say so when none fits instead of adding one. Apply these rules to new code; when editing existing code, keep its public contract and tuned configuration and report differences instead of rewriting, unless asked. If `Cargo.lock` pins another major or minor version than the line above, follow the project and say which rules may not apply.
 

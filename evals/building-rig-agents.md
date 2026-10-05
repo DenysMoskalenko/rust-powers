@@ -34,12 +34,13 @@
 - The agent held as `Arc<Agent>` in `AppState`, built once outside the handler.
 - The mapping is one `agent_error(PromptError) -> AppError` function in the chat module, called with `.map_err(agent_error)?`.
 - `MaxTurnsError` and `UnknownToolCall` mapped to `AppError::Other` (500).
-- A provider 400, 401 or 403 (`provider_response_status()`) mapped to `AppError::Other` (500).
+- A provider 4xx other than 408 and 429 (`provider_response_status()`), such as 400, 401, 403 or 404, mapped to `AppError::Other` (500).
 - `PromptCancelled` carrying the constant reason every policy hook stops with mapped to `AppError::BadRequest` (400) with a constant message.
-- Any other `PromptCancelled`, which rig also raises for its own failures, mapped to `AppError::Other` (500).
+- A `PromptCancelled` that is neither a policy refusal nor a dependency outage, which rig also raises for its own failures, mapped to `AppError::Other` (500).
 - A provider 429 mapped to `AppError::TooManyRequests { retry_after_secs }`.
 - `retry_after_secs` parsed from the provider's `Retry-After` header (`provider_response_headers()`).
-- Every other failure mapped to `AppError::Unavailable(error.to_string())` (503).
+- A `PromptError::Report` that rig raised itself (`ErrorKind::Request`, `HandlerUnavailable`, `Internal`, `Other` or `Denied`) mapped to `AppError::Other` (500).
+- A final catch-all arm, which a provider 5xx or 408 reaches, mapped to `AppError::Unavailable(error.to_string())` (503).
 - The provider's message logged, never sent: the 500 and 503 bodies stay the existing constants.
 - A test asserting that a provider outage is answered 503.
 - A test asserting that the error body does not contain the provider's message.
@@ -51,7 +52,7 @@
 - A new `status()` arm in `error.rs`.
 - A `From<PromptError> for AppError` impl.
 - A 502 for a provider failure: 502 is reserved for the service's own outbound `Http` calls.
-- A provider 401 or 403 answered 503.
+- A provider 401, 403 or 404 answered 503.
 - `error.to_string()` or the provider's message in a response body.
 - `Agent<M>` or a generic parameter threaded through `AppState`.
 - An agent constructed inside the handler.
@@ -59,13 +60,13 @@
 
 ### Eval 2 - a tool the model never calls
 
-**Prompt**: "Our support agent is built in `main` as `client.agent(MODEL).preamble(PREAMBLE).build()` and called with `agent.prompt(question).await?`. Give it a tool that looks up an order by id through `orders::status(&db, id)` and returns its status. Right now it answers order questions from memory and never calls the tool."
+**Prompt**: "Our support agent is built in `main` as `AgentBuilder::new(client.completion(MODEL)).preamble(PREAMBLE).build()` and called with `agent.prompt(question).await?.output`. Give it a tool that looks up an order by id through `orders::status(&db, id)` and returns its status. Right now it answers order questions from memory and never calls the tool."
 
 **Fixture**: empty
 
 **Must produce**:
 
-- The tool as `#[rig::tool_macro(description = "...")]` with its generated `PascalCase` type, or as a hand-written `Tool` impl with `description()` and `parameters()`.
+- The tool as `#[rig::rig_tool(description = "...")]` with its generated `PascalCase` type, or as a hand-written `Tool` impl with `description()` and `parameters()`.
 - The tool registered on the agent builder with `.tool(..)`.
 - A tool description written for the model that says when to use the tool.
 - A turn budget of at least two (`.max_turns(n)` or `.default_max_turns(n)`), because a tool call plus an answer is two model calls.
@@ -75,6 +76,7 @@
 
 - A `definition()` method on the tool.
 - `ToolError`, the pre-0.42 error type.
+- `#[rig::tool_macro]`, the alias 0.43 removed.
 - A claim that the tool is ignored because of a rig bug, before the description and the registration have been checked.
 
 ### Eval 3 - offline test of a multi-turn run
@@ -83,7 +85,7 @@
 
 **Must produce**:
 
-- `rig = { version = "0.42", features = ["test-utils"] }` under `[dev-dependencies]`.
+- `rig = { version = "0.43", features = ["test-utils"] }` under `[dev-dependencies]`.
 - `MockCompletionModel::from_turns([...])` scripting a `MockTurn::tool_call` followed by a `MockTurn::text`.
 - `AgentBuilder::new(model)` in place of a provider client.
 - A clone of the mock used as a probe, asserting two model requests (`request_count() == 2` or `requests().len() == 2`).
@@ -94,7 +96,7 @@
 - `features = ["test-utils"]` on the `rig` line under `[dependencies]` rather than `[dev-dependencies]`.
 - An `OPENAI_API_KEY` or any network call to a provider.
 - A `#[ignore]`d test.
-- A mock built by hand-implementing `CompletionModel` when `rig::test_utils` covers it.
+- A hand-written mock model (`impl Wire`, or the removed `CompletionModel` trait) when `rig::test_utils` covers it.
 
 ### Eval 4 - an agent that forgets
 
@@ -122,7 +124,7 @@
 - The stream route merged inside the middleware stack, like every other route.
 - The stream bounded from inside, by wrapping it: `StreamExt::timeout` per item, or a deadline.
 - When that bound fires, a final `error` event, after which the stream ends without polling the run again.
-- `.max_turns(n)` on `stream_prompt`.
+- `.max_turns(n)` on the streamed run: `prompt(..).max_turns(n).stream()`.
 - A mid-stream failure sent as a final `error` event, after which the stream ends.
 
 **Must not produce**:
@@ -131,6 +133,7 @@
 - The stream route merged after `.layer(..)` to keep `TimeoutLayer` off it.
 - The claim that `TimeoutLayer` cuts a stream that has already started.
 - The provider's error text in an SSE event.
+- `stream_prompt(..)`, the 0.42 spelling of the streamed run.
 
 ### Probe 1 - the facade crate
 
@@ -177,3 +180,13 @@
 **Prompt**: "Our support agent runs on `claude-opus-5-5` through rig's Anthropic client and sometimes answers without looking the order up. Make it call `lookup_order` before every answer."
 
 **Wrong answer**: `\.tool_choice\(\s*(?:rig::message::)?ToolChoice::(?:Required|Specific)`
+
+### Probe 7 - an agent wraps a model
+
+**Prompt**: "Build an OpenAI agent with rig that answers one question and prints the answer."
+
+**Fixture**: empty
+
+**Wrong answer**: `openai::Client::\w+\([^)]*\)(?!\??\x60)|\.agent\(\s*(?:MODEL|"[^"]+"|openai::)`
+
+**Right answer**: `AgentBuilder::new\(`

@@ -3,7 +3,7 @@
 Read this file when the user wants to expose Rust functions to a model, pass runtime
 context into a tool, share tools across agents, or connect MCP servers.
 
-Verified against `rig` 0.42.0. The `Tool` trait shape changed in 0.4x — the
+Verified against `rig` 0.43.0. The `Tool` trait shape changed in 0.4x — the
 `definition() -> ToolDefinition` form still shown on rig.rs does not compile. See
 Version Drift.
 
@@ -11,7 +11,7 @@ Version Drift.
 
 ## Contents
 
-- [The Fast Path: `#[rig::tool_macro]`](#the-fast-path-rigtool_macro)
+- [The Fast Path: `#[rig::rig_tool]`](#the-fast-path-rigrig_tool)
 - [Writing a Tool by Hand](#writing-a-tool-by-hand)
 - [Attach Tools to an Agent](#attach-tools-to-an-agent)
 - [When a Tool Fails](#when-a-tool-fails)
@@ -20,14 +20,14 @@ Version Drift.
 - [MCP Tools](#mcp-tools)
 - [Designing Good Tools](#designing-good-tools)
 
-## The Fast Path: `#[rig::tool_macro]`
+## The Fast Path: `#[rig::rig_tool]`
 
 For most tools, skip the trait entirely.
 
 ```rust,verify
 use rig::tool::ToolExecutionError;
 
-#[rig::tool_macro(description = "Perform basic arithmetic operations")]
+#[rig::rig_tool(description = "Perform basic arithmetic operations")]
 async fn calculator(x: i32, y: i32, operation: String) -> Result<i32, ToolExecutionError> {
     match operation.as_str() {
         "add" => Ok(x + y),
@@ -51,7 +51,7 @@ you pass to `.tool(..)` like any hand-written tool.
 Options:
 
 ```rust
-#[rig::tool_macro(
+#[rig::rig_tool(
     name = "search-docs",                  // explicit provider-facing name
     description = "Search the documentation",
     params(
@@ -169,15 +169,15 @@ The `self` in that import is load-bearing — the derive macro's generated code 
 `#[schemars(description = "…")]` also works and wins when both are present. Never add your
 own `schemars` dependency; see SKILL.md.
 
-Note for OpenAI: the Responses API — Rig's default OpenAI integration — requires every
-input parameter to appear under `required`. Include the array, or let the macro's
-type-driven rule produce it.
+Note for OpenAI: rig 0.43 sends Responses API tools — Rig's default OpenAI integration —
+with `strict: false`; only a strict tool (`Responses::with_strict_tools`) needs every input
+parameter under `required`. Include the array anyway, or let the macro's type-driven rule
+produce it.
 
 ## Attach Tools to an Agent
 
 ```rust
-let agent = client
-    .agent(MODEL)
+let agent = AgentBuilder::new(client.completion(MODEL))
     .preamble("You are a calculator.")
     .tool(Adder)
     .tool(Calculator)
@@ -194,10 +194,10 @@ Other ways tools reach an agent:
 | `tool(T)` | A static tool, always advertised |
 | `dynamic_tool(DynamicTool)` / `dynamic_tools(Vec<DynamicTool>)` | Tools whose name and callback are only known at runtime |
 | `retrieved_tools(n, index, toolset)` | Tool-RAG: fetch the `n` most relevant tool definitions from a vector index per request |
-| `rmcp_tool(..)` / `rmcp_tools(..)` | Tools served by an external MCP process |
+| `dynamic_tools(..)` fed by `rig::tool::rmcp::tools_from_server(..)` | Tools served by an external MCP process |
 | `tool_server_handle(handle)` | A pre-built tool server shared between agents |
 
-`dynamic_tools` does **not** mean vector retrieval in 0.42 — that is `retrieved_tools`.
+`dynamic_tools` does **not** mean vector retrieval in 0.43 — that is `retrieved_tools`.
 See RAG and Embeddings for building the index and toolset.
 
 ## When a Tool Fails
@@ -230,11 +230,14 @@ Hooks and Runner.
 ever seeing them**: auth tokens, tenant ids, request metadata, session state.
 
 ```rust,verify
-use rig::tool::{Tool, ToolContext, ToolExecutionError};
+use rig::tool::{ContextValue, Tool, ToolContext, ToolExecutionError};
+use serde::{Deserialize, Serialize};
 
 struct CurrentUser;
 
-#[derive(Clone)]
+/// A context value is data: serialized on insert, stored under its `ContextValue` key.
+#[derive(Serialize, Deserialize, ContextValue)]
+#[context(key = "app.user_id")]
 struct UserId(String);
 
 impl Tool for CurrentUser {
@@ -259,7 +262,7 @@ impl Tool for CurrentUser {
         let user = context
             .require::<UserId>()
             .map_err(|_| ToolExecutionError::other("no user in tool context"))?;
-        Ok(user.0.clone())
+        Ok(user.0)
     }
 }
 ```
@@ -268,7 +271,7 @@ Populate it per request:
 
 ```rust
 let mut ctx = ToolContext::new();
-ctx.insert(UserId("u-42".to_string()));
+ctx.insert(UserId("u-42".to_string()))?;
 
 let answer = agent.prompt("Who am I?").tool_context(ctx).await?;
 ```
@@ -276,40 +279,41 @@ let answer = agent.prompt("Who am I?").tool_context(ctx).await?;
 The macro form uses a marker attribute:
 
 ```rust
-#[rig::tool_macro]
+#[rig::rig_tool]
 async fn greet(
     #[rig(context)] context: &mut ToolContext,
     greeting: String,
 ) -> Result<String, ToolExecutionError> {
-    // Key by a newtype, never a bare String: the context is keyed by type, so a
-    // `String` slot collides with every other `String` a caller inserts.
-    let user = context.get::<UserId>().map(|u| u.0.as_str()).unwrap_or("guest");
+    // Key by a newtype: slots are keyed by `ContextValue::KEY`, and a bare
+    // `String` has no key, so it cannot be stored at all.
+    let user = context.get::<UserId>()?.map_or_else(|| "guest".to_owned(), |u| u.0);
     Ok(format!("{greeting}, {user}!"))
 }
 ```
 
-Read with `get::<T>()`, `require::<T>()` (errors when absent), `get_mut::<T>()`, or
-`remove::<T>()`. Attach host-only result metadata with `insert_result(..)` — result hooks
-can read it, the model cannot.
+Read with `get::<T>()` (`Ok(None)` when absent), `require::<T>()` (errors when absent) or
+`remove::<T>()`; each returns a `Result` and hands back an owned value decoded from the stored
+JSON. Attach host-only result metadata with `insert_result(..)` — `on_outcome` hooks can read
+it, the model cannot.
 
 Inbound values are cloned once per call, so inserting or removing an entry inside a tool
-affects only that dispatch. What is cloned is the value itself, following its own `Clone`:
-an `Arc<Mutex<_>>` still shares its referent across every dispatch. Use the context for trusted application state —
+affects only that dispatch. Every value is serialized, so an `Arc<Mutex<_>>` cannot share
+state through the context: keep live shared state (connections, handles) in the tool struct.
+Use the context for trusted application state —
 never smuggle a secret into the prompt just so a tool can read it.
 
 ## Sharing Tools: `ToolServer`
 
 `ToolServerHandle` is a cheaply-cloneable handle to shared tool-server state, so several
 agents can be handed clones of one handle and see the same tools. Operations take locks on
-that state directly — there is no separate task or channel routing behind it in 0.42.
+that state directly — there is no separate task or channel routing behind it in 0.43.
 
 ```rust
 use rig::tool::server::{ToolServer, ToolServerHandle};
 
 let handle: ToolServerHandle = ToolServer::new().tool(Adder).run();
 
-let agent = client
-    .agent(MODEL)
+let agent = AgentBuilder::new(client.completion(MODEL))
     .tool_server_handle(handle.clone())
     .build();
 ```
@@ -323,17 +327,19 @@ The Model Context Protocol exposes tools served by external processes — filesy
 browsers, databases, SaaS integrations — through one interface. Rig connects as a client
 via the `rmcp` crate.
 
-Match rig's own rmcp major version — rig-agent 0.42 is built against `rmcp` 2, and a
-`Peer<RoleClient>` from a different major will not satisfy `rmcp_tools`.
+Match rig's own rmcp major version — rig-rmcp 0.43 is built against `rmcp` 2, and a
+`Peer<RoleClient>` from a different major will not satisfy `tools_from_server`.
 
 ```toml
-rig = { version = "0.42", features = ["rmcp"] }
+rig = { version = "0.43", features = ["rmcp"] }
 rmcp = { version = "2", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }
 ```
 
 ```rust,verify
 use rig::prelude::*;
-use rig::providers::openai;
+use rig::providers::openai::{self, OpenAI};
+use rig::tool::DynamicTool;
+use rig::tool::rmcp::tools_from_server;
 use rmcp::ServiceExt as _;
 use rmcp::model::{ClientCapabilities, ClientInfo, Implementation, Tool};
 use rmcp::transport::StreamableHttpClientTransport;
@@ -356,17 +362,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tools: Vec<Tool> = mcp.list_tools(None).await?.tools;
 
-    let agent = openai::Client::from_env()?
-        .agent(MODEL)
-        .rmcp_tools(tools, mcp.peer().to_owned())
+    // Each MCP tool becomes a `DynamicTool` calling the server through one shared sink.
+    let mcp_tools = tools_from_server(tools, mcp.peer())
+        .into_iter()
+        .map(DynamicTool::from)
+        .collect();
+
+    let agent = AgentBuilder::new(OpenAI::from_env()?.completion(MODEL))
+        .dynamic_tools(mcp_tools)
         .build();
 
     Ok(())
 }
 ```
 
-MCP calls are bounded by `DEFAULT_MCP_TOOL_TIMEOUT`. Use `rmcp_tool_with_timeout` /
-`rmcp_tools_with_timeout` to change it, or pass `None` to disable the bound. On timeout the
+MCP calls are bounded by `DEFAULT_MCP_TOOL_TIMEOUT` (300 s). Call `McpTool::with_timeout(..)`
+on a tool before the conversion to change it, or pass `None` to disable the bound. On timeout the
 call resolves to a tool error the agent can recover from rather than blocking forever.
 
 Treat MCP tool descriptions and results as untrusted input, and note what makes MCP

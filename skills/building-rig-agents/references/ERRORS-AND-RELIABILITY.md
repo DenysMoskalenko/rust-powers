@@ -3,47 +3,35 @@
 Read this file when a Rig call fails, a build fails, or the user needs retries, rate-limit
 handling, or production hardening.
 
-Verified against `rig` 0.42.0.
+Verified against `rig` 0.43.0.
 
 ## Contents
 
 - [Compile Errors First](#compile-errors-first)
 - [`PromptError`](#prompterror)
-- [`CompletionError`](#completionerror)
+- [`ProviderError`](#providererror)
 - [Rig Does Not Retry](#rig-does-not-retry)
 - [Runtime Failures That Compile Fine](#runtime-failures-that-compile-fine)
 - [Production Checklist](#production-checklist)
 
 ## Compile Errors First
 
-Rig groups its methods on traits, so a missing `use` surfaces as a missing method on a
-struct. Check imports before you doubt the code.
+Most compile errors against rig 0.43 come from code written for 0.42. Check the shape
+before you doubt the imports.
 
-### `no method named 'agent' / 'from_env' / 'prompt' / 'embedding_model' found`
+### `cannot find 'Client' in 'openai'`, `no method named 'agent' / 'embedding_model' found`
 
 ```text
-error[E0599]: no function or associated item named `from_env` found
-   for struct `Client<...>` in the current scope
+error[E0433]: cannot find `Client` in `openai`
 ```
 
-The method lives on a trait that is not in scope. Rig groups methods on traits, so you
-import the trait to use its methods:
-
-| Method | Trait |
-|---|---|
-| `from_env()`, `from_val()` | `ProviderClient` |
-| `completion_model(..)` | `CompletionClient` |
-| `agent(..)`, `extractor::<T>(..)` | `AgentClientExt` |
-| `embedding_model(..)` | `EmbeddingsClient` |
-| `prompt(..)` | `Prompt` |
-| `chat(..)` | `Chat` |
-| `prompt_typed::<T>(..)` | `TypedPrompt` |
-| `stream_prompt(..)` | `StreamingPrompt` |
-
-Fix: `use rig::prelude::*;`. Importing one trait is not enough —
-`AgentClientExt::agent` has `CompletionClient` as a supertrait, so importing it alone does
-not bring `completion_model` into method-resolution scope. The prelude brings the whole
-surface at once.
+That is 0.42 code. rig 0.43 has no client traits: a provider client is a concrete type
+(`OpenAI`, `Anthropic`, `Gemini`) whose methods are inherent, and an agent wraps one of its
+models — `AgentBuilder::new(OpenAI::from_env()?.completion(MODEL))`. `prompt`, `chat` and
+`prompt_typed` are inherent on `Agent`, so no trait import is missing either;
+`use rig::prelude::*;` re-exports types such as `AgentBuilder` and `Agent`, plus the `Tool`,
+`PortableTool` and `VectorStoreIndex` traits (`top_n` needs the last in scope). The
+0.42 → 0.43 table in Version Drift pairs every old call with its replacement.
 
 ### `the async keyword is missing from the function declaration`
 
@@ -56,29 +44,30 @@ cargo add tokio --features macros,rt-multi-thread
 ### `unresolved import rig::...`
 
 Capabilities are feature-gated. The `agent` feature (on by default) carries `Agent`,
-`Tool`, hooks, and extractors. The rest are opt-in: `test-utils` (mocks, dev-dependencies
+hooks, extractors and the tool registry; the `Tool` trait itself needs no feature. The rest are opt-in: `test-utils` (mocks, dev-dependencies
 only), `rmcp` (MCP tools), `memory` (history-bounding policies), `pdf` and `epub` (file
 loaders), `audio`, `image`, and one per vector store (`lancedb`, `qdrant`, `postgres`, …).
 
 ### `Agent<M>` does not compile
 
-`Agent` has no type parameter in 0.42 — the model is erased into a `ModelHandle` at
-`build()`. Write `Agent`. Same for hooks: `impl AgentHook for MyHook`, not
+`Agent` has no type parameter in 0.43 — `AgentBuilder::new` takes the model as a
+`DynModel`. Write `Agent`. Same for hooks: `impl AgentHook for MyHook`, not
 `impl<M: CompletionModel> AgentHook<M> for MyHook`. See
 Version Drift.
 
 ## `PromptError`
 
-`agent.prompt(..)` returns `Result<String, PromptError>`:
+`agent.prompt(..)` returns `Result<PromptResponse, PromptError>`:
 
 ```rust
 pub enum PromptError {
-    CompletionError(CompletionError),
+    CompletionError(ProviderError),
+    Report(ErrorReport),           // a failure relayed over the agent's bus
     MemoryError(MemoryError),
     MaxTurnsError {
         max_turns: usize,
-        chat_history: Box<Vec<Message>>,
-        prompt: Box<Message>,
+        chat_history: Vec<Message>,
+        prompt: Message,
     },
     PromptCancelled {
         chat_history: Vec<Message>,
@@ -88,16 +77,20 @@ pub enum PromptError {
         tool_name: String,
         available_tools: Vec<String>,
         allowed_tools: Vec<String>,
-        chat_history: Box<Vec<Message>>,
+        chat_history: Vec<Message>,
     },
 }
 ```
+
+A provider failure usually reaches an agent run as `Report`, not `CompletionError`: the provider's
+reply crosses the agent's bus as an `ErrorReport`, whose `kind` classifies it and whose
+`provider_response_status()` still reads the HTTP status.
 
 ```rust
 use rig::completion::PromptError;
 
 match agent.prompt("What is 2 + 2?").max_turns(3).await {
-    Ok(reply) => println!("{reply}"),
+    Ok(reply) => println!("{}", reply.output),
 
     Err(PromptError::MaxTurnsError { max_turns, chat_history, .. }) => {
         // The model kept calling tools past the budget.
@@ -116,6 +109,7 @@ match agent.prompt("What is 2 + 2?").max_turns(3).await {
     }
 
     Err(PromptError::MemoryError(e)) => eprintln!("memory backend failed: {e}"),
+    Err(PromptError::Report(report)) => eprintln!("{:?} failure: {report}", report.kind),
     Err(PromptError::CompletionError(e)) => eprintln!("provider call failed: {e}"),
 }
 ```
@@ -133,20 +127,23 @@ budget will fail the same way.
 repair the name, or skip — implement `on_invalid_tool_call`; see
 Hooks and Runner.
 
-## `CompletionError`
+## `ProviderError`
 
-Raw model calls return `CompletionError`, which separates transport failures from
-provider-reported ones:
+Raw model calls return `ProviderError`, one type for every operation, which separates
+transport failures from provider-reported ones:
 
 ```rust
-pub enum CompletionError {
-    HttpError(Error),                          // connection, timeout
-    JsonError(Error),                          // (de)serialization
-    UrlError(ParseError),
-    RequestError(Box<dyn Error + Send + Sync>),
-    ResponseError(String),                     // malformed response
-    ProviderError(String),
-    ProviderResponse(ProviderResponseError),   // structured provider failure
+pub enum ProviderError {
+    Http(Arc<http_client::Error>),             // no reply: connection, timeout
+    Json(Arc<serde_json::Error>),              // (de)serialization
+    Url(ParseError),
+    Request(SharedError),                      // the request could not be built
+    Response(String),                          // the reply decoded but does not answer the request
+    Provider(String),
+    ProviderResponse(ProviderResponseError),   // the provider's reply, status and body
+    InvalidAuthentication(ProviderResponseError), // `verify()` found the key rejected
+    Truncated,                                 // the reply stopped before the provider ended it
+    // ...and a few narrower variants
 }
 ```
 
@@ -154,25 +151,27 @@ Rough triage:
 
 | Variant | Usually | Action |
 |---|---|---|
-| `HttpError` | Network, timeout, **and every non-2xx status** | Check the status before retrying |
-| `ProviderResponse` | Structured provider failure | Inspect, then decide |
-| `ProviderError`, `ResponseError` | Provider rejected the request | Surface it; retrying rarely helps |
-| `JsonError`, `UrlError`, `RequestError` | Your bug | Fix the code |
+| `Http`, `Truncated` | Network or timeout, no usable reply | Retry with backoff |
+| `ProviderResponse` | **Every non-2xx reply**, 401 and 429 alike | Check the status before retrying |
+| `InvalidAuthentication` | `verify()` found the key rejected | Fix the key; never retry |
+| `Provider` | The provider reported a failure without a preserved reply | Surface it; retrying rarely helps |
+| `Response` | The reply decoded but does not answer the request | Surface it; retrying rarely helps |
+| `Json`, `Url`, `Request` | Your bug, or for `Json` a reply that does not decode | Fix the code |
 
-`HttpError` is not a synonym for "transient". Rig funnels every non-2xx response into it,
+`ProviderResponse` is not a synonym for "transient". Rig puts every non-2xx reply into it,
 so a 401 (bad key), a 403, and a 400 (malformed request) land in the same variant as a 429
-or a timeout. Branch on `provider_response_status()` before retrying — retry 408, 429, and
-5xx; surface 4xx immediately. A blind retry on `HttpError` turns a wrong API key into three
-wrong API keys.
+or a 503. Branch on `provider_response_status()` before retrying — retry 408, 429, and
+5xx; surface 4xx immediately. A blind retry on `ProviderResponse` turns a wrong API key into
+three wrong API keys.
 
 ### Inspecting a provider failure
 
-`CompletionError` exposes the provider's raw HTTP status and body so you can branch on a
+`ProviderError` exposes the provider's raw HTTP status and body so you can branch on a
 specific error code rather than string-matching a message:
 
 ```rust,verify
-use rig::completion::CompletionError;
-fn report(error: &CompletionError) {
+use rig::error::ProviderError;
+fn report(error: &ProviderError) {
     if let Some(status) = error.provider_response_status() {
         // Can be a 2xx for providers that return an error envelope with a success status.
         eprintln!("provider returned HTTP {status}");
@@ -185,9 +184,8 @@ fn report(error: &CompletionError) {
 }
 ```
 
-`provider_response_body`, `provider_response_json`, and `provider_response_status` are also
-on `EmbeddingError`, `ImageGenerationError`, `AudioGenerationError`, `TranscriptionError`,
-and `RerankError`.
+Embedding, image, audio, transcription and rerank calls fail with the same `ProviderError`,
+and `PromptError` forwards the same accessors, from its `Report` as well.
 
 Do not log the raw body indiscriminately — it can echo your prompt back.
 
@@ -198,41 +196,48 @@ There is no built-in backoff; that keeps the core predictable. Wrap calls yourse
 ```rust,verify
 use rig::agent::Agent;
 use rig::completion::PromptError;
-use rig::prelude::*;
 use std::time::Duration;
 
+/// Boxed: `PromptError` carries the run's history unboxed, which clippy's
+/// `result_large_err` rejects in a return type.
 async fn prompt_with_retry(
     agent: &Agent,
     input: &str,
     max_attempts: u32,
-) -> Result<String, PromptError> {
+) -> Result<String, Box<PromptError>> {
     let mut attempt = 0;
     loop {
         attempt += 1;
         match agent.prompt(input).max_turns(5).await {
-            Ok(reply) => return Ok(reply),
+            Ok(reply) => return Ok(reply.output),
 
-            // Do not retry what will not get better.
-            Err(
-                e @ (PromptError::MaxTurnsError { .. }
-                | PromptError::UnknownToolCall { .. }),
-            ) => return Err(e),
-
-            Err(e) if attempt < max_attempts => {
+            Err(e) if attempt < max_attempts && is_retryable(&e) => {
                 let backoff = Duration::from_millis(200 * 2u64.pow(attempt - 1));
                 tracing::warn!(attempt, ?backoff, error = %e, "retrying");
                 tokio::time::sleep(backoff).await;
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         }
+    }
+}
+
+/// rig's own classification: a transport failure, a truncated reply, or a
+/// provider 408, 425, 429 or 5xx. Anything else, a 401 or `MaxTurnsError`
+/// included, fails the same way again.
+fn is_retryable(error: &PromptError) -> bool {
+    match error {
+        PromptError::Report(report) => report.is_retryable(),
+        PromptError::CompletionError(error) => error.is_retryable(),
+        _ => false,
     }
 }
 ```
 
 Three things this gets right and hand-rolled loops often do not:
 
-- **Retry only what can succeed.** `MaxTurnsError` and `UnknownToolCall` are deterministic
-  given the same inputs; retrying them just spends money.
+- **Retry only what can succeed.** `MaxTurnsError`, `UnknownToolCall` and a provider 4xx
+  other than 408 and 429 are deterministic given the same inputs; retrying them just spends
+  money.
 - **Exponential backoff, bounded.** A fixed 100 ms retry against a rate limit is a
   self-inflicted denial of service.
 - **Retry the smallest unit.** Inside a workflow, retry the failing step, not the whole
@@ -243,7 +248,7 @@ clients retry at once, or they will synchronize and hammer the provider in locks
 
 ### Rate limits
 
-Providers surface rate limits as HTTP errors, so the same backoff handles them. For heavy
+Providers surface rate limits as a 429 reply, so the same backoff handles them. For heavy
 workloads, throttle *before* the provider does: put a `tokio::sync::Semaphore` in front of
 your agent, or drive batches with
 `futures::stream::iter(..).buffer_unordered(n)` at a modest `n`. That converts a burst of

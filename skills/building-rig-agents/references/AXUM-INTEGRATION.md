@@ -3,7 +3,7 @@
 Read this file when a Rig agent has to live inside an axum service: held in state, called
 from a handler, streamed to a browser, tested offline, and traced.
 
-Verified against `rig` 0.42.0, axum 0.8, axum-test 21. The agent adds one sub-struct to
+Verified against `rig` 0.43.0, axum 0.8, axum-test 21. The agent adds one sub-struct to
 `Settings`, one field to `AppState`, one module, two routes inside the middleware stack and one
 parameter to `test_app()`; `error.rs` is not touched. This
 file shows those deltas and names what stays as it is. For routes, extractors, the error
@@ -23,7 +23,7 @@ type itself, SSE transport rules and OpenAPI see `axum-service`.
 
 ## Settings
 
-`Client::from_env()` is the quick-start form. In the service the key is a setting like every
+`OpenAI::from_env()` is the quick-start form. In the service the key is a setting like every
 other secret: one more sub-struct on `Settings`, read from `APP__AGENT__*` by the same
 `config` source the scaffold already has (`Settings::from_map` in tests), `SecretString` so
 it never prints, exposed once where the client is built.
@@ -32,9 +32,10 @@ it never prints, exposed once where the client is built.
 //! `config.rs` delta, and the `build_agent` that `main` calls with it.
 use std::collections::HashMap;
 
-use rig::agent::Agent;
-use rig::prelude::*;
-use rig::providers::{anthropic, gemini, openai};
+use rig::agent::{Agent, AgentBuilder};
+use rig::providers::anthropic::Anthropic;
+use rig::providers::gemini::Gemini;
+use rig::providers::openai::OpenAI;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 
@@ -63,18 +64,19 @@ pub enum Provider {
     Gemini,
 }
 
-/// rig 0.42 has no Anthropic default for Opus 5, Sonnet 5 or Fable ids, and thinking
-/// counts toward the limit.
+/// rig 0.43 fails every prompt to a Claude id it does not know unless this is set,
+/// and thinking counts toward the limit.
 const MAX_TOKENS: u64 = 16_000;
 
 /// Built once in `main`, held as `Arc<Agent>` in `AppState`. Every arm yields the
-/// same `AgentBuilder`: the model type is erased at `.agent(..)`.
+/// same `AgentBuilder`: the model type is erased at `AgentBuilder::new(..)`.
 pub fn build_agent(settings: &AgentSettings) -> anyhow::Result<Agent> {
     let key = settings.api_key.expose_secret();
+    let model = &settings.model;
     let builder = match settings.provider {
-        Provider::OpenAi => openai::Client::new(key)?.agent(&settings.model),
-        Provider::Anthropic => anthropic::Client::new(key)?.agent(&settings.model),
-        Provider::Gemini => gemini::Client::new(key)?.agent(&settings.model),
+        Provider::OpenAi => AgentBuilder::new(OpenAI::new(key).completion(model)),
+        Provider::Anthropic => AgentBuilder::new(Anthropic::new(key).completion(model)),
+        Provider::Gemini => AgentBuilder::new(Gemini::new(key).completion(model)),
     };
     Ok(builder.name("chat").preamble("You are terse.").max_tokens(MAX_TOKENS).build())
 }
@@ -108,7 +110,7 @@ fn agent_settings_parse_like_every_other_sub_struct() {
 
 ## Holding the Agent in `AppState`
 
-`Agent` is **not generic** in 0.42 — the model is erased into a `ModelHandle` at `build()`,
+`Agent` is **not generic** in 0.43 — `AgentBuilder::new` takes the model as a `DynModel`,
 so one concrete `Agent` type covers every provider and `AppState` needs no type parameter.
 It is `Clone` and `Send + Sync + 'static`, but cloning copies the whole config (preamble,
 static context, hook stack), so `Arc` the agent rather than let axum clone it per request.
@@ -130,7 +132,7 @@ Build one agent per role in `main`, beside the database pool, from `settings.age
 
 ## Mapping `PromptError` into `AppError`
 
-`agent.prompt(..)` fails with `PromptError`, which wraps the provider's `CompletionError`.
+`agent.prompt(..)` fails with `PromptError`; a provider failure arrives as its `Report` variant.
 The service's `AppError` already has a variant for every outcome a run can have, so
 **`error.rs` does not change** — no new variant, no new `status` arm, no `From` impl. One
 function in the chat module, `agent_error`, maps a `PromptError` onto what is there, and
@@ -139,17 +141,22 @@ the handler calls it with `.map_err(agent_error)?`:
 | `PromptError` | `AppError` | Status | Client sees |
 |---|---|---|---|
 | `PromptCancelled` with the reason `DECLINED` (a policy hook's `Stop`) | `BadRequest("the assistant declined this request")` | 400 | that constant |
+| `PromptCancelled` with the reason `UNAVAILABLE` (a policy hook whose own dependency is down) or starting `failed to retrieve dynamic context` (a vector store that is down) | `Unavailable(error.to_string())` | 503 | `"service unavailable"` |
 | `MaxTurnsError`, `UnknownToolCall`, any other `PromptCancelled` | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
-| provider answered 400, 401 or 403 (`provider_response_status()`) | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
+| `Report` that rig raised itself (`kind` `Request`, `HandlerUnavailable`, `Internal`, or `Other` / `Denied` from a hook or layer that refused the completion) | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
+| provider answered a 4xx other than 408 and 429 (`provider_response_status()`) | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
 | provider answered 429 | `TooManyRequests { retry_after_secs }` | 429 | `"too many requests"` + `Retry-After` |
 | anything else | `Unavailable(error.to_string())` | 503 | `"service unavailable"` |
 
 A policy hook declining this request is a normal outcome rather than a fault, so it is a 400.
 Every such hook stops with the one constant, `DECLINED`, because rig raises `PromptCancelled`
 for its own failures too (a lost prompt, a driver protocol violation, a tool round with no
-results), and those are faults. The 500 rows are wiring bugs on this side (a budget too small,
-a tool the model invented, a run rig cancelled itself, a revoked key, a request shape the
-provider rejects), so they take the scaffold's *unexpected* path: logged with the whole cause
+results), and those are faults. A dependency that is down stays a 503 even when it ends the run
+through `PromptCancelled`: a hook whose own check failed stops with `UNAVAILABLE`, and rig's
+`dynamic_context` says only in its message that the vector store failed. The 500 rows are wiring bugs on this side (a budget too small,
+a tool the model invented, a run rig cancelled itself, a request rig could not build, a hook that
+refused the completion, a revoked key, an unknown model id, a request shape the provider
+rejects), so they take the scaffold's *unexpected* path: logged with the whole cause
 chain, answered with a constant. A 503 there would read as an outage and invite clients to retry
 what can never succeed. The 429 is surfaced as a 429, with the
 provider's `Retry-After` when it sends one, so clients back off instead of retrying into the same
@@ -157,10 +164,11 @@ limit. Everything else is the dependency this request cannot do without being do
 exactly what `Unavailable` is for: the string is **logged, never sent** — a provider message can
 carry prompt text, internal URLs and account ids, and `IntoResponse` already renders `Unavailable`
 as a constant. The wire shape stays `{ error, request_id, details }`, so document an agent route
-with `(status = 503, body = ErrorBody)` and `(status = 429, body = ErrorBody)` like any other.
+with `(status = 503, body = ErrorBody, description = "The model provider is unavailable")` and
+`(status = 429, body = ErrorBody, description = "The model provider's rate limit")` like any other.
 
 `provider_response_status()`, `provider_response_headers()` and `provider_request_id()` are
-forwarded through `PromptError` — no destructuring needed.
+forwarded through `PromptError`, from its `Report` as well — no destructuring needed.
 
 ## The Chat Module
 
@@ -182,10 +190,10 @@ use axum::http::{StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::post;
 use futures::{Stream, StreamExt as _};
+use rig::ErrorKind;
 use rig::agent::{Agent, MultiTurnStreamItem, StreamingError};
 use rig::completion::PromptError;
-use rig::prelude::*;
-use rig::streaming::StreamedAssistantContent;
+use rig::streaming::{Item, StreamEvent};
 use serde::{Deserialize, Serialize};
 use tower_http::timeout::TimeoutLayer;
 use utoipa::ToSchema;
@@ -211,19 +219,23 @@ pub struct ChatRequest {
     pub message: String,
 }
 
+/// A count is `None` when the provider did not report it.
 #[derive(Serialize, ToSchema)]
 pub struct ChatResponse {
     pub reply: String,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
 }
 
 /// The reason every policy hook in this service stops a run with, as in
 /// `CompletionCallAction::stop(DECLINED)`. rig raises `PromptCancelled` for its
 /// own failures too, so the reason is how `agent_error` tells a refusal from a fault.
 /// A hook that could not decide, say because its moderation call failed, stops
-/// with another reason: that is an outage, not a refusal.
+/// with `UNAVAILABLE` instead: that is an outage, not a refusal.
 pub const DECLINED: &str = "declined by policy";
+
+/// The reason a policy hook stops with when its own dependency is down.
+pub const UNAVAILABLE: &str = "policy check unavailable";
 
 /// Maps a failed run onto the variants `error.rs` already has, so it stays untouched.
 fn agent_error(error: PromptError) -> AppError {
@@ -232,12 +244,36 @@ fn agent_error(error: PromptError) -> AppError {
         PromptError::PromptCancelled { reason, .. } if reason == DECLINED => {
             AppError::BadRequest("the assistant declined this request".to_owned())
         }
+        // A dependency of the run is down, which is a 503 like any backend: a hook
+        // whose own check failed, or a vector store `dynamic_context` could not
+        // query. rig marks the latter only in its message.
+        PromptError::PromptCancelled { ref reason, .. }
+            if reason == UNAVAILABLE
+                || reason.starts_with("failed to retrieve dynamic context") =>
+        {
+            AppError::Unavailable(error.to_string())
+        }
         // Out of turns, a tool the model invented, or a run rig cancelled itself:
         // a bug on this side. `Other` is 500, logged with its cause chain,
         // answered with a constant.
         PromptError::MaxTurnsError { .. }
         | PromptError::UnknownToolCall { .. }
         | PromptError::PromptCancelled { .. } => AppError::Other(anyhow::Error::from(error)),
+        // A failure rig raised before any provider replied: a request it could
+        // not build, an unregistered model label, a broken invariant, a hook or
+        // layer that skipped or denied the completion.
+        PromptError::Report(ref report)
+            if matches!(
+                report.kind,
+                ErrorKind::Request
+                    | ErrorKind::HandlerUnavailable
+                    | ErrorKind::Internal
+                    | ErrorKind::Other
+                    | ErrorKind::Denied
+            ) =>
+        {
+            AppError::Other(anyhow::Error::from(error))
+        }
         // A provider 429 is a 429 here too, so clients back off instead of retrying.
         _ if error.provider_response_status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
             let retry_after_secs = error
@@ -247,12 +283,12 @@ fn agent_error(error: PromptError) -> AppError {
                 .and_then(|value| value.parse().ok());
             AppError::TooManyRequests { retry_after_secs }
         }
-        // A revoked key or a request the provider rejects is a wiring bug too:
-        // a 503 would invite clients to retry what can never succeed.
-        _ if matches!(
-            error.provider_response_status(),
-            Some(StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
-        ) =>
+        // A revoked key, an unknown model id or a request the provider rejects is
+        // a wiring bug too: a 503 would invite clients to retry what can never
+        // succeed. A 408 is the provider timing out, so it stays a 503.
+        _ if error.provider_response_status().is_some_and(|status| {
+            status.is_client_error() && status != StatusCode::REQUEST_TIMEOUT
+        }) =>
         {
             AppError::Other(anyhow::Error::from(error))
         }
@@ -274,9 +310,8 @@ pub async fn chat(
     // provider that keeps asking for tools the agent does not have cannot loop.
     let request = state.agent.prompt(body.message).max_turns(5);
 
-    // `extended_details()` returns `PromptResponse` (output plus aggregated
-    // usage) rather than a bare `String`.
-    let response = request.extended_details().await.map_err(agent_error)?;
+    // A `PromptResponse`: the output plus usage aggregated over the run.
+    let response = request.await.map_err(agent_error)?;
 
     Ok(Json(ChatResponse {
         reply: response.output,
@@ -289,9 +324,9 @@ pub async fn chat_stream(
     State(state): State<AppState>,
     Valid(body): Valid<ChatRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
-    // `stream_prompt` clones the agent's config, so the stream owns its data and
-    // is `'static` — it outlives this handler with no borrow of `state`.
-    let run = state.agent.stream_prompt(body.message).max_turns(5).await;
+    // The runner clones the agent's config, so the stream owns its data and is
+    // `'static` — it outlives this handler with no borrow of `state`.
+    let run = state.agent.prompt(body.message).max_turns(5).stream();
 
     // Real keep-alive comments, on an interval, from the layer that owns them.
     Ok(Sse::new(sse_events(run)).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
@@ -334,16 +369,23 @@ fn frame(
     item: Result<Result<MultiTurnStreamItem, StreamingError>, tokio_stream::Elapsed>,
 ) -> Frame {
     let cause = match item {
-        Ok(Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)))) => {
-            return Frame::Send(Event::default().event("token").data(text.text));
+        Ok(Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Text {
+            text,
+            ..
+        })))) => {
+            return Frame::Send(Event::default().event("token").data(text));
         }
         Ok(Ok(MultiTurnStreamItem::FinalResponse(response))) => {
-            let output_tokens = response.usage.output_tokens.to_string();
+            // Empty when the provider reported no count.
+            let output_tokens = response
+                .usage
+                .output_tokens
+                .map_or_else(String::new, |tokens| tokens.to_string());
             return Frame::Send(Event::default().event("done").data(output_tokens));
         }
         Ok(Ok(_)) => return Frame::Skip,
         Ok(Err(StreamingError::Prompt(error)))
-            if matches!(&*error, PromptError::PromptCancelled { reason, .. } if reason == DECLINED) =>
+            if matches!(&error, PromptError::PromptCancelled { reason, .. } if reason == DECLINED) =>
         {
             return Frame::Last(
                 Event::default()
@@ -422,6 +464,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unknown_model_id_is_a_500_not_an_outage() {
+        let server = server(MockCompletionModel::from_turns([
+            MockTurn::provider_response_error(StatusCode::NOT_FOUND, "model not found", "req-3"),
+        ]));
+
+        let response = server.post("/chat").json(&json!({ "message": "hi" })).await;
+
+        response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn a_request_rig_cannot_build_is_a_500_not_an_outage() {
+        let server = server(MockCompletionModel::from_turns([MockTurn::request_error(
+            "`max_tokens` must be set for Anthropic",
+        )]));
+
+        let response = server.post("/chat").json(&json!({ "message": "hi" })).await;
+
+        response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
     async fn a_provider_429_is_answered_with_a_429() {
         let server = server(MockCompletionModel::from_turns([
             MockTurn::provider_response_error(StatusCode::TOO_MANY_REQUESTS, "slow down", "req-1"),
@@ -459,6 +523,33 @@ mod tests {
         response.assert_status(StatusCode::BAD_REQUEST);
         let body = response.json::<serde_json::Value>();
         assert_eq!(body["error"], "the assistant declined this request");
+    }
+
+    /// A policy hook whose moderation backend is down.
+    struct ModerationDown;
+
+    impl AgentHook for ModerationDown {
+        async fn on_completion_call(
+            &self,
+            _ctx: &HookContext,
+            _event: CompletionCallEvent<'_>,
+        ) -> CompletionCallAction {
+            CompletionCallAction::stop(UNAVAILABLE)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_policy_check_outage_is_a_503() {
+        let agent = AgentBuilder::new(MockCompletionModel::text("never sent"))
+            .add_hook(ModerationDown)
+            .build();
+        let server = TestServer::new(build_router(AppState {
+            agent: Arc::new(agent),
+        }));
+
+        let response = server.post("/chat").json(&json!({ "message": "hi" })).await;
+
+        response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -596,8 +687,9 @@ that takes the model; everything else in it is unchanged:
 
 ```rust
 // tests/common/mod.rs delta
+use rig::DynModel;
 use rig::agent::AgentBuilder;
-use rig::completion::CompletionModel;
+use rig::operation::Completion;
 use rig::test_utils::MockCompletionModel;
 
 /// Every test that does not care about the agent gets one that answers one line.
@@ -605,14 +697,14 @@ pub async fn test_app() -> TestApp {
     test_app_with_model(MockCompletionModel::text("mock reply")).await
 }
 
-pub async fn test_app_with_model(model: impl CompletionModel + 'static) -> TestApp {
+pub async fn test_app_with_model(model: impl Into<DynModel<Completion>>) -> TestApp {
     // ...database, migrations, httpmock, `Settings::from_map` exactly as before; add
     // ("APP__AGENT__PROVIDER", "anthropic"), ("APP__AGENT__MODEL", "test") and
     // ("APP__AGENT__API_KEY", "test-key") to the map: `AgentSettings` is required,
     // and unused, because the agent below is built from `model`, not from a client...
     let state = AppState {
         // ...db, settings, clock, http unchanged...
-        // Same `Agent` type as production: the model is erased at `build()`.
+        // Same `Agent` type as production: the model is erased at `AgentBuilder::new`.
         agent: Arc::new(AgentBuilder::new(model).name("chat").build()),
     };
     // ...`TestServer::new(build_router(state.clone()))` and the `TestApp` as before...
@@ -631,7 +723,7 @@ alongside your axum spans with no extra wiring. Two shapes reach the collector.
 
 | Span | Target | Key fields |
 |---|---|---|
-| `chat` / `chat_streaming` | `rig::completions` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.usage.{input_tokens,output_tokens,cache_read.input_tokens,cache_creation.input_tokens,reasoning_tokens}` |
+| `chat` / `chat_streaming` | `rig::agent_chat` (`rig::completions` for a direct model call) | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.usage.{input_tokens,output_tokens,cache_read.input_tokens,cache_creation.input_tokens,reasoning_tokens}` |
 | `execute_tool` | default | `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.call.outcome`, `gen_ai.tool.error.type` |
 
 **The gotcha, specific to a web service:** rig creates the run-level `invoke_agent` span
@@ -641,8 +733,8 @@ skips recording run-level `gen_ai.usage.*` and `gen_ai.completion` onto a span i
 own. Same agent call: `["invoke_agent", "chat"]` bare, `["http_request", "chat"]` handler.
 
 Per-call usage is still on each `chat` span and `execute_tool` spans still nest under the
-request, but the run aggregate is yours to record — read it from `PromptResponse::usage`
-after `extended_details()`, as the `chat` handler above does.
+request, but the run aggregate is yours to record — read it from `PromptResponse::usage`,
+as the `chat` handler above does.
 
 - **Set `AgentBuilder::name(..)` on every agent.** Spans are named generically, so
   `gen_ai.agent.name` is the only thing distinguishing two agents in a trace.
