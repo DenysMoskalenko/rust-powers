@@ -183,7 +183,8 @@ The generic `other => ErrorBody::new(other.to_string())` arm echoes axum's own r
 expected u8 at line 1 column 12`). That publishes Rust field names and types, which is acceptable
 for a client mistake and never happens for a 5xx or a 409, whose bodies are constants.
 
-Give `ErrorBody` to utoipa on every fallible route: `(status = 422, body = ErrorBody)`. The 404
+Give `ErrorBody` to utoipa on every fallible route:
+`(status = 422, body = ErrorBody, description = "..")`. The 404
 and 405 fallbacks in `build_router` answer in the same shape, so there is one wire shape for every
 failure, including a wrong path.
 
@@ -202,10 +203,10 @@ depends on where the parent id came from:
 
 - **A path segment** (`POST /users/{id}/posts`): the URL names a resource that does not exist, so
   the service classifies the `DbErr` and returns `NotFound(format!("user {id} not found"))`,
-  documented as `(status = 404, body = ErrorBody)`. Classifying a `DbErr` is `sea-orm-postgres`'s.
+  documented as `(status = 404, body = ErrorBody, description = "..")`. Classifying a `DbErr` is `sea-orm-postgres`'s.
 - **A body field** (`POST /posts` with a `user_id`): the `DbErr` reaches the arm in both matches
   above, a 422 with the constant `"invalid reference"`, documented as
-  `(status = 422, body = ErrorBody)`, the same entry a validation failure uses.
+  `(status = 422, body = ErrorBody, description = "..")`, the same entry a validation failure uses.
 
 A pre-flight `SELECT` is the fix for neither: it loses every race the constraint wins. The 422 body
 is a constant because the constraint name is a schema detail. The error is still logged: 23503 also

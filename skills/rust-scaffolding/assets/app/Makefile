@@ -22,7 +22,7 @@ test:
 
 cov:
 	cargo llvm-cov nextest --workspace --all-features --no-report
-	cargo llvm-cov report --lcov --output-path target/lcov.info --ignore-filename-regex '(entities|migration)/|main\.rs|telemetry\.rs'
+	cargo llvm-cov report --lcov --output-path $(or $(CARGO_TARGET_DIR),target)/lcov.info --ignore-filename-regex '(entities|migration)/|main\.rs|telemetry\.rs'
 	cargo llvm-cov report --summary-only --fail-under-lines 80 --ignore-filename-regex '(entities|migration)/|main\.rs|telemetry\.rs'
 
 dev:

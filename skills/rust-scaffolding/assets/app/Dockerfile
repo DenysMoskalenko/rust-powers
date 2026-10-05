@@ -1,10 +1,10 @@
 # cargo-chef caches the dependency build: the expensive layer is only rebuilt when
 # Cargo.toml or Cargo.lock changes, not when a source file does.
 #
-# The tag must match `rust-toolchain.toml` EXACTLY. `1.98` and `1.98.1` are two
+# The tag must match `rust-toolchain.toml` EXACTLY. `1.99` and `1.99.0` are two
 # different rustup toolchain names, so a mismatch makes every stage download a
 # second complete toolchain before it compiles anything.
-FROM lukemathwalker/cargo-chef:latest-rust-1.98.1 AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.99.0 AS chef
 WORKDIR /build
 
 FROM chef AS planner

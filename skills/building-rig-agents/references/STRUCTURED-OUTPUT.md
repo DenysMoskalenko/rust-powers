@@ -4,7 +4,7 @@ Read this file when the user wants typed data out of a model instead of a string
 extraction, classification, scoring, or any agent step whose result feeds code rather than
 a human.
 
-Verified against `rig` 0.42.0.
+Verified against `rig` 0.43.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -12,7 +12,7 @@ Verified against `rig` 0.42.0.
 
 - [Three Surfaces](#three-surfaces)
 - [Extractor](#extractor)
-- [TypedPrompt](#typedprompt)
+- [Typed Prompts](#typed-prompts)
 - [Schema-Constrained Agents](#schema-constrained-agents)
 - [Designing Schemas the Model Can Fill](#designing-schemas-the-model-can-fill)
 - [Batch Extraction](#batch-extraction)
@@ -22,18 +22,19 @@ Verified against `rig` 0.42.0.
 | You want | Use |
 |---|---|
 | Structured extraction *is* the job — parse text into a type | `Extractor<T>` |
-| One step of a broader agent workflow returns a type | `TypedPrompt` — `agent.prompt_typed::<T>(..)` |
+| One step of a broader agent workflow returns a type | `agent.prompt_typed::<T>(..)` |
 | An agent whose every answer matches a schema | `AgentBuilder::output_schema::<T>()` |
 
-On Claude Opus 5.5 and Fable 5.1 every `Extractor<T>` call is a 400: the extractor forces
-its submit tool with `ToolChoice::Required`, and those models reject a forced tool choice.
-Use `prompt_typed` there. It always runs in `OutputMode::Native`, which rig sends to
-Anthropic as `output_config.format`, so the provider guarantees the schema.
-`.tool_choice(ToolChoice::Auto)` on the extractor also avoids the 400, but then the submit
-call is best effort and `NoData` becomes possible.
+The extractor forces its submit tool with `ToolChoice::Required`. Claude Opus 5.5, Sonnet
+5.5 and Fable 5.1 reject a forced tool choice, so on those models rig 0.43 drops the force
+and asks for native output instead, which rig sends to Anthropic as `output_config.format`;
+a forced choice you set on an agent yourself still reaches them, and is still a 400.
+`prompt_typed` always runs in `OutputMode::Native`, so the provider guarantees the schema on
+every model that supports it.
 
-All three require the target type to derive `serde::Deserialize` and
-`schemars::JsonSchema`; `Extractor` additionally requires `Serialize`.
+`Extractor` and `prompt_typed` require the target type to derive `serde::Deserialize` and
+`schemars::JsonSchema`, and `Extractor` additionally `Serialize`; `output_schema::<T>()` needs
+only `JsonSchema`.
 
 Import it as `use rig::schemars::{self, JsonSchema};` rather than adding your own
 `schemars` dependency: Rig needs v1, a second copy in the graph causes confusing trait
@@ -44,8 +45,8 @@ mismatches, and the `self` is load-bearing — the derive macro's generated code
 ## Extractor
 
 ```rust,verify
-use rig::prelude::*;
-use rig::providers::openai;
+use rig::extractor::ExtractorBuilder;
+use rig::providers::openai::{self, OpenAI};
 use rig::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 const MODEL: &str = openai::GPT_5_5;
@@ -63,13 +64,12 @@ struct Person {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let extractor = openai::Client::from_env()?
-        .extractor::<Person>(MODEL)
-        .preamble("Extract person details with high precision.")
+    let extractor = ExtractorBuilder::<Person>::new(OpenAI::from_env()?.completion(MODEL))
+        .append_preamble("Extract person details with high precision.")
         .context("Ages are given in years; ignore honorifics like 'Dr.'")
         .build();
 
-    let person = extractor.extract("John Doe is a 30 year old doctor.").await?;
+    let person = extractor.extract("John Doe is a 30 year old doctor.").await?.output;
     println!("{:?}", person.name);
 
     Ok(())
@@ -77,14 +77,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 Under the hood an extractor is an agent plus a private "submit" tool whose arguments are
-your target type. Rig generates the JSON schema from the struct at compile time, the model
+your target type. Rig builds the JSON schema from the struct's `JsonSchema` impl at runtime, the model
 calls the submit tool, and Rig deserializes the arguments back into your type.
 
 ### Builder options
 
 | Method | Effect |
 |---|---|
-| `preamble(&str)` | Steer the extraction |
+| `append_preamble(&str)` | Steer the extraction; the extraction preamble itself is fixed |
 | `context(&str)` | Add a static context document |
 | `dynamic_context(samples, index)` | Retrieve context from a vector index per attempt |
 | `max_tokens(u64)`, `additional_params(Value)` | Model parameters |
@@ -94,48 +94,43 @@ calls the submit tool, and Rig deserializes the arguments back into your type.
 
 ### Extraction methods
 
-| Method | Returns |
-|---|---|
-| `extract(text)` | `Result<T, ExtractionError>` |
-| `extract_with_usage(text)` | The value plus token usage |
-| `extract_with_chat_history(text, history)` | Extraction in conversational context |
-| `extract_with_chat_history_with_usage(..)` | Both |
-
-`using_model(handle)` and `using_model_value(model)` are not extraction methods: each
-returns an `ExtractorRun<'_, T>` on which you then call one of the four above, so a single
-extractor can serve one run with a different model without being rebuilt.
-`with_model_handle(..)` changes the extractor's own default instead.
+`extract(text)` returns a `TypedRun<T>`; awaiting it gives
+`Result<TypedPromptResponse<T>, StructuredOutputError>`, whose `output` is the value and
+whose `usage` covers every attempt and `completion_calls` the accepted one. Before awaiting, `.history(h)` adds
+conversational context, and `.using_model(label)` or `.using_model_value(model)` serves one
+run with a different model without rebuilding the extractor. `with_model(..)` changes the
+extractor's own default instead.
 
 ### Error handling
 
 ```rust
-use rig::extractor::ExtractionError;
+use rig::completion::StructuredOutputError;
 
 match extractor.extract(text).await {
-    Ok(person) => { /* use person */ }
-    Err(ExtractionError::NoData) => {
+    Ok(response) => { /* use response.output */ }
+    Err(StructuredOutputError::EmptyResponse) => {
         eprintln!("model never produced structured data");
     }
-    Err(ExtractionError::DeserializationError(e)) => {
+    Err(StructuredOutputError::DeserializationError(e)) => {
         eprintln!("submitted JSON did not match the type: {e}");
     }
     Err(err) => return Err(err.into()),
 }
 ```
 
-`ExtractionError` is `NoData`, `DeserializationError`, `CompletionError`, `PromptError`.
+The extractor fails with the same `StructuredOutputError` as `prompt_typed`, below.
 
-`NoData` means the model never called the submit tool, so nothing was generated. Rule out
-the cheap causes first — a `ToolChoice` that forbids the tool, a preamble that discourages
+`EmptyResponse` means no submit-tool call produced a value. On Opus 5.5, Sonnet 5.5 and Fable
+5.1, where the extractor asks for native output, it also covers a JSON answer that does not fit
+`T`, so check the schema there first. Otherwise rule out the cheap causes first — a `ToolChoice` that forbids the tool, a preamble that discourages
 tool use, an input with nothing to extract — and only then reach for a more capable model.
 
-## TypedPrompt
+## Typed Prompts
 
 When structured output is one step inside a larger agent workflow, skip the extractor and
 ask the agent directly.
 
 ```rust
-use rig::prelude::*;
 use rig::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
@@ -149,33 +144,33 @@ struct SentimentAnalysis {
 
 let result: SentimentAnalysis = agent
     .prompt_typed("Analyze the sentiment of: 'I love this product!'")
-    .await?;
+    .max_turns(1)
+    .await?
+    .output;
 ```
 
-`prompt_typed` returns `Result<T, StructuredOutputError>`:
+`prompt_typed` returns `Result<TypedPromptResponse<T>, StructuredOutputError>`:
 
-```rust,verify
-use rig::completion::PromptError;
+```rust
 pub enum StructuredOutputError {
-    PromptError(Box<PromptError>),          // the run itself failed
+    PromptError(PromptError),               // the run itself failed
     DeserializationError(serde_json::Error), // JSON did not match T
     EmptyResponse,                           // the model returned nothing to parse
 }
 ```
 
-`EmptyResponse` is the `TypedPrompt` analogue of the extractor's `NoData` — the run
-succeeded but produced no structured payload. Handle it separately from a deserialization
-failure: one means "ask a better model", the other means "fix the schema".
+`EmptyResponse` means the run succeeded but produced no structured payload. Handle it
+separately from a deserialization failure: one means "ask a better model", the other means
+"fix the schema".
 
 ## Schema-Constrained Agents
 
 To make *every* answer from an agent conform to a schema, set it on the builder:
 
 ```rust
-use rig::agent::OutputMode;
+use rig::agent::{AgentBuilder, OutputMode};
 
-let agent = client
-    .agent(MODEL)
+let agent = AgentBuilder::new(client.completion(MODEL))
     .preamble("Classify each support ticket.")
     .output_schema::<TicketClassification>()
     .output_mode(OutputMode::Native)
@@ -195,8 +190,9 @@ runtime rather than from a type.
 | `Prompted` | Best-effort — schema described in the prompt | Fallback for providers with neither |
 
 `Native` is the only mode where the provider constrains the response. `Tool` and
-`Prompted` *ask* the model to honor the schema: Rig re-prompts a bounded number of times,
-but you should still validate the returned JSON before relying on it.
+`Prompted` *ask* the model to honor the schema. Only `Tool` re-prompts, once by default and
+only while the turn budget allows; `Prompted` returns the text verbatim, prose and markdown
+included. Validate the returned JSON before relying on it.
 
 `Auto` resolves at request time. For an agent with both an `output_schema` and function
 tools, it routes to `Tool` only on providers whose native constraint would suppress tool

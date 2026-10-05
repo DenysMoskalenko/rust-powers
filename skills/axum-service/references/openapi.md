@@ -1,7 +1,8 @@
-# OpenAPI with utoipa 5
+# OpenAPI with utoipa 6
 
 - [One resource file](#one-resource-file)
 - [Wiring the document](#wiring-the-document)
+- [Streaming responses and OpenAPI 3.2](#streaming-responses-and-openapi-32)
 - [What the generated document does not contain](#what-the-generated-document-does-not-contain)
 
 ## One resource file
@@ -83,9 +84,9 @@ fn default_limit() -> u64 {
     post, path = "/users", tag = "users",
     request_body = CreateUser,
     responses(
-        (status = 201, body = UserResponse),
-        (status = 409, body = ErrorBody),
-        (status = 422, body = ErrorBody),
+        (status = 201, body = UserResponse, description = "The created user"),
+        (status = 409, body = ErrorBody, description = "The email is taken"),
+        (status = 422, body = ErrorBody, description = "The body failed validation"),
     )
 )]
 // House style: `skip_all` plus the fields worth having. `skip(state)` would still
@@ -110,7 +111,10 @@ pub async fn create_user(
 #[utoipa::path(
     get, path = "/users/{id}", tag = "users",
     params(("id" = Uuid, Path, description = "User id")),
-    responses((status = 200, body = UserResponse), (status = 404, body = ErrorBody)),
+    responses(
+        (status = 200, body = UserResponse, description = "The user"),
+        (status = 404, body = ErrorBody, description = "No user has that id"),
+    ),
     security(("bearer" = []))
 )]
 #[tracing::instrument(skip_all, fields(user_id = %id))]
@@ -129,7 +133,10 @@ pub async fn get_user(
 #[utoipa::path(
     get, path = "/users", tag = "users",
     params(ListUsers),
-    responses((status = 200, body = Page<UserResponse>), (status = 422, body = ErrorBody))
+    responses(
+        (status = 200, body = Page<UserResponse>, description = "One page of users"),
+        (status = 422, body = ErrorBody, description = "`limit` is outside 1..=100"),
+    )
 )]
 #[tracing::instrument(skip_all, fields(limit = query.limit, offset = query.offset))]
 pub async fn list_users(
@@ -241,21 +248,83 @@ offline builds break. A route opts into the scheme with `security(("bearer" = []
 `build_router`, with the middleware stack and the `/metrics` route, is the scaffold's `lib.rs`;
 this block shows only what the security scheme and a prefix add to it.
 
+## Streaming responses and OpenAPI 3.2
+
+OpenAPI 3.1 has no keyword for the items of a stream; 3.2 adds `itemSchema` for that. utoipa 6
+writes `"openapi": "3.1.0"` unless the document opts in with `version = "3.2.0"`. Opt in only to
+document an SSE or JSON Lines endpoint, and only once every consumer of the document (client
+generator, gateway import, contract test) accepts 3.2. The bundled Swagger UI renders a 3.2
+document, but shows only the media type, not the item schema.
+
+```rust,verify
+//! The SSE endpoint in the document. `ApiDoc` stands for the one in `lib.rs`, which gains
+//! `version = "3.2.0"`; a second `ApiDoc` would stay unused.
+use std::convert::Infallible;
+
+use axum::response::sse::{Event, Sse};
+use tokio_stream::Stream;
+use utoipa::{OpenApi, ToSchema};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
+
+use crate::AppState;
+
+#[derive(OpenApi)]
+#[openapi(version = "3.2.0", info(title = "service", version = "0.1.0"))]
+pub struct ApiDoc;
+
+/// One event as the client parses it. For `text/event-stream`, `itemSchema` describes the
+/// event's fields (`event`, `data`, `id`, `retry`), not the payload, and `data` is a string.
+#[derive(ToSchema)]
+pub struct JobEvent {
+    /// `progress` for each step, then `error` once if the job fails.
+    pub event: String,
+    /// The step, as text.
+    pub data: String,
+}
+
+#[utoipa::path(
+    get, path = "/events", tag = "events",
+    responses((
+        status = 200, description = "Progress events until the job ends",
+        content_type = "text/event-stream", item_schema = inline(JobEvent),
+    )),
+)]
+pub async fn events() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    // A stub: keep the existing handler's signature and body.
+    Sse::new(tokio_stream::iter([Ok(Event::default().event("progress").data("step 0"))]))
+}
+
+/// `routes!` on an `OpenApiRouter`: a plain `axum::Router::route` leaves the path out of the
+/// document.
+pub fn router() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new().routes(routes!(events))
+}
+```
+
+`item_schema` is written even into a 3.1.0 document, where `itemSchema` is not a valid keyword, so
+add `version` in the same change. When `data` carries JSON, mark the field
+`#[schema(content_media_type = "application/json")]`. The spec pairs that with `contentSchema` for
+the payload's shape, which the derive cannot emit, so name the payload type in the field's doc
+comment.
+
 ## What the generated document does not contain
 
 | Expectation | Reality |
 |---|---|
 | `#[validate(range(min = 18))]` appears as `minimum` | It does not. utoipa never reads validator attributes. Repeat it as `#[schema(minimum = 18)]`. |
 | `#[derive(ToSchema)]` puts a type in `components.schemas` | Only if a registered path references it, or it is listed in `#[openapi(components(schemas(Status)))]`. |
+| `item_schema = JobEvent` registers `JobEvent` like `body` does | It does not, so the `$ref` dangles. `inline(JobEvent)` fixes only `JobEvent` itself; a field whose type derives `ToSchema` still dangles. Listing the type in `components(schemas(..))` registers it and the types it nests. |
 | `#[param(default = 20)]` makes a query parameter optional | It stays `required: true`. Optional means `Option<T>` or `#[serde(default)]` on the field. |
 | `u8` with a `max` rule is bounded | The emitted `minimum: 0` comes from unsignedness; there is no `maximum`. |
 | `Option<String>` is `nullable: true` | OpenAPI 3.1 style: `"type": ["string", "null"]`. |
+| A response without `description` is still valid | utoipa 6 omits an empty `description` yet still declares `"openapi": "3.1.0"`, which requires one per response, so the document is invalid 3.1. Give every `(status = ..)` a `description`. |
 
 What utoipa does read: serde attributes. `deny_unknown_fields` becomes
 `"additionalProperties": false` and `rename_all` renames the properties. Enum handling follows
-serde too — a C-like enum becomes a string enum and `#[serde(tag = "type")]` becomes a
-discriminated `oneOf`. A generic response type is named after its parameter, so `Page<UserResponse>`
-appears as `Page_UserResponse`.
+serde too — a C-like enum becomes a string enum and `#[serde(tag = "type")]` becomes a `oneOf`
+whose variants each carry `type` as a one-value enum, with no `discriminator` object. A generic
+response type is named after its parameter, so `Page<UserResponse>` appears as `Page_UserResponse`.
 
 External types need their utoipa feature (`chrono`, `uuid`, `decimal`); without it the derive
 fails because the type has no `ToSchema` impl. `axum_extras` is what makes `IntoParams` inference

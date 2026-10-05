@@ -38,9 +38,11 @@ Current versions:
 - `cargo info <crate>`: the `version:` line is the latest release (`version: 0.8.9` for axum); skip `-rc`
   and yanked ones (marked in its output).
 - Inside the scaffold, with `export CARGO_TARGET_DIR=<scratch>/target-shared CARGO_INCREMENTAL=0`:
-  `cargo update --dry-run --workspace --verbose`. `Unchanged X (available: Y)` is a release the resolver
+  `cargo update --dry-run --verbose`, without `--workspace` (that flag updates only the workspace's own
+  packages and reports every dependency as unchanged). `Unchanged X (available: Y)` is a release the resolver
   refused: a new major (`testcontainers v0.27.3 (available: v0.28.0)`) needs research; a compatible
-  one held back by `rust-version` (`matchit v0.8.4 (available: v0.8.6)`) waits for the toolchain bump.
+  one is held back by an exact pin upstream (`matchit v0.8.4 (available: v0.8.6)`: axum requires
+  `=0.8.4`) or by `rust-version`, and waits for that pin or the toolchain bump.
 - `rustup check`.
 - `gh api repos/<o>/<r>/releases/latest --jq .tag_name` for tools and actions; an action without a
   floating major tag (`astral-sh/setup-uv`) needs `matching-refs/tags/v` instead.
@@ -83,7 +85,7 @@ A fact that lives only in a Red Flags or correction-table row stays there.
 The two shapes a bump edits:
 
 - The pin line, `skills/axum-service/SKILL.md` line 10:
-  `Assumes Rust 1.98 edition 2024, axum 0.8, tower-http 0.7, ... jsonwebtoken 11, argon2 0.6.`
+  `Assumes Rust 1.99 edition 2024, axum 0.8, tower-http 0.7, ... jsonwebtoken 11, argon2 0.6.`
 - The correction table, `skills/sea-orm-postgres/SKILL.md` under `## sea-orm 2.0 is not 1.x`:
 
   ```markdown
@@ -112,7 +114,7 @@ The bump itself is AGENTS.md `## Versions`; the order across a release:
 7. The release `version` in the three `plugin.json` manifests and both version fields of
    `.claude-plugin/marketplace.json` (top-level `version` and `metadata.version`); installed plugins
    auto-update only when it changes, and `validate_skills.py --base` fails a pull request that
-   changes `skills/` without it; a toolchain bump also edits `Rust 1.98 edition 2024` in the `marketplace.json`
+   changes `skills/` without it; a toolchain bump also edits `Rust 1.99 edition 2024` in the `marketplace.json`
    plugin `description` and `.codex-plugin/plugin.json` `interface.longDescription`; README only if it
    names the version.
 

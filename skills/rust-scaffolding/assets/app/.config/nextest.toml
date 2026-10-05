@@ -1,4 +1,4 @@
-nextest-version = { required = "0.9.120", recommended = "0.9.144" }
+nextest-version = { required = "0.9.120", recommended = "0.9.146" }
 
 [profile.default]
 retries = 0

@@ -32,8 +32,8 @@ attaches. Reused containers are never cleaned up; that is the point.
 
 ## The container, its tag, and two races
 
-`testcontainers-modules` 0.15 has a `nats` feature. Its default image is `nats:2.10.14`, two
-minors behind; pin `.with_tag("2.12-alpine")`. JetStream is off unless
+`testcontainers-modules` 0.15 has a `nats` feature. Its default image is `nats:2.10.14`, an
+end-of-life line; pin `.with_tag("2.14-alpine")`. JetStream is off unless
 `NatsServerCmd::default().with_jetstream()` is passed through `.with_cmd(&cmd)` — by reference,
 because the command type implements `IntoIterator` for `&Self`. Readiness waits for
 `Server is ready` on stderr.
@@ -163,7 +163,7 @@ async fn start_reusable() -> ContainerAsync<Nats> {
         let started = Nats::default()
             .with_cmd(&cmd)
             // The module default is 2.10.14. Pin what production runs.
-            .with_tag("2.12-alpine")
+            .with_tag("2.14-alpine")
             .with_container_name("rust-powers-test-nats")
             .with_reuse(ReuseDirective::Always)
             .start()
@@ -568,7 +568,7 @@ async fn kv_put_get_update_and_watch() {
 
 ## Compose and CI
 
-The compose `nats` service (`nats:2.12-alpine` with `-js`, healthcheck on `:8222/healthz`) and the
+The compose `nats` service (`nats:2.14-alpine` with `-js`, healthcheck on `:8222/healthz`) and the
 CI `services:` entry live in `rust-tooling`'s optional-services block, next to Redis. The contract
 this side needs is only that both export `TEST_NATS_URL`, so no test talks to Docker there; the
 container above is the fallback for a machine without either.

@@ -25,7 +25,7 @@ services:
   # Off by default. `docker compose --profile otel up -d` starts it; the app only
   # exports once APP__TELEMETRY__OTLP_ENDPOINT points at it.
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.140.0
+    image: otel/opentelemetry-collector-contrib:0.161.0
     profiles: ["otel"]
     command: ["--config=/etc/otel-config.yaml"]
     configs:

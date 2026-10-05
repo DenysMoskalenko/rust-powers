@@ -3,7 +3,7 @@
 Read this file when the user wants an agent that remembers: a multi-turn conversation, a
 durable session, bounded context growth, or facts that survive across sessions.
 
-Verified against `rig` 0.42.0.
+Verified against `rig` 0.43.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -26,7 +26,7 @@ ways to do that, from most manual to most automatic.
 ```rust
 use rig::completion::Message;
 
-let reply = agent.prompt("What's my name?").history(history.iter()).await?;
+let reply = agent.prompt("What's my name?").history(history.iter()).max_turns(1).await?.output;
 
 // `history(..)` does NOT record the turn. Push it yourself.
 history.push(Message::user("What's my name?"));
@@ -41,7 +41,7 @@ control.
 
 ```rust
 let mut history: Vec<Message> = Vec::new();
-let reply = agent.chat("Hello!", &mut history).await?;
+let reply = agent.chat("Hello!", &mut history).await?.output;
 ```
 
 `chat` takes the history by mutable reference and appends the committed turn — the user
@@ -58,22 +58,21 @@ agent's `.default_max_turns(n)`, set on the builder. A tool-using agent driven b
 ```rust,verify
 use rig::memory::InMemoryConversationMemory;
 use rig::prelude::*;
-use rig::providers::openai;
+use rig::providers::openai::{self, OpenAI};
 
 const MODEL: &str = openai::GPT_5_5;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let agent = openai::Client::from_env()?
-        .agent(MODEL)
+    let agent = AgentBuilder::new(OpenAI::from_env()?.completion(MODEL))
         .preamble("You are a helpful assistant.")
         .memory(InMemoryConversationMemory::new())
         .build();
 
     // Each conversation id keeps its own isolated history.
-    let _ = agent.prompt("My name is Ada.").conversation("user-42").await?;
-    let reply = agent.prompt("What's my name?").conversation("user-42").await?;
-    println!("{reply}");
+    let _ = agent.prompt("My name is Ada.").conversation("user-42").max_turns(1).await?;
+    let reply = agent.prompt("What's my name?").conversation("user-42").max_turns(1).await?;
+    println!("{}", reply.output);
 
     Ok(())
 }
@@ -91,7 +90,8 @@ These four rules explain nearly every "my agent forgot" report:
   bypassed — no error, no warning.
 - **`history(..)` bypasses memory** for that request, in both directions.
 - **`without_memory()`** gives the same bypass without supplying manual history.
-- **Memory saves only on success.** A failed prompt does not append a partial turn.
+- **Memory saves only on success.** A failed prompt does not append a partial turn, and a
+  failed append does not fail the prompt: check `response.memory_append`.
 
 Prefer setting the id per request. Most agents are reused across users and threads, and a
 builder-level default is easy to leak between them.
@@ -105,26 +105,30 @@ agents, gone on restart. For durable sessions implement `ConversationMemory`:
 // Supertraits are spelled WasmCompatSend + WasmCompatSync in the rustdoc;
 // off wasm they are Send + Sync, so an impl written against this shape compiles.
 pub trait ConversationMemory: Send + Sync {
-    fn load<'a>(&'a self, conversation_id: &'a str)
+    fn load<'a>(&'a self, conversation_id: &'a ConversationId)
         -> Pin<Box<dyn Future<Output = Result<Vec<Message>, MemoryError>> + Send + 'a>>;
 
-    fn append<'a>(&'a self, conversation_id: &'a str, messages: Vec<Message>)
+    fn append<'a>(&'a self, conversation_id: &'a ConversationId, messages: Vec<Message>)
         -> Pin<Box<dyn Future<Output = Result<(), MemoryError>> + Send + 'a>>;
 
-    fn clear<'a>(&'a self, conversation_id: &'a str)
+    fn clear<'a>(&'a self, conversation_id: &'a ConversationId)
         -> Pin<Box<dyn Future<Output = Result<(), MemoryError>> + Send + 'a>>;
 }
 ```
 
 `Message` is `Serialize`/`Deserialize`, so persisting a conversation is ordinary serde
 work — a JSON column keyed by conversation id is a perfectly good first backend.
+`ConversationId` (`rig::id::ConversationId`) wraps that id: `as_str()` gives the key back,
+and `.conversation("..")` still takes a plain string.
 
 Two implementation notes:
 
 - **Keep `append` cheap.** It runs inline before the agent returns its response, so a slow
-  write is latency the user feels. You can spawn the write instead, but then a failed
-  append loses the turn with the user none the wiser — do that only where a dropped turn is
-  acceptable, and log every failure.
+  write is latency the user feels. A failed inline append still returns the answer: rig logs
+  a warning and sets `response.memory_append` to `Some(MemoryAppend::Failed { .. })`. You can
+  spawn the write instead, but then a failed append loses the turn with nothing on the
+  response to show it — do that only where a dropped turn is acceptable, and log every
+  failure.
 - **`load` returns an empty `Vec`** for an unknown conversation — that is not an error.
 
 Treat conversation ids as untrusted input when they come from a request: scope them to the
@@ -142,7 +146,7 @@ Reusable policies live in `rig-memory`. Reach them either as their own crate or 
 the `memory` feature of `rig`, which re-exports the same types into `rig::memory`:
 
 ```toml
-rig = { version = "0.42", features = ["memory"] }
+rig = { version = "0.43", features = ["memory"] }
 ```
 
 `InMemoryConversationMemory` is in `rig::memory` with or without the feature; only the
@@ -170,7 +174,7 @@ let memory = InMemoryConversationMemory::new()
 use rig::memory::{HeuristicTokenCounter, IntoFilter, TokenWindowMemory};
 
 let memory = InMemoryConversationMemory::new().with_filter(
-    TokenWindowMemory::new(4_000, HeuristicTokenCounter::openai()).into_filter(),
+    TokenWindowMemory::new(4_000, HeuristicTokenCounter::default()).into_filter(),
 );
 ```
 
@@ -205,8 +209,7 @@ let memory = CompactingMemory::new(
     TemplateCompactor::new(), // deterministic textual rollup, no model call
 );
 
-let agent = client
-    .agent(MODEL)
+let agent = AgentBuilder::new(client.completion(MODEL))
     .preamble("You are a helpful assistant.")
     .memory(memory)
     .build();
@@ -224,7 +227,6 @@ restart from the summary.
 
 ```rust
 use rig::completion::Message;
-use rig::prelude::*;
 
 async fn compact_history(
     agent: &rig::agent::Agent,
@@ -237,7 +239,8 @@ async fn compact_history(
             "Summarize this conversation, capturing key points, decisions, and open \
              questions:\n\n{transcript}"
         ))
-        .await?;
+        .await?
+        .output;
 
     Ok(vec![Message::user(format!(
         "Context from the previous conversation:\n{summary}"

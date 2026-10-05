@@ -2,12 +2,12 @@
 name: axum-service
 description: "Use when changing an axum service — routes, extractors, response DTOs, AppError statuses, utoipa OpenAPI, settings, secrets, middleware order, health checks, pagination, SSE, background tasks, shutdown, JWT auth, tracing, JSON logs, OTLP export, traceparent propagation, Prometheus metrics. Also for Handler is not satisfied, Path segments must not start with a colon, no method named tracer, spans never reaching the collector. Not for queries (sea-orm-postgres), a new service (rust-scaffolding), flaky tests (rust-testing), Cargo.toml or CI (rust-tooling)."
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 ---
 
 # axum service patterns
 
-Assumes Rust 1.98 edition 2024, axum 0.8, tower-http 0.7, utoipa 5, validator 0.21, config 0.15, secrecy 0.10, reqwest 0.13, tracing 0.1 with opentelemetry 0.32, axum-prometheus 0.10, jsonwebtoken 11, argon2 0.6.
+Assumes Rust 1.99 edition 2024, axum 0.8, tower-http 0.7, utoipa 6, validator 0.21, config 0.15, secrecy 0.10, reqwest 0.13, tracing 0.1 with opentelemetry 0.32, axum-prometheus 0.10, jsonwebtoken 11, argon2 0.6.
 
 Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come from the rust-scaffolding template. In a project built differently, use its own types, helpers and tooling, map outcomes onto its nearest existing error variant, and say so when none fits instead of adding one. Apply these rules to new code; when editing existing code, keep its public contract and tuned configuration and report differences instead of rewriting, unless asked. If `Cargo.lock` pins another major or minor version than the line above, follow the project and say which rules may not apply.
 
@@ -20,9 +20,9 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
 ## References
 
 - `references/extractors.md` — `AppError`, `ErrorBody`, `Valid` / `ValidQuery` / `Path`, rejection table, argument order, the 23503 arm. Before writing the error type or an extractor.
-- `references/openapi.md` — utoipa 5 wiring, `routes!`, nesting, bearer scheme, what the document omits. When documenting routes.
+- `references/openapi.md` — utoipa 6 wiring, `routes!`, nesting, bearer scheme, a `description` on every response, OpenAPI 3.2 for SSE, what the document omits. When documenting routes.
 - `references/settings.md` — nested env keys, lists, secrecy, `.env` precedence, `from_map`. When adding a configuration value.
-- `references/auth.md` — `Keys`, `Claims`, `AuthUser`, argon2 0.6 hashing. When adding authentication.
+- `references/auth.md` — `Keys`, `Claims`, `AuthUser`, jsonwebtoken's crypto feature, argon2 0.6 hashing. When adding authentication.
 - `references/middleware.md` — `build_router`: the stack in order, the panic catcher, fallbacks, the timeout's empty 408, CORS, `route_layer`, `from_fn`, the rate-limit slot. When adding or reordering a layer.
 - `references/operations.md` — health and the readiness body, request id, `main.rs`, timeout budget, pagination, background work, idempotency, outbound HTTP. When wiring `main.rs` or a production concern.
 - `references/streaming.md` — SSE and streaming bodies. When a response is unbounded or long-lived.

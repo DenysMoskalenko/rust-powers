@@ -3,7 +3,7 @@
 Read this file when the user wants an agent grounded in their own documents, semantic
 search, or tool-RAG for a large tool inventory.
 
-Verified against `rig` 0.42.0.
+Verified against `rig` 0.43.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -34,11 +34,10 @@ checking first when retrieval quality looks random.
 
 ```rust
 use rig::embeddings::EmbeddingsBuilder;
-use rig::prelude::*;
-use rig::providers::openai;
+use rig::providers::openai::OpenAI;
 
-let client = openai::Client::from_env()?;
-let model = client.embedding_model("text-embedding-3-small");
+let client = OpenAI::from_env()?;
+let model = client.embedding("text-embedding-3-small", None);
 
 let embeddings = EmbeddingsBuilder::new(model)
     .document("Some text".to_string())?
@@ -47,8 +46,8 @@ let embeddings = EmbeddingsBuilder::new(model)
     .await?;
 ```
 
-For a batch, use `.documents(..)` — it respects the provider's max batch size and handles
-concurrency for you:
+For a batch, use `.documents(..)`; `build()` then splits the texts at the provider's max
+batch size and sends the batches concurrently:
 
 ```rust
 let embeddings = EmbeddingsBuilder::new(model)
@@ -57,7 +56,7 @@ let embeddings = EmbeddingsBuilder::new(model)
     .await?;
 ```
 
-`build()` returns `Result<Vec<(T, Vec<Embedding>)>, EmbeddingError>`, where `T` is your
+`build()` returns `Result<Vec<(T, Vec<Embedding>)>, ProviderError>`, where `T` is your
 source type. The order matches the order you added documents, which is what lets
 `add_documents` pair each vector with the right record.
 
@@ -106,15 +105,15 @@ adds noise to the vector and degrades retrieval.
 ```rust,verify
 use rig::embeddings::EmbeddingsBuilder;
 use rig::prelude::*;
-use rig::providers::openai;
+use rig::providers::openai::{self, OpenAI};
 use rig::vector_store::in_memory_store::InMemoryVectorStore;
 const MODEL: &str = openai::GPT_5_5;
 
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = openai::Client::from_env()?;
-    let embed_model = client.embedding_model("text-embedding-3-small");
+    let client = OpenAI::from_env()?;
+    let embed_model = client.embedding("text-embedding-3-small", None);
 
     let embeddings = EmbeddingsBuilder::new(embed_model.clone())
         .documents(vec![
@@ -129,13 +128,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     store.add_documents(embeddings);
     let index = store.index(embed_model);
 
-    let agent = client
-        .agent(MODEL)
+    let agent = AgentBuilder::new(client.completion(MODEL))
         .preamble("Answer questions using the provided context. Say so if it is not covered.")
         .dynamic_context(2, index) // top 2 documents per model call
         .build();
 
-    let answer = agent.prompt("What is Rig?").await?;
+    let answer = agent.prompt("What is Rig?").max_turns(1).await?.output;
     println!("{answer}");
 
     Ok(())
@@ -143,10 +141,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `dynamic_context(n, index)` is a completion-call hook under the hood. It searches with the
-prompt's first text part, falling back to the latest textual history message, and appends
+prompt's first text part, falling back to the first text part of the latest user message in
+history, and appends
 the retrieved documents to the request **after** static context. Retrieval failure stops
 the run before any provider I/O — a broken store fails loudly rather than silently
-answering ungrounded.
+answering ungrounded. It arrives as `PromptCancelled` with a reason starting `failed to
+retrieve dynamic context`, which a service answers 503 like any backend that is down.
 
 Because it is a hook, it composes with your own hooks in registration order: register a
 stop policy *before* `dynamic_context` if it should prevent retrieval from happening.
@@ -191,7 +191,8 @@ read-mostly corpora. Its constructors:
 | `builder()` | Configure the index strategy instead of the default brute-force scan |
 
 Mind the bounds on the document type `D`: `Default` is required for `default()`, and
-`Serialize + Eq` for `builder()` and the `from_documents*` family. A document type that
+`Serialize + Eq` for `builder()`, `add_documents` and the `from_documents*` family, and for
+searching the index. A document type that
 derives neither will fail to resolve the constructor rather than fail at the call site.
 
 `store.index(embedding_model)` turns a store into a searchable `VectorStoreIndex`.
@@ -203,7 +204,7 @@ They all implement the same `VectorStoreIndex` trait, so swapping the store does
 the agent code:
 
 ```toml
-rig = { version = "0.42", features = ["qdrant"] }
+rig = { version = "0.43", features = ["qdrant"] }
 ```
 
 ## Tool-RAG
@@ -245,7 +246,7 @@ Wire it up:
 use rig::tool::ToolSet;
 
 let mut toolset = ToolSet::default();
-toolset.add_retrieved_tool(Adder);
+toolset.add_retrieved_tool(Adder)?; // serializes the tool's `Context`, so it can fail
 
 let embeddings = EmbeddingsBuilder::new(embed_model.clone())
     .documents(toolset.schemas()?)?
@@ -255,8 +256,7 @@ let embeddings = EmbeddingsBuilder::new(embed_model.clone())
 let store = InMemoryVectorStore::from_documents_with_id_f(embeddings, |tool| tool.name.clone());
 let index = store.index(embed_model);
 
-let agent = client
-    .agent(MODEL)
+let agent = AgentBuilder::new(client.completion(MODEL))
     .preamble("You are a calculator. Use the tools provided.")
     .retrieved_tools(2, index, toolset)
     .build();
@@ -265,7 +265,7 @@ let agent = client
 `retrieved_tools(n, index, toolset)` fetches the `n` most relevant tool definitions per
 request and offers only those to the model; called tools are executed from the toolset.
 
-Note the method name: in 0.42 `dynamic_tools(..)` means *runtime-defined* tools, not
+Note the method name: in 0.43 `dynamic_tools(..)` means *runtime-defined* tools, not
 retrieved ones. Website snippets using `dynamic_tools(2, index, toolset)` will not compile.
 
 ## Beyond Top-K
@@ -273,10 +273,10 @@ retrieved ones. Website snippets using `dynamic_tools(2, index, toolset)` will n
 **Re-ranking.** Vector search compares two vectors that were produced independently, so it
 never sees the query and the document together. A re-ranking model does: it scores the pair
 jointly, which catches relevance that separate embeddings miss. Rig has first-class
-re-ranking with no feature flag: `RerankModel`, `RerankResponse` and `RerankResult` are in
-`rig::rerank`, while the client trait that builds one is `rig::client::RerankingClient` —
-not in `rig::rerank`, which is the import that trips people up. Retrieve a generous top-k,
-rerank, pass only the survivors to the model.
+re-ranking with no feature flag: `RerankResponse` and `RerankResult` are in `rig::rerank`,
+and a reranking model comes from a provider client's own `rerank(model)` (Voyage AI's
+client has one) — there is no client trait to import. Retrieve a generous top-k, rerank,
+pass only the survivors to the model.
 
 **Hybrid search.** Semantic search misses exact terms — product codes, error numbers,
 proper nouns — because an embedding of a serial number is not meaningfully near the query's.

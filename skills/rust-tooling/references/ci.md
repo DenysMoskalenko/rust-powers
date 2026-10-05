@@ -202,7 +202,7 @@ it in the first step instead and wait for its monitoring endpoint:
 ```yaml
       - name: Start NATS with JetStream
         run: |
-          docker run -d --name nats -p 4222:4222 -p 8222:8222 nats:2.12-alpine -js -m 8222
+          docker run -d --name nats -p 4222:4222 -p 8222:8222 nats:2.14-alpine -js -m 8222
           for i in $(seq 1 30); do
             curl -fsS http://localhost:8222/healthz && break
             sleep 1

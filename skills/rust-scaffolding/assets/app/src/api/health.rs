@@ -41,7 +41,10 @@ pub struct Readiness {
 
 /// Liveness: the process is running. Never touches a dependency, or Kubernetes
 /// restarts the pod every time the database hiccups.
-#[utoipa::path(get, path = "/health/live", tag = "health", responses((status = 200)))]
+#[utoipa::path(
+    get, path = "/health/live", tag = "health",
+    responses((status = 200, description = "The process is running"))
+)]
 pub async fn live() -> StatusCode {
     StatusCode::OK
 }
@@ -51,7 +54,7 @@ pub async fn live() -> StatusCode {
 #[utoipa::path(
     get, path = "/health/ready", tag = "health",
     responses(
-        (status = 200, body = Readiness),
+        (status = 200, body = Readiness, description = "Ready; an optional dependency may be degraded"),
         (status = 503, body = Readiness, description = "A required dependency is unreachable"),
     )
 )]
@@ -86,7 +89,10 @@ async fn database(db: &sea_orm::DatabaseConnection) -> Health {
 }
 
 /// Build info, so a running pod can be matched to a commit.
-#[utoipa::path(get, path = "/version", tag = "health", responses((status = 200, body = Version)))]
+#[utoipa::path(
+    get, path = "/version", tag = "health",
+    responses((status = 200, body = Version, description = "Crate name and version"))
+)]
 pub async fn version() -> Json<Version> {
     Json(Version {
         name: env!("CARGO_PKG_NAME").to_owned(),

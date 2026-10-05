@@ -17,9 +17,10 @@ way only: database to entities. Migrations are hand-written, entities are genera
 
 1. `sea-orm-cli migrate generate add_org_to_users` is how a migration file is created: it
    writes the timestamped file under `migration/src/` and registers it in `migration/src/lib.rs`
-   (the `mod` line and the `Box::new(..)` entry). Its body is a template — `todo!()` in `up` and
-   `down`, which `[lints]` turns into a warning and `-D warnings` into a failure — so rewrite it
-   in the house style of the migrations below: `#[derive(DeriveMigrationName)]`, `DeriveIden`
+   (the `mod` line and the `Box::new(..)` entry). It is a template — a `schema::*` import, a
+   hand-written `MigrationName` impl and `todo!()` in `up` and `down`, which rustc and the
+   `[lints]` table warn on and `-D warnings` fails — so replace the whole file in the house style
+   of the migrations below: `#[derive(DeriveMigrationName)]`, `DeriveIden`
    enums, the `schema::` helpers. A file created by hand needs both `lib.rs` lines added by hand.
 2. Fill in `up` and `down`.
 3. `sea-orm-cli migrate up` — it reads `DATABASE_URL`, which `.env.example` sets alongside
@@ -344,6 +345,20 @@ schema. Regenerate rather than hand-editing. `--experimental-preserve-user-modif
 extra derives and attributes on `Model` and `Relation` plus the `ActiveModelBehavior` impl block;
 any other hand edit is lost on the next run.
 
+An entity with no relations fails `-D warnings` under the pedantic lints: `#[sea_orm::model]`
+expands to an `async fn` with no `.await`, which `clippy::unused_async_trait_impl` reports. The
+file is generated, so suppress it where the module is declared, in `lib.rs`:
+
+```rust
+#[allow(
+    clippy::unused_async_trait_impl,
+    reason = "#[sea_orm::model] on an entity without relations expands to an async fn with no .await"
+)]
+pub mod entities;
+```
+
+`allow`, not `expect`: once every entity has a relation, an unfulfilled `expect` fails the build.
+
 ## Running migrations
 
 `Migrator::up(&db, None).await?` at startup is fine for a single process. It is racy for several
@@ -360,7 +375,9 @@ local development keeps the convenience and production does not inherit the race
 db.get_schema_registry("app::entities::*").sync(db).await?;
 ```
 
-`sync` only adds: missing tables, columns, unique keys and foreign keys. It never alters or drops,
-it leaves no reviewable artifact, and it is explicitly exempt from semver. Use it while prototyping
+`sync` adds missing tables, columns, unique keys and foreign keys, renames a column marked
+`#[sea_orm(renamed_from = "old")]`, and tries to drop any unique key the entity does not declare,
+one a migration created included. It never alters a column type or drops a column or table, it
+leaves no reviewable artifact, and it is explicitly exempt from semver. Use it while prototyping
 before the first migration exists, or in a harness that only needs the tables to be present. It is
 not a migration system and must not run against a production database.

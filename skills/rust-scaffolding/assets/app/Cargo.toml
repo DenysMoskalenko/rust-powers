@@ -2,7 +2,7 @@
 name = "app"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.99"
 publish = false           # also required by cargo-deny, see deny.toml
 
 [workspace]
@@ -33,9 +33,9 @@ reqwest = { version = "0.13", features = ["json", "query"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 validator = { version = "0.21", features = ["derive"] }
-utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid", "decimal"] }
-utoipa-axum = "0.2"
-utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
+utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid", "decimal"] }
+utoipa-axum = "0.3"
+utoipa-swagger-ui = { version = "10", features = ["axum", "vendored"] }
 # config / errors / secrets
 dotenvy = "0.15"
 config = { version = "0.15", default-features = false }
@@ -67,16 +67,16 @@ derive_more = { version = "2", features = ["full"] }
 strum = { version = "0.28", features = ["derive"] }
 # add when needed (all resolved and compiled in the same lock file):
 # axum-extra = { version = "0.12", features = ["typed-header"] }
-# rig = { version = "0.42", features = ["rmcp"] }   # the facade; rig-core has no agents. Add "memory" for stores, "test-utils" as a dev feature
-# rmcp = { version = "2", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }   # rig-agent pins ^2
-# jsonwebtoken = "11"   |   argon2 = "0.6"   |   nutype = { version = "0.7", features = ["serde"] }   |   sha2 = "0.11"
+# rig = { version = "0.43", features = ["rmcp"] }   # the facade; rig-core has no agents. Add "memory" for history policies (windowing, compaction), "test-utils" as a dev feature
+# rmcp = { version = "2", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }   # rig-rmcp pins ^2
+# jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }   |   argon2 = "0.6"   |   nutype = { version = "0.8", features = ["serde"] }   |   sha2 = "0.11"
 # async-nats = "0.50"   # jetstream, kv, object-store, service are defaults
 # redis = { version = "1.7", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager", "script"] }
-# deadpool-redis = "0.23"   # only for blocking commands (BLPOP & co.)
+# deadpool-redis = "0.23.1"   # only for blocking commands (BLPOP & co.)
 
 [dev-dependencies]
 rstest = "0.27"
-insta = { version = "1.48", features = ["json", "redactions"] }
+insta = { version = "1.49", features = ["json", "redactions"] }
 similar-asserts = "2"
 testcontainers-modules = { version = "0.15", features = ["postgres", "redis", "nats"] }
 testcontainers = { version = "0.27", features = ["reusable-containers"] }   # modules does not re-export it

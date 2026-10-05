@@ -2,12 +2,12 @@
 name: sea-orm-postgres
 description: "Use when working with Postgres through sea-orm — entities, pagination queries, eager loading, load().with and LoaderTrait, N+1, transactions, advisory locks, foreign key and unique violations, idempotency rows, outbox, migrations with sea-orm-migration, sea-orm-cli migrate generate and generate entity, pool sizing, per-test databases, upgrading from sea-orm 1.x. Also for RecordNotUpdated, no method named like found for enum Expr, duplicate key value violates unique constraint. Not for a new service (rust-scaffolding), nor test structure, test_app or factories (rust-testing)."
 metadata:
-  version: "0.2.0"
+  version: "0.2.1"
 ---
 
 # Postgres with sea-orm
 
-Assumes Rust 1.98 edition 2024, sea-orm 2.0, sea-orm-migration 2.0, Postgres 18, uuid v7 primary
+Assumes Rust 1.99 edition 2024, sea-orm 2.0, sea-orm-migration 2.0, Postgres 18, uuid v7 primary
 keys, chrono timestamps, cargo-nextest.
 
 Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come from the rust-scaffolding template. In a project built differently, use its own types, helpers and tooling, map outcomes onto its nearest existing error variant, and say so when none fits instead of adding one. Apply these rules to new code; when editing existing code, keep its public contract and tuned configuration and report differences instead of rewriting, unless asked. If `Cargo.lock` pins another major or minor version than the line above, follow the project and say which rules may not apply.
@@ -92,12 +92,14 @@ There is no autogenerate: no `--autogenerate`, no `diff`, no `--from-entity`. Co
 from the database to the entities and never back, so migrations come first:
 
 1. `sea-orm-cli migrate generate add_display_name` is how a migration file is created: it writes
-   the timestamped file and registers it in `migration/src/lib.rs`. Rewrite its body in the
-   shipped style (`DeriveMigrationName`, the schema helpers); the template's `todo!()` fails
-   `-D warnings` until it is.
+   the timestamped file and registers it in `migration/src/lib.rs`. Replace the whole file in
+   the shipped style (`DeriveMigrationName`, the schema helpers): the template's `schema::*`
+   import, `MigrationName` impl and `todo!()` all fail `-D warnings`.
 2. Write `up` and `down` with the schema builder, or raw SQL through `execute_unprepared`.
 3. `sea-orm-cli migrate up` (reads `DATABASE_URL`), then `migrate status` to confirm.
-4. `sea-orm-cli generate entity --entity-format dense -o src/entities --with-serde both`.
+4. `sea-orm-cli generate entity --entity-format dense -o src/entities --with-serde both`. An
+   entity with no relations trips `clippy::unused_async_trait_impl`; `references/migrations.md`
+   has the `allow` for `lib.rs`.
 5. Commit the migration and the regenerated entities together.
 
 In a dense codebase `--entity-format dense` is not optional: the generator still defaults to the

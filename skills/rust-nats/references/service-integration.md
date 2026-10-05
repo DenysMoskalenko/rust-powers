@@ -37,7 +37,7 @@ neither `AppState` nor `test_app()`. Only a handler that publishes needs them in
 
 A `MessagingSettings { url: SecretString, name: String, stream: String }` section beside the
 existing ones, read as `APP__MESSAGING__URL`. The URL is a secret because a token or a `.creds`
-path rides in it. Local default `nats://localhost:4222`; the compose service (`nats:2.12-alpine`
+path rides in it. Local default `nats://localhost:4222`; the compose service (`nats:2.14-alpine`
 with `-js`) and the CI `services:` entry are in `rust-tooling`'s optional-services block.
 
 ## Publishing from a handler

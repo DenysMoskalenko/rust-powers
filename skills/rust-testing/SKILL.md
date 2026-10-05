@@ -2,12 +2,12 @@
 name: rust-testing
 description: "Use when writing or fixing tests for an axum service or a new endpoint, or stabilizing a flaky test — API tests through axum-test and TestServer, test_app and its dependency overrides, rstest fixtures, fake and bon factories, httpmock, insta snapshots, injected Clock, nextest filters, coverage exclusions. Also for PoolTimedOut, or tests that leak state under nextest. Not for nextest.toml, llvm-cov flags or CI (rust-tooling), the Postgres container and per-test database (sea-orm-postgres), or rig mocks (building-rig-agents)."
 metadata:
-  version: "0.2.0"
+  version: "0.2.1"
 ---
 
 # Testing an axum service
 
-Assumes Rust 1.98, edition 2024, axum 0.8, axum-test 21, rstest 0.27, sea-orm 2, tokio 1.53, fake 5, bon 3, httpmock 0.8, mockall 0.15, insta 1.48, cargo-nextest 0.9.
+Assumes Rust 1.99, edition 2024, axum 0.8, axum-test 21, rstest 0.27, sea-orm 2, tokio 1.53, fake 5, bon 3, httpmock 0.8, mockall 0.15, insta 1.49, cargo-nextest 0.9.
 
 Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come from the rust-scaffolding template. In a project built differently, use its own types, helpers and tooling, map outcomes onto its nearest existing error variant, and say so when none fits instead of adding one. Apply these rules to new code; when editing existing code, keep its public contract and tuned configuration and report differences instead of rewriting, unless asked. If `Cargo.lock` pins another major or minor version than the line above, follow the project and say which rules may not apply.
 

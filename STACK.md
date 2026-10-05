@@ -2,9 +2,9 @@
 
 One pick per concern. Decided 13 September 2026.
 
-Toolchain: Rust 1.98, edition 2024, resolver 3. python-powers is the sibling project this
+Toolchain: Rust 1.99, edition 2024, resolver 3. python-powers is the sibling project this
 repository mirrors for Python services.
-Re-validated on rustc 1.98.1 / clippy 0.1.98, 13 September 2026: `cargo generate-lockfile` (895 packages), `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings` with the `[lints]` table below active (zero warnings), and `cargo deny check` (advisories, bans, licenses, sources all ok). The skeleton wires settings, `AppError`, `Valid<T>`/`ValidQuery<T>`, sea-orm + a `migration/` crate, OTLP traces with the W3C propagator and the axum OTel middleware, a traced reqwest client, Prometheus metrics and Swagger UI. Every "add when needed" crate (rig, rmcp, axum-extra, jsonwebtoken, argon2, nutype) is resolved and compiled in the same lock file. The messaging and cache crates (async-nats 0.50, redis 1.7, deadpool-redis 0.23) were compiled clippy-clean and tested against Docker NATS 2.12 / Redis 8 in separate scratch crates on 13–14 September 2026.
+Re-validated on rustc 1.99.0 / clippy 0.1.99, 5 October 2026: `cargo update` (588 packages in the scaffold lock, 940 with every add-when-needed crate), `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings` with the `[lints]` table below active (zero warnings), and `cargo deny check` (advisories, bans, licenses, sources all ok). The skeleton wires settings, `AppError`, `Valid<T>`/`ValidQuery<T>`, sea-orm + a `migration/` crate, OTLP traces with the W3C propagator and the axum OTel middleware, a traced reqwest client, Prometheus metrics and Swagger UI. Every "add when needed" crate (rig, rmcp, axum-extra, jsonwebtoken, argon2, nutype) is resolved and compiled in the same lock file. The messaging and cache crates (async-nats 0.50, redis 1.7, deadpool-redis 0.23.1) compile clippy-clean in that lock file, and their snippet tests pass against Docker NATS 2.14 / Redis 8.
 
 ## One Pick Per Concern
 
@@ -26,7 +26,7 @@ Re-validated on rustc 1.98.1 / clippy 0.1.98, 13 September 2026: `cargo generate
 | containers in tests | testcontainers-modules 0.15 | |
 | test data | fake (`#[derive(Dummy)]`) + bon (builders) | |
 | time in tests | `Clock` trait + `tokio::time::pause` | nothing can intercept `Utc::now()` |
-| LLM agents | rig 0.42 + rmcp 2 | add when needed |
+| LLM agents | rig 0.43 + rmcp 2 | add when needed |
 | messaging | async-nats 0.50 | add when needed; core `publish`/`subscribe`/`request`, JetStream `get_or_create_consumer` + `consumer.messages()`, `message.ack()` |
 | cache | redis 1.7 (`ConnectionManager`) | add when needed; one multiplexed connection, not a pool |
 | telemetry | tracing + tracing-opentelemetry + opentelemetry-otlp (traces); metrics + axum-prometheus (`/metrics`) | |
@@ -48,7 +48,7 @@ Re-validated on rustc 1.98.1 / clippy 0.1.98, 13 September 2026: `cargo generate
 - **cargo-insta** to review snapshots.
 - **prek** runs the pre-commit hooks.
 - **Makefile** is the single entrypoint (`make lint`, `make test`). Cargo has no script section, so the Makefile is the task runner. just and mise are not used.
-- Tool versions the skills were verified against: cargo-nextest 0.9, cargo-llvm-cov 0.8, cargo-deny 0.20, cargo-machete 0.9, bacon 3.25, prek 0.5, sea-orm-cli 2.0.3.
+- Tool versions the skills were verified against: cargo-nextest 0.9, cargo-llvm-cov 0.9, cargo-deny 0.20, cargo-machete 0.9, bacon 3.26, prek 0.5, sea-orm-cli 2.0.4.
 - **Complexity**: clippy lints only, configured in `[lints.clippy]`.
 - **Linker**: default `lld` on x86_64 Linux since Rust 1.90. Add `mold` only after measuring.
 
@@ -56,7 +56,7 @@ Re-validated on rustc 1.98.1 / clippy 0.1.98, 13 September 2026: `cargo generate
 
 - **axum 0.8** with `macros`. actix-web is ~10 % faster and has its own middleware model; not worth it.
 - **tower-http 0.7** for `CorsLayer`, `CompressionLayer`, `TimeoutLayer`, `CatchPanicLayer` (features `cors`, `compression-full`, `timeout`, `catch-panic` only; the request id is one `from_fn` middleware, not tower-http's set/propagate pair, and there is no `TraceLayer`). `CatchPanicLayer::custom(handle_panic)` sits directly inside the request-id middleware (`error::catch_panic_layer()`): a handler panic is logged and answered with the constant 500 `ErrorBody`, request id included, instead of dropping the connection. `TimeoutLayer::new` is deprecated since 0.6.7; use `TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, dur)`, which `-D warnings` otherwise rejects.
-- **utoipa 5 + utoipa-axum + utoipa-swagger-ui** (`vendored` feature so the build does not download Swagger UI). Serves `/docs` and `/openapi.json`.
+- **utoipa 6 + utoipa-axum + utoipa-swagger-ui** (`vendored` feature so the build does not download Swagger UI). Serves `/docs` and `/openapi.json`.
 - **validator 0.21** with a hand-written `Valid<T>` extractor. axum-valid is not used because it pins validator 0.20.
 - **nutype** for validated newtypes (`Email`, `NonEmptyString`) only where the type is reused.
 - **thiserror** for the `AppError` enum, **anyhow** inside services. `AppError` implements `IntoResponse` and is the only place a status is chosen; every failure, both router fallbacks included, renders the same `ErrorBody { error, request_id?, details? }`. The eleven variants and their statuses are in the wiring section below. 5xx and 409 bodies are constants; the cause chain goes to `tracing::error!`.
@@ -82,7 +82,7 @@ Re-validated on rustc 1.98.1 / clippy 0.1.98, 13 September 2026: `cargo generate
 - Raw SQL: `raw_sql!` macro + `FromQueryResult`; a bare `Statement` goes through `execute_raw` / `query_all_raw`. `sqlx::query_as!` is possible on the same pool but needs `DATABASE_URL` at build time; avoid it.
 - Service functions take `&C where C: ConnectionTrait`, so they work with a pool and a transaction alike. `DatabaseConnection` is cheap to clone — put it in axum state, never `Arc<_>`. Map unique violations with `DbErr::sql_err()` → `SqlErr::UniqueConstraintViolation`. Set `ConnectOptions::statement_timeout`.
 - **Migrations**: `sea-orm-cli migrate init` creates the `migration/` workspace crate. Migrations are Rust (`SeaQuery` DSL or raw SQL in `up`). Run on startup with `Migrator::up(&db, None)` or `make migrate`. Add an index for every FK column.
-- **Entities**: generated from the migrated database, `make entity` (`sea-orm-cli generate entity -o src/entities --with-serde both --entity-format dense`). Without `--entity-format dense` you get 1.x compact entities and none of the 2.0 relation story. **Migration first, always**: sea-orm-cli 2.0.3 has no autogenerate — no `--from-entity`, no `diff`, codegen only points database → entities. The 2.0 Schema Registry `sync` adds missing tables and columns, never alters or drops, leaves no reviewable artifact and is semver-exempt: prototyping and test harnesses only.
+- **Entities**: generated from the migrated database, `make entity` (`sea-orm-cli generate entity -o src/entities --with-serde both --entity-format dense`). Without `--entity-format dense` you get 1.x compact entities and none of the 2.0 relation story. **Migration first, always**: sea-orm-cli 2.0.4 has no autogenerate — no `--from-entity`, no `diff`, codegen only points database → entities. The 2.0 Schema Registry `sync` adds missing tables and columns, renames `renamed_from` columns and tries to drop any unique key the entity does not declare, never alters a column type or drops a column or table, leaves no reviewable artifact and is semver-exempt: prototyping and test harnesses only.
 - **Types**: chrono 0.4 (`DateTime<Utc>`), uuid v7 primary keys, rust_decimal for money.
 - **Cache / Redis**: not baseline; see Cache below.
 
@@ -126,13 +126,13 @@ sea-orm 1.x → 2.0 — the renames that break nearly every pre-2026 snippet:
 
 ### AI (add when needed)
 
-- **rig 0.42** — the facade crate, not `rig-core`. `rig-core` has no agent layer at all: `Agent`, `Tool`, `Extractor` live in `rig-agent`, reachable only through `rig`. Default features are `rig-core/default`, `agent`, `derive`, `rustls`. Gives agents, tools, structured output, RAG, 20+ providers, OTel GenAI conventions.
-- **rmcp 2**: rig-agent 0.42 pins `rmcp ^2`, and two rmcp majors in one graph produce two incompatible `Peer<RoleClient>` types. Enable rig's `rmcp` feature to use MCP tools inside an agent. rmcp 3 is only for a standalone MCP server with no rig in the graph.
+- **rig 0.43** — the facade crate, not `rig-core`. `rig-core` has no agent layer at all: `Agent` and `Extractor` live in `rig-agent`, which `rig` re-exports. Default features are `rig-core/default`, `reqwest`, `agent`, `derive`, `rustls`. 0.43 rewrote the public API (`AgentBuilder::new(client.completion(model))`, `.output` on `PromptResponse`, `prompt(..).stream()`); the old-to-new table is the skill's `VERSION-DRIFT.md`. Gives agents, tools, structured output, RAG, 20+ providers, OTel GenAI conventions.
+- **rmcp 2**: rig-rmcp 0.43, which rig's `rmcp` feature pulls in, pins `rmcp ^2`, and two rmcp majors in one graph produce two incompatible `Peer<RoleClient>` types. Enable rig's `rmcp` feature to use MCP tools inside an agent. rmcp 3 is only for a standalone MCP server with no rig in the graph.
 
 ### Auth (add when needed)
 
 - **axum-extra 0.12** (`typed-header`) for `TypedHeader<Authorization<Bearer>>`. A naive `"0.10"` resolves to 0.10.3, a year stale; 0.12.6 declares `axum ^0.8.9`.
-- **jsonwebtoken 11** to validate IdP tokens against JWKS.
+- **jsonwebtoken 11** to validate IdP tokens against JWKS, with exactly one crypto backend feature, `aws_lc_rs` (already in the graph through rustls; `rust_crypto` pulls `rsa`, which cargo-deny rejects as RUSTSEC-2023-0071). With neither, the first `encode` or `decode` panics at runtime; it still compiles.
 - **argon2 0.6** for password hashing.
 - **tower-sessions** if server sessions are required.
 
@@ -142,14 +142,14 @@ sea-orm 1.x → 2.0 — the renames that break nearly every pre-2026 snippet:
 - `async_nats::Client` is a cheap `Clone` over one multiplexed connection: in `AppState` by value, one per process.
 - `retry_on_initial_connect()` is **off by default**; without it the pod dies when NATS boots second. Also set `.name(..)`, `.request_timeout(Some(..))` (default 10 s) and `.event_callback(..)` to log reconnects.
 - JetStream for anything that must not be lost, core NATS for fire-and-forget and request-reply. Durable pull consumers only. `Nats-Msg-Id` deduplication makes the publish idempotent, not the handler: pair it with a unique key in Postgres.
-- **Tests**: `TEST_NATS_URL` when set, else the testcontainers-modules `nats` module with `Nats::default().with_cmd(&NatsServerCmd::default().with_jetstream())` and `.with_tag("2.12-alpine")` — the module default is `2.10.14` with JetStream off.
+- **Tests**: `TEST_NATS_URL` when set, else the testcontainers-modules `nats` module with `Nats::default().with_cmd(&NatsServerCmd::default().with_jetstream())` and `.with_tag("2.14-alpine")` — the module default is `2.10.14` with JetStream off.
 - Rejected: the legacy `nats` crate (blocking; crates.io marks it deprecated in favour of async-nats), `lapin`/RabbitMQ (a second broker to run and learn), `rdkafka` (C librdkafka in the build, heavier ops, the workload is not log-shaped).
 
 ### Cache (add when needed)
 
 - **redis 1.7** (redis-rs), features `tokio-comp`, `tokio-rustls-comp` (`rediss://` to a managed cache), `connection-manager`, `script` (a default, listed so `default-features = false` cannot drop `redis::Script`). BSD-3-Clause, already in `deny.toml`. MSRV 1.88.
 - One `aio::ConnectionManager` per process, in `AppState` by value: `Clone`, one multiplexed socket, reconnects itself with backoff. Commands take `&mut self`, so clone per call, never a `Mutex`. `get_connection_manager_with_config` connects eagerly; set the `ConnectionManagerConfig` response timeout to ~100 ms (default 500 ms) so a slow cache is not a slow API.
-- A pool only for blocking commands: a multiplexed connection interleaves every caller, so one `BLPOP key 2` stalled an unrelated `GET` on a clone by 1.94 s (measured). A module that issues `BLPOP`/`BRPOP`/`BLMOVE`/`BZPOPMIN`/`XREAD BLOCK`/`WAIT` gets its own small `deadpool-redis` 0.23 pool.
+- A pool only for blocking commands: a multiplexed connection interleaves every caller, so one `BLPOP key 2` stalled an unrelated `GET` on a clone by 1.94 s (measured). A module that issues `BLPOP`/`BRPOP`/`BLMOVE`/`BZPOPMIN`/`XREAD BLOCK`/`WAIT` gets its own small `deadpool-redis` 0.23.1 pool, built with `Manager::new_with_config` and a response timeout longer than the block (the 500 ms default cancels a `BLPOP key 2`).
 - The `json` feature is the RedisJSON server module, not serde support; a `Json<T>` newtype over `serde_json` needs no feature. Keys `app:v1:entity:id`, every write has a TTL, `SCAN` never `KEYS`, an outage degrades to a miss and never a 500.
 - Pub/sub and streams belong to NATS, not Redis.
 - **Tests**: `TEST_REDIS_URL` when set, else the testcontainers-modules `redis` module with `.with_tag("8-alpine")` — the module default is `5.0`. Isolate with a per-test key prefix, not `FLUSHDB`.
@@ -162,7 +162,7 @@ sea-orm 1.x → 2.0 — the renames that break nearly every pre-2026 snippet:
 name = "app"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.99"
 publish = false           # also required by cargo-deny, see deny.toml
 
 [workspace]
@@ -193,9 +193,9 @@ reqwest = { version = "0.13", features = ["json", "query"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 validator = { version = "0.21", features = ["derive"] }
-utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid", "decimal"] }
-utoipa-axum = "0.2"
-utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
+utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid", "decimal"] }
+utoipa-axum = "0.3"
+utoipa-swagger-ui = { version = "10", features = ["axum", "vendored"] }
 # config / errors / secrets
 dotenvy = "0.15"
 config = { version = "0.15", default-features = false }
@@ -227,16 +227,16 @@ derive_more = { version = "2", features = ["full"] }
 strum = { version = "0.28", features = ["derive"] }
 # add when needed (all resolved and compiled in the same lock file):
 # axum-extra = { version = "0.12", features = ["typed-header"] }
-# rig = { version = "0.42", features = ["rmcp"] }   # the facade; rig-core has no agents. Add "memory" for stores, "test-utils" as a dev feature
-# rmcp = { version = "2", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }   # rig-agent pins ^2
-# jsonwebtoken = "11"   |   argon2 = "0.6"   |   nutype = { version = "0.7", features = ["serde"] }   |   sha2 = "0.11"
+# rig = { version = "0.43", features = ["rmcp"] }   # the facade; rig-core has no agents. Add "memory" for history policies (windowing, compaction), "test-utils" as a dev feature
+# rmcp = { version = "2", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }   # rig-rmcp pins ^2
+# jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }   |   argon2 = "0.6"   |   nutype = { version = "0.8", features = ["serde"] }   |   sha2 = "0.11"
 # async-nats = "0.50"   # jetstream, kv, object-store, service are defaults
 # redis = { version = "1.7", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager", "script"] }
-# deadpool-redis = "0.23"   # only for blocking commands (BLPOP & co.)
+# deadpool-redis = "0.23.1"   # only for blocking commands (BLPOP & co.)
 
 [dev-dependencies]
 rstest = "0.27"
-insta = { version = "1.48", features = ["json", "redactions"] }
+insta = { version = "1.49", features = ["json", "redactions"] }
 similar-asserts = "2"
 testcontainers-modules = { version = "0.15", features = ["postgres", "redis", "nats"] }
 testcontainers = { version = "0.27", features = ["reusable-containers"] }   # modules does not re-export it
@@ -278,7 +278,7 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 ```
 
-Every lint name was checked against `clippy-driver -Whelp` on clippy 0.1.98. The tables are `[workspace.lints.*]` and both packages opt in with `[lints] workspace = true`; a member without that line inherits nothing. `too_many_lines` and `too_many_arguments` already come from `pedantic` and `all`; `mod_module_files` is deliberately absent because sea-orm-cli generates `entities/mod.rs`.
+Every lint name was checked against `clippy-driver -Whelp` on clippy 0.1.99. The tables are `[workspace.lints.*]` and both packages opt in with `[lints] workspace = true`; a member without that line inherits nothing. `too_many_lines` and `too_many_arguments` already come from `pedantic` and `all`; `mod_module_files` is deliberately absent because sea-orm-cli generates `entities/mod.rs`.
 
 The `migration/` crate depends on `sea-orm-migration = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls"] }` plus `tokio = { version = "1.53", features = ["macros", "rt", "rt-multi-thread"] }` for the `migration/src/main.rs` binary that `sea-orm-cli migrate up` runs, and carries `[lints] workspace = true`.
 
@@ -288,7 +288,7 @@ Levels stay in `Cargo.toml`; thresholds go in `clippy.toml` at the repo root: `a
 
 ```toml
 [toolchain]
-channel = "1.98.1"
+channel = "1.99.0"
 components = ["rustfmt", "clippy", "llvm-tools-preview"]
 ```
 
@@ -319,7 +319,7 @@ test:
 
 cov:
 	cargo llvm-cov nextest --workspace --all-features --no-report
-	cargo llvm-cov report --lcov --output-path target/lcov.info --ignore-filename-regex '(entities|migration)/|main\.rs|telemetry\.rs'
+	cargo llvm-cov report --lcov --output-path $(or $(CARGO_TARGET_DIR),target)/lcov.info --ignore-filename-regex '(entities|migration)/|main\.rs|telemetry\.rs'
 	cargo llvm-cov report --summary-only --fail-under-lines 80 --ignore-filename-regex '(entities|migration)/|main\.rs|telemetry\.rs'
 
 dev:
@@ -514,7 +514,7 @@ pub enum AppError {
 | tower_governor | 13+ months idle, and an in-process counter is per replica | rate limiting: Redis-backed, see `rust-redis` |
 | aide | smaller than utoipa, axum-only | utoipa |
 | swiftide, genai, rust-mcp-sdk | 10–100x smaller than rig / rmcp | rig, rmcp |
-| rig-core alone | no agent layer at all; `Agent`/`Tool` live in rig-agent | the `rig` facade |
+| rig-core alone | no agent layer at all; `Agent`/`Extractor` live in rig-agent | the `rig` facade |
 | reqwest-retry | reqwest 0.13 has `ClientBuilder::retry` with a token budget | built in |
 | temp-env | only needed to mutate the process env in settings tests | `Environment::source(map)` |
 | async-std | discontinued | tokio |

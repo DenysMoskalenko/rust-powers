@@ -3,6 +3,11 @@
 pub mod api;
 pub mod clock;
 pub mod config;
+#[allow(
+    clippy::unused_async_trait_impl,
+    reason = "#[sea_orm::model] on an entity with no relations expands to an async fn with no .await; \
+              allow, not expect: it fires only while such an entity exists, as after posts is removed"
+)]
 pub mod entities;
 pub mod error;
 pub mod extract;

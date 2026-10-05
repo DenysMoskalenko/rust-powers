@@ -28,7 +28,7 @@ src/
   lib.rs                 AppState, build_router, the middleware stack
   config.rs              Settings, its nested structs, the timeout constants
   error.rs               AppError, ErrorBody, the request-id task local
-  extract.rs             Valid and ValidQuery
+  extract.rs             Valid, ValidQuery and Path
   clock.rs               the Clock trait, SystemClock, FixedClock
   telemetry.rs           subscriber, OTLP exporter, TelemetryGuard
   api/mod.rs             assembles every resource router; the request_id middleware
@@ -44,7 +44,7 @@ tests/
   common/mod.rs          test_app(): throwaway database, frozen clock, mock server
   health.rs              the probes and both router fallbacks
   panic.rs               the catch-panic layer, wired in its own binary
-  users.rs               the four cases that prove the wiring
+  users.rs               the cases that prove the wiring
 ```
 
 Everything testable lives in `lib.rs` and below. `main.rs` holds only what a test cannot

@@ -4,7 +4,7 @@ Read this file when the user wants more than one model call wired together: work
 model routing, multi-agent systems, runtime provider selection, document loading, or an
 interactive REPL.
 
-Verified against `rig` 0.42.0.
+Verified against `rig` 0.43.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -42,8 +42,8 @@ Rig has no workflow DSL. An earlier experimental `pipeline` module (the `Op` tra
 ### Sequential
 
 ```rust
-let draft = writer.prompt("A tool that compile-checks docs code samples").await?;
-let tagline = editor.prompt(draft.trim()).await?;
+let draft = writer.prompt("A tool that compile-checks docs code samples").max_turns(1).await?.output;
+let tagline = editor.prompt(draft.trim()).max_turns(1).await?.output;
 ```
 
 ### Parallel
@@ -52,8 +52,8 @@ let tagline = editor.prompt(draft.trim()).await?;
 let review = "The new update is fast, but the settings menu is confusing.";
 
 let (sentiment, topic) = futures::join!(
-    async { sentiment_agent.prompt(review).await },
-    async { topic_agent.prompt(review).await },
+    async { sentiment_agent.prompt(review).max_turns(1).await.map(|r| r.output) },
+    async { topic_agent.prompt(review).max_turns(1).await.map(|r| r.output) },
 );
 
 // Handle each independently — a `?` here would throw away the branch that succeeded.
@@ -71,12 +71,12 @@ discard the other's work — provided you do not immediately `?` it away.
 ### Conditional routing
 
 ```rust
-let category = router.prompt(query).await?;
+let category = router.prompt(query).max_turns(1).await?.output;
 
 let answer = match category.trim().to_lowercase().as_str() {
-    "code" => coder.prompt(query).await?,
-    "math" => mathematician.prompt(query).await?,
-    _ => generalist.prompt(query).await?,
+    "code" => coder.prompt(query).max_turns(1).await?.output,
+    "math" => mathematician.prompt(query).max_turns(1).await?.output,
+    _ => generalist.prompt(query).max_turns(1).await?.output,
 };
 ```
 
@@ -87,15 +87,15 @@ see [Model Routing](#model-routing) below.
 ### Evaluator-optimizer
 
 ```rust
-let mut draft = writer.prompt(brief).await?;
+let mut draft = writer.prompt(brief).max_turns(1).await?.output;
 
 for _ in 0..3 {                                  // always bound the loop
-    let review = critic.prompt(draft.as_str()).await?;
+    let review = critic.prompt(draft.as_str()).max_turns(1).await?.output;
     if review.trim().starts_with("APPROVED") {
         break;
     }
     let revision = format!("Revise this text:\n{draft}\n\nAddress this feedback:\n{review}");
-    draft = writer.prompt(revision.as_str()).await?;
+    draft = writer.prompt(revision.as_str()).max_turns(1).await?.output;
 }
 ```
 
@@ -116,7 +116,7 @@ Routing puts several specialized agents behind one interface. It doubles as a gu
 
 ### Typed registry
 
-Because `Agent` is no longer generic in 0.42, a plain map holds agents from **any**
+Because `Agent` is not generic, a plain map holds agents from **any**
 provider:
 
 ```rust,verify
@@ -152,6 +152,8 @@ gymnastics the website describes for mixing providers are no longer needed. A
 Prefer a typed classifier over raw string matching:
 
 ```rust
+use rig::extractor::ExtractorBuilder;
+use rig::providers::openai;
 use rig::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 
@@ -168,13 +170,13 @@ struct Classification {
     route: Route,
 }
 
-let classifier = client.extractor::<Classification>("gpt-5-mini").build();
-let classification = classifier.extract(query).await?;
+let classifier = ExtractorBuilder::<Classification>::new(client.completion(openai::GPT_5_MINI)).build();
+let classification = classifier.extract(query).await?.output;
 
 let answer = match classification.route {
-    Route::Rust => coding_agent.prompt(query).await?,
-    Route::Math => math_agent.prompt(query).await?,
-    Route::General => generalist.prompt(query).await?,
+    Route::Rust => coding_agent.prompt(query).max_turns(1).await?.output,
+    Route::Math => math_agent.prompt(query).max_turns(1).await?.output,
+    Route::General => generalist.prompt(query).max_turns(1).await?.output,
 };
 ```
 
@@ -224,19 +226,17 @@ it with `.dynamic_tool(..)` rather than `.tool(..)`.
 
 ```rust
 use rig::prelude::*;
-use rig::providers::openai;
+use rig::providers::openai::OpenAI;
 
-let client = openai::Client::from_env()?;
+let client = OpenAI::from_env()?;
 
-let bob = client
-    .agent(MODEL)
+let bob = AgentBuilder::new(client.completion(MODEL))
     .name("Bob")
     .description("An employee who handles admin tasks at FooBar Inc.")
     .preamble("You are Bob, an admin employee. Your manager Alice may ask you to do things.")
     .build();
 
-let alice = client
-    .agent(MODEL)
+let alice = AgentBuilder::new(client.completion(MODEL))
     .name("Alice")
     .description("A manager at FooBar Inc.")
     .preamble("You are Alice, a manager in the admin department. You manage Bob.")
@@ -320,20 +320,19 @@ say-so.
 
 ## Interactive REPL
 
-`ChatBotBuilder` turns any `Chat` value into a terminal REPL — useful for trying an agent
+`ChatBotBuilder` turns an `Agent` into a terminal REPL — useful for trying an agent
 locally without writing an input loop.
 
 ```rust,verify
 use rig::integrations::cli_chatbot::ChatBotBuilder;
 use rig::prelude::*;
-use rig::providers::openai;
+use rig::providers::openai::{self, OpenAI};
 const MODEL: &str = openai::GPT_5_5;
 
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    let agent = openai::Client::from_env()?
-        .agent(MODEL)
+    let agent = AgentBuilder::new(OpenAI::from_env()?.completion(MODEL))
         .preamble("You are a helpful assistant.")
         .build();
 
@@ -342,11 +341,13 @@ async fn main() -> Result<(), anyhow::Error> {
 }
 ```
 
-You get a `>` prompt, conversation history maintained across turns, an `exit` command, I/O
-and chat error handling, and tracing spans when a subscriber is installed. It is generic
-over `Chat`, so a RAG agent with `dynamic_context` works unchanged.
+You get a `>` prompt, conversation history maintained across turns, an `exit` command, and
+tracing spans when a subscriber is installed; the first failed prompt ends `run()` with its
+error. It streams each answer with a one-call budget that overrides the agent's
+`default_max_turns`, so a tool-using agent needs `.max_turns(n)` before `.build()`. It takes
+any `Agent`, so a RAG agent with `dynamic_context` works unchanged;
+`.chat(..)` in place of `.agent(..)` takes anything else that implements its `Chat` trait.
 
-Build the agent from a client instance — `openai::Client::from_env()?.agent(..)` — and
-keep that client alive; `ChatBotBuilder` needs a fully built `Agent`, not a builder.
+`ChatBotBuilder` needs a fully built `Agent`, not a builder.
 
 Back to the reference index in SKILL.md.

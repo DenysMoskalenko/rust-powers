@@ -48,9 +48,9 @@ fn faker_fills_every_field_with_something_valid() {
     let payload: SignupPayload = Faker.fake();
 
     assert!(payload.email.contains('@'));
-    assert!(!payload.name.is_empty());
+    assert_ne!(payload.name, "");
     assert!((18..90).contains(&payload.age));
-    assert!(!payload.tags.is_empty());
+    assert!((1..4).contains(&payload.tags.len()));
     // Option<T> needs no attribute; fake decides whether to fill it.
     assert!(payload.nickname.as_ref().is_none_or(|n| !n.is_empty()));
 }
