@@ -3,7 +3,7 @@
 Read this file when the user wants deterministic tests without a provider, wants to score
 real model output, or needs to see what an agent is doing in production.
 
-Verified against `rig` 0.43.0.
+Verified against `rig` 0.44.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -31,7 +31,7 @@ Rig models are `Model` values and `AgentBuilder::new` takes any
 
 ```toml
 [dev-dependencies]
-rig = { version = "0.43", features = ["test-utils"] }
+rig = { version = "0.44", features = ["test-utils"] }
 ```
 
 Keep `test-utils` in `[dev-dependencies]` — mocks in a release build are dead weight and a
@@ -49,7 +49,7 @@ async fn agent_returns_the_scripted_reply() {
     let agent = AgentBuilder::new(model).preamble("You are friendly.").build();
 
     let reply = agent.prompt("Hi").max_turns(1).await.unwrap();
-    assert_eq!(reply.output, "Hello from a mocked model!");
+    assert_eq!(reply.output(), "Hello from a mocked model!");
 }
 ```
 
@@ -84,7 +84,7 @@ async fn agent_runs_the_tool_loop() {
 
     let answer = agent.prompt("What is 2 + 3?").max_turns(3).await.unwrap();
 
-    assert!(answer.output.contains('5'));
+    assert!(answer.output().contains('5'));
     assert_eq!(probe.request_count(), 2);
 }
 ```
@@ -202,9 +202,9 @@ just a method, and its typed `Error` survives to your assertions.
 Mocks cannot tell you whether a real model produces *good* answers. For that you score live
 output against expectations.
 
-**There is no `rig::evals` module in 0.43.** An experimental one existed in 0.39 behind an
+**There is no `rig::evals` module in 0.44.** An experimental one existed in 0.39 behind an
 `experimental` feature and was removed by 0.41; the Evals page on rig.rs still documents it.
-`cargo add rig -F experimental` fails — that feature does not exist on `rig` 0.43.
+`cargo add rig -F experimental` fails — that feature does not exist on `rig` 0.44.
 
 Build the same three metrics on top of extractors, which are fully supported. An
 LLM-as-a-judge is an extractor with a verdict schema:
@@ -319,8 +319,8 @@ processors:
             where name == "invoke_agent" and attributes["gen_ai.agent.name"] != nil
 ```
 
-With no `invoke_agent` span, as inside a request span, the agent name is on the `chat` and
-`chat_streaming` spans, which carry `gen_ai.agent.name` too.
+With no `invoke_agent` span, as inside a request span, the agent name is on the `chat` spans,
+streamed or not, which carry `gen_ai.agent.name` too.
 
 Set `AgentBuilder::name(..)` on every agent — it is what makes traces distinguishable when
 several agents run in one service.

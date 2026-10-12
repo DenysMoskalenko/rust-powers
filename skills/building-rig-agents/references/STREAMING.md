@@ -3,7 +3,7 @@
 Read this file when the user wants tokens as they arrive: a responsive UI, long-form
 output, or live observation of tool activity.
 
-Verified against `rig` 0.43.0.
+Verified against `rig` 0.44.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -69,8 +69,9 @@ stream_to_stdout(&mut stream).await?;
 ```
 
 It prints assistant text as it arrives and each reasoning part once it ends, and ignores tool calls,
-which are rarely meaningful to display raw. A run error goes to stderr, not to the caller:
-a failed run still returns `Ok`, with an empty response, and the `?` catches only I/O errors.
+which are rarely meaningful to display raw. It returns the final `PromptResponse`, and fails
+with `StreamToStdoutError`: the run's `PromptError`, a stdout write error, or a stream that
+ended without a final response.
 
 ## Streaming with History
 
@@ -89,11 +90,12 @@ The whole agent loop flows through one stream, so you observe tool activity live
 text.
 
 ```rust
+#[non_exhaustive]
 pub enum MultiTurnStreamItem {
     StreamAssistantItem(Item<StreamEvent>),
     ToolCall { tool_call: ToolCall },
     ToolExecutionCommitted { tool_call: ToolCall },
-    StreamUserItem(StreamedUserContent),
+    ToolResult { tool_result: ToolResult },
     CompletionCall(CompletionCall),
     ModelTurnRetried { turn: usize },
     FinalResponse(PromptResponse),
@@ -108,10 +110,12 @@ pub enum MultiTurnStreamItem {
   This is *not* a real-time start notification: it surfaces together with its result only
   after the whole batch settles. For live host-side start/result observation, use tool
   hooks.
+- **`ToolResult`** — the result of an executed or hook-skipped call, in call order once the
+  batch settles; `tool_result.call` is the id of the call it answers.
 - **`CompletionCall`** — per-model-call detail: usage, finish reason, provider request id.
 - **`ModelTurnRetried`** — a hook rejected the turn for a retry; the text and reasoning
   already streamed for it were provisional, so discard or reset them.
-- **`FinalResponse`** — the completed run, carrying `output`, aggregated `usage`,
+- **`FinalResponse`** — the completed run, carrying `output()`, aggregated `usage`,
   `completion_calls`, and `messages`.
 
 ### `Item<StreamEvent>`
@@ -123,23 +127,26 @@ pub enum Item<E> {
 }
 
 pub enum StreamEvent {
-    Start { part: Part, kind: PartKind },               // Text, Reasoning, ToolCall, Image
+    Start { part: Part, kind: PartKind, name: Option<ToolName> }, // name: ToolCall only
     Text { part: Part, text: String },
     Reasoning { part: Part, text: String },
-    Arguments { part: Part, json: String },             // a tool call's arguments, once
+    Arguments { part: Part, json: String },             // one fragment of a call's arguments
     End { part: Part, content: AssistantContent },      // the finalized part
 }
 ```
 
 Read a text delta as `StreamEvent::Text { text, .. }`. Every event of one part carries the
-same `part`, its position in the response. A tool call streams whole: its arguments arrive
-once, as `Arguments`, and the complete call as `End` with `AssistantContent::ToolCall`.
+same `part`, its position in the response. A tool call's arguments arrive as fragments, one
+`Arguments` per provider delta, which join into the argument JSON;
+`rig::streaming::parse_partial_arguments` reads an incomplete prefix. The complete call
+arrives as `End` with `AssistantContent::ToolCall`.
 
 `Item::Unknown(UnknownPayload)` exists because providers add event kinds faster than crates
 adopt them. Match it explicitly if you log; do not treat it as an error.
 
-Two *kinds* of tool call never surface as a `MultiTurnStreamItem::ToolCall`: one rejected
-and handled by invalid-tool-call recovery, whose parts are held back and dropped too, and a
+Two *kinds* of tool call never surface as a `MultiTurnStreamItem::ToolCall`: one with an
+unknown or disallowed name, rejected and handled by invalid-tool-call recovery, whose parts
+are held back and dropped too, and a
 structured-output `Tool`-mode output-tool call, whose parts still stream and which
 finalizes the run directly — its result appears in `FinalResponse`.
 
@@ -166,11 +173,11 @@ Reach for it when you want one request with no agent loop around it.
 
 ## Where the Types Live
 
-0.43 has no streaming *traits*: the old `Prompt` / `StreamingPrompt` and `Chat` /
+0.44 has no streaming *traits*: the old `Prompt` / `StreamingPrompt` and `Chat` /
 `StreamingChat` pairs are gone (the `Chat` in `rig::integrations::cli_chatbot` only feeds the
 REPL), and `stream()` is a method on the runner. `rig::streaming`
-holds the item types — `Item`, `StreamEvent`, `Part`, `StreamedUserContent`,
-`CompletionStream` and more — and `MultiTurnStreamItem` lives in `rig::agent`. Website
+holds the item types — `Item`, `StreamEvent`, `Part`, `CompletionStream` and more — and
+`MultiTurnStreamItem` lives in `rig::agent`. Website
 references to a `Completion` / `StreamingCompletion` trait pair do not apply.
 
 ## Practical Notes
@@ -180,13 +187,12 @@ references to a `Completion` / `StreamingCompletion` trait pair do not apply.
   stream's last. Match on `item?` rather than assuming the stream succeeds or fails atomically.
 - **Read usage from `CompletionCall` and `FinalResponse`.** There is no usage stream event:
   each `CompletionCall` carries one model call's usage, `FinalResponse`'s `usage` the run's.
-- **Streaming hooks fire for deltas.** `on_text_delta` and `on_reasoning_delta` are hot
-  paths (`on_tool_call_delta` fires once per call, with the whole arguments) — override `observes`
+- **Streaming hooks fire for deltas.** `on_text_delta`, `on_reasoning_delta` and
+  `on_tool_call_delta` are hot paths — override `observes`
   so Rig can skip dispatch when nothing cares. See
   Hooks and Runner.
-- **The blocking and streaming paths behave identically** apart from the delta events, the
-  span name (`chat_streaming`, not `chat`) and malformed tool arguments, which reach
-  `on_invalid_tool_call` only when streamed: same run construction, tool execution, memory
+- **The blocking and streaming paths behave identically** apart from the delta events and
+  the span's `gen_ai.request.stream` flag: same run construction, tool execution, memory
   behavior, span shape, and hook handling.
   You can build one `AgentRunner` and choose `run()` or `stream()` at the end.
 - **Apply backpressure** with ordinary stream discipline when the consumer cannot keep up:

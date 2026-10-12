@@ -60,7 +60,7 @@ def allow_prefix(code: str) -> str:
 
 # Crates STACK.md keeps commented out as "add when needed"; snippets may use any of them.
 ADD_WHEN_NEEDED = [
-    'rig = { version = "0.43", features = ["memory", "rmcp", "test-utils"] }',
+    'rig = { version = "0.44", features = ["memory", "rmcp", "test-utils"] }',
     'rmcp = { version = "2", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }',
     'deadpool-redis = "0.23.1"',
     'sha2 = "0.11"',

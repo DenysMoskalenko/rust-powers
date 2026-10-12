@@ -2,7 +2,7 @@
 name: rust-tooling
 description: "Use when changing or debugging the tooling of an existing Rust service — rust-toolchain.toml, cargo add, upgrading one dependency, the lockfile, the workspace lints table or a member clippy skips, clippy.toml, rustfmt.toml, nextest, llvm-cov and the coverage gate, cargo-deny, cargo-machete, bacon, prek or pre-commit hooks, the Makefile, a Dockerfile rebuilding every dependency, docker-compose, CI recompiling, target/ size, unknown lint warnings. Not for a new repository (rust-scaffolding), one clippy finding (rust-code-style), or what coverage measures (rust-testing)."
 metadata:
-  version: "0.2.1"
+  version: "0.2.2"
 ---
 
 # Rust Tooling

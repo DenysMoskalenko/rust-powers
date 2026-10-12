@@ -67,7 +67,7 @@ derive_more = { version = "2", features = ["full"] }
 strum = { version = "0.28", features = ["derive"] }
 # add when needed (all resolved and compiled in the same lock file):
 # axum-extra = { version = "0.12", features = ["typed-header"] }
-# rig = { version = "0.43", features = ["rmcp"] }   # the facade; rig-core has no agents. Add "memory" for history policies (windowing, compaction), "test-utils" as a dev feature
+# rig = { version = "0.44", features = ["rmcp"] }   # the facade; rig-core has no agents. Add "memory" for history policies (windowing, compaction), "test-utils" as a dev feature
 # rmcp = { version = "2", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }   # rig-rmcp pins ^2
 # jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }   |   argon2 = "0.6"   |   nutype = { version = "0.8", features = ["serde"] }   |   sha2 = "0.11"
 # async-nats = "0.50"   # jetstream, kv, object-store, service are defaults

@@ -2,7 +2,7 @@
 name: rust-scaffolding
 description: "Use when creating a brand-new Rust axum service from nothing — 'create a service that...', an empty directory with no Cargo.toml, a new API or microservice that needs migrations, tests, lints, Docker and CI green from the first commit, or a repo that still errors with could not find Cargo.toml. Greenfield only. Not for adding a route (axum-service), entity (sea-orm-postgres) or test (rust-testing) to an existing crate, nor changing tooling in an existing service (rust-tooling)."
 metadata:
-  version: "0.3.0"
+  version: "0.3.1"
 ---
 
 # Rust Scaffolding (Greenfield Only)

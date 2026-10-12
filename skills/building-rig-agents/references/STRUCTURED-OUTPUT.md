@@ -4,7 +4,7 @@ Read this file when the user wants typed data out of a model instead of a string
 extraction, classification, scoring, or any agent step whose result feeds code rather than
 a human.
 
-Verified against `rig` 0.43.0.
+Verified against `rig` 0.44.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -26,7 +26,7 @@ Verified against `rig` 0.43.0.
 | An agent whose every answer matches a schema | `AgentBuilder::output_schema::<T>()` |
 
 The extractor forces its submit tool with `ToolChoice::Required`. Claude Opus 5.5, Sonnet
-5.5 and Fable 5.1 reject a forced tool choice, so on those models rig 0.43 drops the force
+5.5 and Fable 5.1 reject a forced tool choice, so on those models rig 0.44 drops the force
 and asks for native output instead, which rig sends to Anthropic as `output_config.format`;
 a forced choice you set on an agent yourself still reaches them, and is still a 400.
 `prompt_typed` always runs in `OutputMode::Native`, so the provider guarantees the schema on
@@ -88,8 +88,7 @@ calls the submit tool, and Rig deserializes the arguments back into your type.
 | `context(&str)` | Add a static context document |
 | `dynamic_context(samples, index)` | Retrieve context from a vector index per attempt |
 | `max_tokens(u64)`, `additional_params(Value)` | Model parameters |
-| `tool_choice(ToolChoice)` | Tool policy for the inner agent |
-| `retries(u64)` | Maximum retry attempts |
+| `retries(usize)` | Maximum retry attempts |
 | `add_hook(H)` | Lifecycle hook on every extraction attempt |
 
 ### Extraction methods
@@ -111,8 +110,8 @@ match extractor.extract(text).await {
     Err(StructuredOutputError::EmptyResponse) => {
         eprintln!("model never produced structured data");
     }
-    Err(StructuredOutputError::DeserializationError(e)) => {
-        eprintln!("submitted JSON did not match the type: {e}");
+    Err(StructuredOutputError::Deserialization { error, .. }) => {
+        eprintln!("submitted JSON did not match the type: {error}");
     }
     Err(err) => return Err(err.into()),
 }
@@ -122,7 +121,7 @@ The extractor fails with the same `StructuredOutputError` as `prompt_typed`, bel
 
 `EmptyResponse` means no submit-tool call produced a value. On Opus 5.5, Sonnet 5.5 and Fable
 5.1, where the extractor asks for native output, it also covers a JSON answer that does not fit
-`T`, so check the schema there first. Otherwise rule out the cheap causes first — a `ToolChoice` that forbids the tool, a preamble that discourages
+`T`, so check the schema there first. Otherwise rule out the cheap causes first — a preamble that discourages
 tool use, an input with nothing to extract — and only then reach for a more capable model.
 
 ## Typed Prompts
@@ -153,9 +152,9 @@ let result: SentimentAnalysis = agent
 
 ```rust
 pub enum StructuredOutputError {
-    PromptError(PromptError),               // the run itself failed
-    DeserializationError(serde_json::Error), // JSON did not match T
-    EmptyResponse,                           // the model returned nothing to parse
+    Prompt(PromptError),                                         // the run itself failed
+    Deserialization { output: String, error: serde_json::Error }, // JSON did not match T
+    EmptyResponse,                                               // nothing to parse
 }
 ```
 

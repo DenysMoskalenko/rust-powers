@@ -4,7 +4,7 @@ Read this file when the user wants more than one model call wired together: work
 model routing, multi-agent systems, runtime provider selection, document loading, or an
 interactive REPL.
 
-Verified against `rig` 0.43.0.
+Verified against `rig` 0.44.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -42,8 +42,8 @@ Rig has no workflow DSL. An earlier experimental `pipeline` module (the `Op` tra
 ### Sequential
 
 ```rust
-let draft = writer.prompt("A tool that compile-checks docs code samples").max_turns(1).await?.output;
-let tagline = editor.prompt(draft.trim()).max_turns(1).await?.output;
+let draft = writer.prompt("A tool that compile-checks docs code samples").max_turns(1).await?.output();
+let tagline = editor.prompt(draft.trim()).max_turns(1).await?.output();
 ```
 
 ### Parallel
@@ -52,8 +52,8 @@ let tagline = editor.prompt(draft.trim()).max_turns(1).await?.output;
 let review = "The new update is fast, but the settings menu is confusing.";
 
 let (sentiment, topic) = futures::join!(
-    async { sentiment_agent.prompt(review).max_turns(1).await.map(|r| r.output) },
-    async { topic_agent.prompt(review).max_turns(1).await.map(|r| r.output) },
+    async { sentiment_agent.prompt(review).max_turns(1).await.map(|r| r.output()) },
+    async { topic_agent.prompt(review).max_turns(1).await.map(|r| r.output()) },
 );
 
 // Handle each independently — a `?` here would throw away the branch that succeeded.
@@ -71,12 +71,12 @@ discard the other's work — provided you do not immediately `?` it away.
 ### Conditional routing
 
 ```rust
-let category = router.prompt(query).max_turns(1).await?.output;
+let category = router.prompt(query).max_turns(1).await?.output();
 
 let answer = match category.trim().to_lowercase().as_str() {
-    "code" => coder.prompt(query).max_turns(1).await?.output,
-    "math" => mathematician.prompt(query).max_turns(1).await?.output,
-    _ => generalist.prompt(query).max_turns(1).await?.output,
+    "code" => coder.prompt(query).max_turns(1).await?.output(),
+    "math" => mathematician.prompt(query).max_turns(1).await?.output(),
+    _ => generalist.prompt(query).max_turns(1).await?.output(),
 };
 ```
 
@@ -87,15 +87,15 @@ see [Model Routing](#model-routing) below.
 ### Evaluator-optimizer
 
 ```rust
-let mut draft = writer.prompt(brief).max_turns(1).await?.output;
+let mut draft = writer.prompt(brief).max_turns(1).await?.output();
 
 for _ in 0..3 {                                  // always bound the loop
-    let review = critic.prompt(draft.as_str()).max_turns(1).await?.output;
+    let review = critic.prompt(draft.as_str()).max_turns(1).await?.output();
     if review.trim().starts_with("APPROVED") {
         break;
     }
     let revision = format!("Revise this text:\n{draft}\n\nAddress this feedback:\n{review}");
-    draft = writer.prompt(revision.as_str()).max_turns(1).await?.output;
+    draft = writer.prompt(revision.as_str()).max_turns(1).await?.output();
 }
 ```
 
@@ -174,9 +174,9 @@ let classifier = ExtractorBuilder::<Classification>::new(client.completion(opena
 let classification = classifier.extract(query).await?.output;
 
 let answer = match classification.route {
-    Route::Rust => coding_agent.prompt(query).max_turns(1).await?.output,
-    Route::Math => math_agent.prompt(query).max_turns(1).await?.output,
-    Route::General => generalist.prompt(query).max_turns(1).await?.output,
+    Route::Rust => coding_agent.prompt(query).max_turns(1).await?.output(),
+    Route::Math => math_agent.prompt(query).max_turns(1).await?.output(),
+    Route::General => generalist.prompt(query).max_turns(1).await?.output(),
 };
 ```
 
@@ -196,7 +196,7 @@ let results = route_index.top_n::<RouteDefinition>(req).await?;
 
 let route = results
     .first()
-    .map(|(_, _, def)| def.name.as_str())
+    .map(|result| result.document.name.as_str())
     .unwrap_or("general");
 ```
 
@@ -221,7 +221,7 @@ role-delegation boundaries. If you cannot articulate why you need several agents
 
 An agent can be converted into a tool and handed to another agent. Note the conversion:
 `Agent` does **not** implement `Tool` (that trait needs a `const NAME`, and an agent's
-name is runtime state). Use `Agent::into_tool()`, which yields a `DynamicTool`, and attach
+name is runtime state). Use `Agent::into_tool()?`, which yields a `DynamicTool`, and attach
 it with `.dynamic_tool(..)` rather than `.tool(..)`.
 
 ```rust
@@ -240,7 +240,7 @@ let alice = AgentBuilder::new(client.completion(MODEL))
     .name("Alice")
     .description("A manager at FooBar Inc.")
     .preamble("You are Alice, a manager in the admin department. You manage Bob.")
-    .dynamic_tool(bob.into_tool())
+    .dynamic_tool(bob.into_tool()?)
     .build();
 
 let res = alice

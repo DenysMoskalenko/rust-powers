@@ -3,7 +3,7 @@
 Read this file when the user wants to expose Rust functions to a model, pass runtime
 context into a tool, share tools across agents, or connect MCP servers.
 
-Verified against `rig` 0.43.0. The `Tool` trait shape changed in 0.4x — the
+Verified against `rig` 0.44.0. The `Tool` trait shape changed in 0.4x — the
 `definition() -> ToolDefinition` form still shown on rig.rs does not compile. See
 Version Drift.
 
@@ -169,7 +169,7 @@ The `self` in that import is load-bearing — the derive macro's generated code 
 `#[schemars(description = "…")]` also works and wins when both are present. Never add your
 own `schemars` dependency; see SKILL.md.
 
-Note for OpenAI: rig 0.43 sends Responses API tools — Rig's default OpenAI integration —
+Note for OpenAI: rig 0.44 sends Responses API tools — Rig's default OpenAI integration —
 with `strict: false`; only a strict tool (`Responses::with_strict_tools`) needs every input
 parameter under `required`. Include the array anyway, or let the macro's type-driven rule
 produce it.
@@ -197,7 +197,7 @@ Other ways tools reach an agent:
 | `dynamic_tools(..)` fed by `rig::tool::rmcp::tools_from_server(..)` | Tools served by an external MCP process |
 | `tool_server_handle(handle)` | A pre-built tool server shared between agents |
 
-`dynamic_tools` does **not** mean vector retrieval in 0.43 — that is `retrieved_tools`.
+`dynamic_tools` does **not** mean vector retrieval in 0.44 — that is `retrieved_tools`.
 See RAG and Embeddings for building the index and toolset.
 
 ## When a Tool Fails
@@ -306,7 +306,7 @@ never smuggle a secret into the prompt just so a tool can read it.
 
 `ToolServerHandle` is a cheaply-cloneable handle to shared tool-server state, so several
 agents can be handed clones of one handle and see the same tools. Operations take locks on
-that state directly — there is no separate task or channel routing behind it in 0.43.
+that state directly — there is no separate task or channel routing behind it in 0.44.
 
 ```rust
 use rig::tool::server::{ToolServer, ToolServerHandle};
@@ -327,11 +327,11 @@ The Model Context Protocol exposes tools served by external processes — filesy
 browsers, databases, SaaS integrations — through one interface. Rig connects as a client
 via the `rmcp` crate.
 
-Match rig's own rmcp major version — rig-rmcp 0.43 is built against `rmcp` 2, and a
+Match rig's own rmcp major version — rig-rmcp 0.44 is built against `rmcp` 2, and a
 `Peer<RoleClient>` from a different major will not satisfy `tools_from_server`.
 
 ```toml
-rig = { version = "0.43", features = ["rmcp"] }
+rig = { version = "0.44", features = ["rmcp"] }
 rmcp = { version = "2", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }
 ```
 
@@ -363,10 +363,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tools: Vec<Tool> = mcp.list_tools(None).await?.tools;
 
     // Each MCP tool becomes a `DynamicTool` calling the server through one shared sink.
+    // The conversion fails only for a tool the server sent without a name.
     let mcp_tools = tools_from_server(tools, mcp.peer())
         .into_iter()
-        .map(DynamicTool::from)
-        .collect();
+        .map(DynamicTool::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
 
     let agent = AgentBuilder::new(OpenAI::from_env()?.completion(MODEL))
         .dynamic_tools(mcp_tools)

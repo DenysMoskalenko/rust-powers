@@ -3,7 +3,7 @@
 Read this file when the user wants to create a provider client, configure an agent, pick
 between `prompt` / `chat` / `prompt_typed`, set per-request options, or read token usage.
 
-Verified against `rig` 0.43.0.
+Verified against `rig` 0.44.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -11,6 +11,7 @@ Verified against `rig` 0.43.0.
 
 - [Create a Provider Client](#create-a-provider-client)
 - [Build an Agent](#build-an-agent)
+  - [Reasoning and Caching](#reasoning-and-caching)
 - [The Agent Loop](#the-agent-loop)
 - [Choosing an Interface](#choosing-an-interface)
 - [Per-Request Options](#per-request-options)
@@ -124,7 +125,8 @@ different providers share one type.
 | `context(&str)` | Add one static context document, sent on every request |
 | `dynamic_context(samples, index)` | Retrieve `samples` documents from a vector index per model call |
 | `name(&str)` / `description(&str)` | Become the tool name (default `agent_tool`) and description when this agent is handed to another via `into_tool()`, whose description also carries the preamble; also label telemetry spans |
-| `temperature(f64)`, `max_tokens(u64)` | Model parameters. Claude Opus 4.7 and later, Sonnet 5 and Fable reject `temperature` with a 400. On Claude, `max_tokens` covers thinking plus the reply; rig 0.43 defaults it to the published output limit of the Claude ids it knows (128K from Opus 4.6 and Sonnet 4.6 on) and, when `max_tokens` is unset, fails every prompt to an id it does not know |
+| `temperature(f64)`, `max_tokens(u64)` | Model parameters. Claude Opus 4.7 and later, Sonnet 5 and Fable reject `temperature` with a 400. On Claude, `max_tokens` covers thinking plus the reply; rig 0.44 defaults it to the published output limit of the Claude ids in its catalog (128K from Opus 4.6 and Sonnet 4.6 on), to 64K for other `claude-opus-4`, `claude-sonnet-4` and `claude-haiku-4-5` ids and, when `max_tokens` is unset, fails every prompt to any other id |
+| `reasoning(..)`, `cache(..)`, `on_unsupported(..)` | Portable generation options; see Reasoning and Caching |
 | `tool(T)` | Add a static tool (see Tools) |
 | `tool_choice(ToolChoice)` | Force, forbid, or restrict tool use |
 | `default_max_turns(usize)` | Default total model-call budget for every request |
@@ -140,6 +142,38 @@ vice versa. The two paths dispatch differently — builder tools go into an agen
 `ToolServer`, a handle points at someone else's — so mixing them would leave the agent with
 two registries and no rule for which wins. If you need a shared server *and* a local tool,
 register the local tool on the `ToolServer` before taking the handle.
+
+### Reasoning and Caching
+
+```rust,verify
+use rig::agent::{Agent, AgentBuilder};
+use rig::completion::{CacheRetention, Effort};
+use rig::providers::anthropic::{self, Anthropic};
+
+const MODEL: &str = anthropic::CLAUDE_OPUS_5_5;
+
+fn support_agent(api_key: &str) -> Agent {
+    AgentBuilder::new(Anthropic::new(api_key).completion(MODEL))
+        .preamble("You are a support assistant.")
+        .max_tokens(32_000)
+        .reasoning(Effort::High)
+        .cache(CacheRetention::Long)
+        .build()
+}
+```
+
+`reasoning`, `cache` and `on_unsupported` set rig 0.44's portable generation options
+(`Effort`, `Reasoning`, `CacheRetention` and `OnUnsupported` in `rig::completion`), and each
+provider maps them to its own fields: on Claude an effort becomes `output_config.effort`, with
+adaptive thinking on the models that take it, and `CacheRetention::Long` a one-hour
+`cache_control`. Set the effort explicitly: Claude Opus 5.5 and Haiku 5.5 default to
+`medium`, the other Claude models to `high`, and changing it between requests of one
+conversation restarts the prompt cache. Prefer these options to `additional_params`, because
+rig checks them against the provider and, for an id in its catalog, the model. An option the
+model cannot take, such as `Effort::Minimal` on Claude, fails the run before the request is
+sent, as a `PromptError::Report` of kind `Request`, or as
+`ProviderError::UnsupportedOption` when the agent sets `.model_spec(..)`;
+`.on_unsupported(OnUnsupported::Ignore)` drops it with a warning instead.
 
 ## The Agent Loop
 
@@ -158,7 +192,7 @@ The loop stops when the model produces text or the model-call budget runs out.
 `max_turns(n)` is the **total** model-call budget: the initial call plus every retry and
 continuation. Zero permits no model call at all; one permits only the initial call. With
 no `default_max_turns` set, the implicit budget is one — which is why an agent's first
-tool-using prompt fails with `PromptError::MaxTurnsError` unless you raise it.
+tool-using prompt fails with `PromptError::MaxTurns` unless you raise it.
 
 ```rust
 let answer = agent
@@ -172,7 +206,7 @@ let answer = agent
 `default_max_turns(n)`, set on the builder.
 
 Pick a number matching the longest tool chain you actually expect, so a confused model
-fails fast instead of burning tokens. `MaxTurnsError` carries the accumulated
+fails fast instead of burning tokens. `MaxTurns` carries the accumulated
 `chat_history` and the undelivered `prompt`, so you can inspect what happened.
 
 ## Choosing an Interface
@@ -186,17 +220,17 @@ fails fast instead of burning tokens. `MaxTurnsError` carries the accumulated
 | Full control of one request | the model's `call(..)` directly |
 
 `prompt`, `chat` and `prompt_typed` are inherent methods on `Agent`, and `stream()` is on the
-runner `prompt(..)` returns; rig 0.43 has no `Prompt` or `TypedPrompt` trait to import, and its
+runner `prompt(..)` returns; rig 0.44 has no `Prompt` or `TypedPrompt` trait to import, and its
 one `Chat` trait, `rig::integrations::cli_chatbot::Chat`, only puts something other than an
 agent behind the REPL.
 
 ```rust
 // One-shot
-let text: String = agent.prompt("Hello").max_turns(1).await?.output;
+let text: String = agent.prompt("Hello").max_turns(1).await?.output();
 
 // Conversation — `chat` appends the committed turn to `history` for you
 let mut history: Vec<Message> = Vec::new();
-let text = agent.chat("Hello", &mut history).await?.output;
+let text = agent.chat("Hello", &mut history).await?.output();
 
 // Typed
 let analysis: SentimentAnalysis = agent.prompt_typed("Analyze: 'I love this!'").max_turns(1).await?.output;
@@ -227,6 +261,7 @@ let response = model.call(request).await?;
 | `preamble(..)` / `without_preamble()` | Override the agent preamble for this request |
 | `document(..)` / `documents(..)` | Append static context for this request |
 | `temperature(..)`, `max_tokens(..)` | Override model parameters |
+| `reasoning(..)`, `cache(..)`, `on_unsupported(..)` | Override the agent's generation options for this request, field by field |
 | `tool_choice(..)` / `without_tool_choice()` | Override the tool policy |
 | `tool_context(ToolContext)` | Pass runtime-only values to tools (see Tools) |
 | `add_hook(H)` | Append a hook for this request |
@@ -269,7 +304,7 @@ let response = agent
     .max_turns(3)
     .await?;
 
-println!("answer: {}", response.output);
+println!("answer: {}", response.output());
 println!(
     "tokens: {:?} in / {:?} out over {} model calls",
     response.usage.input_tokens,
@@ -282,8 +317,8 @@ println!(
 per call, each entry carrying `call_index`, `usage`, `finish_reason`,
 `provider_request_id`, and the raw provider payload — the last entry tells you how large
 the final request's context was, and `finish_reason` tells you *which* call hit a token
-limit. `messages` is `Option<Vec<Message>>` — the messages the run committed, prompt
-included and input history excluded, or `None` for a response built without a run behind it.
+limit. `messages` is a `Vec<Message>` — the messages the run committed, prompt included and
+input history excluded; a response built by hand has it empty.
 
 Every counter is an `Option<u64>`: `None` means the provider did not report it, `Some(0)` is a
 genuine zero, and `usage.is_reported()` says whether anything was reported at all. On
@@ -296,7 +331,7 @@ it double counts.
 pub enum Message {
     System    { content: String },
     User      { content: Vec<UserContent> },
-    Assistant { id: Option<String>, content: Vec<AssistantContent> },
+    Assistant(AssistantMessage),  // `content: Vec<AssistantContent>`, plus `origin` and `stop`
 }
 ```
 
@@ -333,7 +368,7 @@ let message = Message::User {
     ],
 };
 
-let answer = agent.prompt(message).max_turns(1).await?.output;
+let answer = agent.prompt(message).max_turns(1).await?.output();
 ```
 
 Every media constructor takes its media type as an `Option`, so pass `None` when you want
@@ -343,15 +378,16 @@ the provider to sniff it. Image constructors take a second `Option<ImageDetail>`
 | Constructor | Signature |
 |---|---|
 | `image_url`, `image_base64`, `image_raw` | `(data, Option<ImageMediaType>, Option<ImageDetail>)` |
-| `audio_url`, `audio`, `audio_raw` | `(data, Option<AudioMediaType>)` |
-| `video_url`, `video`, `video_raw` | `(data, Option<VideoMediaType>)` |
-| `document_url`, `document`, `document_raw` | `(data, Option<DocumentMediaType>)` |
+| `audio_url`, `audio_base64`, `audio_raw` | `(data, Option<AudioMediaType>)` |
+| `video_url`, `video_base64`, `video_raw` | `(data, Option<VideoMediaType>)` |
+| `document_url`, `document_text`, `document_base64`, `document_raw` | `(data, Option<DocumentMediaType>)` |
 
-The `_raw` variants take unencoded `Vec<u8>`; `image_base64`, `audio` and `video` take base64,
-and `document` takes a plain string, sent as is.
+The `_raw` variants take unencoded `Vec<u8>`, the `_base64` ones base64, and `document_text`
+a plain string, sent as is; a base64 PDF goes through `document_base64`.
 
-Support is per-provider, and content a provider cannot accept fails the request with a
-conversion error before anything is sent, so test the combination you ship.
+Support is per-provider. rig 0.44 replaces media a model or provider cannot receive with
+placeholder text, such as `(image omitted: model does not support images)`, and sends the
+request anyway, so test the combination you ship.
 Image and audio *generation*, as opposed to input, is a separate surface behind the `image`
 and `audio` features.
 

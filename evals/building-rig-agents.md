@@ -12,6 +12,7 @@
 6. "`error[E0599]: no method named `agent` found for struct `Client` in the current scope`, right after I added rig to Cargo.toml."
 7. "Let the agent answer questions from our product docs: embed the markdown files and pull the most relevant ones into each prompt."
 8. "Connect our agent to the company's MCP server so it can use the tools listed there."
+9. "`Error: reached the max turns limit of 1` — the agent calls `lookup_order` and then stops. Why?"
 
 **Should not load**
 
@@ -33,10 +34,11 @@
 
 - The agent held as `Arc<Agent>` in `AppState`, built once outside the handler.
 - The mapping is one `agent_error(PromptError) -> AppError` function in the chat module, called with `.map_err(agent_error)?`.
-- `MaxTurnsError` and `UnknownToolCall` mapped to `AppError::Other` (500).
+- `MaxTurns` and `UnknownToolCall` mapped to `AppError::Other` (500).
+- `PromptError::Provider(ProviderError::Response(..))`, a filtered or failed turn, mapped to `AppError::Other` (500), not the 503 catch-all.
 - A provider 4xx other than 408 and 429 (`provider_response_status()`), such as 400, 401, 403 or 404, mapped to `AppError::Other` (500).
-- `PromptCancelled` carrying the constant reason every policy hook stops with mapped to `AppError::BadRequest` (400) with a constant message.
-- A `PromptCancelled` that is neither a policy refusal nor a dependency outage, which rig also raises for its own failures, mapped to `AppError::Other` (500).
+- `Cancelled` carrying the constant reason every policy hook stops with mapped to `AppError::BadRequest` (400) with a constant message.
+- A `Cancelled` that is neither a policy refusal nor a dependency outage, which rig also raises for its own failures, mapped to `AppError::Other` (500).
 - A provider 429 mapped to `AppError::TooManyRequests { retry_after_secs }`.
 - `retry_after_secs` parsed from the provider's `Retry-After` header (`provider_response_headers()`).
 - A `PromptError::Report` that rig raised itself (`ErrorKind::Request`, `HandlerUnavailable`, `Internal`, `Other` or `Denied`) mapped to `AppError::Other` (500).
@@ -60,7 +62,7 @@
 
 ### Eval 2 - a tool the model never calls
 
-**Prompt**: "Our support agent is built in `main` as `AgentBuilder::new(client.completion(MODEL)).preamble(PREAMBLE).build()` and called with `agent.prompt(question).await?.output`. Give it a tool that looks up an order by id through `orders::status(&db, id)` and returns its status. Right now it answers order questions from memory and never calls the tool."
+**Prompt**: "Our support agent is built in `main` as `AgentBuilder::new(client.completion(MODEL)).preamble(PREAMBLE).build()` and called with `agent.prompt(question).await?.output()`. Give it a tool that looks up an order by id through `orders::status(&db, id)` and returns its status. Right now it answers order questions from memory and never calls the tool."
 
 **Fixture**: empty
 
@@ -85,7 +87,7 @@
 
 **Must produce**:
 
-- `rig = { version = "0.43", features = ["test-utils"] }` under `[dev-dependencies]`.
+- `rig = { version = "0.44", features = ["test-utils"] }` under `[dev-dependencies]`.
 - `MockCompletionModel::from_turns([...])` scripting a `MockTurn::tool_call` followed by a `MockTurn::text`.
 - `AgentBuilder::new(model)` in place of a provider client.
 - A clone of the mock used as a probe, asserting two model requests (`request_count() == 2` or `requests().len() == 2`).

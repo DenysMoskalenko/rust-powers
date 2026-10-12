@@ -3,7 +3,7 @@
 Read this file when a Rig agent has to live inside an axum service: held in state, called
 from a handler, streamed to a browser, tested offline, and traced.
 
-Verified against `rig` 0.43.0, axum 0.8, axum-test 21. The agent adds one sub-struct to
+Verified against `rig` 0.44.0, axum 0.8, axum-test 21. The agent adds one sub-struct to
 `Settings`, one field to `AppState`, one module, two routes inside the middleware stack and one
 parameter to `test_app()`; `error.rs` is not touched. This
 file shows those deltas and names what stays as it is. For routes, extractors, the error
@@ -64,7 +64,7 @@ pub enum Provider {
     Gemini,
 }
 
-/// rig 0.43 fails every prompt to a Claude id it does not know unless this is set,
+/// rig 0.44 fails every prompt to a Claude id it does not know unless this is set,
 /// and thinking counts toward the limit.
 const MAX_TOKENS: u64 = 16_000;
 
@@ -110,7 +110,7 @@ fn agent_settings_parse_like_every_other_sub_struct() {
 
 ## Holding the Agent in `AppState`
 
-`Agent` is **not generic** in 0.43 — `AgentBuilder::new` takes the model as a `DynModel`,
+`Agent` is **not generic** since 0.43 — `AgentBuilder::new` takes the model as a `DynModel`,
 so one concrete `Agent` type covers every provider and `AppState` needs no type parameter.
 It is `Clone` and `Send + Sync + 'static`, but cloning copies the whole config (preamble,
 static context, hook stack), so `Arc` the agent rather than let axum clone it per request.
@@ -140,19 +140,21 @@ the handler calls it with `.map_err(agent_error)?`:
 
 | `PromptError` | `AppError` | Status | Client sees |
 |---|---|---|---|
-| `PromptCancelled` with the reason `DECLINED` (a policy hook's `Stop`) | `BadRequest("the assistant declined this request")` | 400 | that constant |
-| `PromptCancelled` with the reason `UNAVAILABLE` (a policy hook whose own dependency is down) or starting `failed to retrieve dynamic context` (a vector store that is down) | `Unavailable(error.to_string())` | 503 | `"service unavailable"` |
-| `MaxTurnsError`, `UnknownToolCall`, any other `PromptCancelled` | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
+| `Cancelled` with the reason `DECLINED` (a policy hook's `Stop`) | `BadRequest("the assistant declined this request")` | 400 | that constant |
+| `Cancelled` with the reason `UNAVAILABLE` (a policy hook whose own dependency is down) or starting `failed to retrieve dynamic context` (a vector store that is down) | `Unavailable(error.to_string())` | 503 | `"service unavailable"` |
+| `MaxTurns`, `UnknownToolCall`, any other `Cancelled` | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
+| `Provider(ProviderError::Response(..))`, a reply rig could not use | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
+| `Provider(ProviderError::UnsupportedOption(..))`, a generation option the model does not take, on an agent with `.model_spec(..)` (without one it is a `Report` of kind `Request`) | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
 | `Report` that rig raised itself (`kind` `Request`, `HandlerUnavailable`, `Internal`, or `Other` / `Denied` from a hook or layer that refused the completion) | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
 | provider answered a 4xx other than 408 and 429 (`provider_response_status()`) | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
 | provider answered 429 | `TooManyRequests { retry_after_secs }` | 429 | `"too many requests"` + `Retry-After` |
 | anything else | `Unavailable(error.to_string())` | 503 | `"service unavailable"` |
 
 A policy hook declining this request is a normal outcome rather than a fault, so it is a 400.
-Every such hook stops with the one constant, `DECLINED`, because rig raises `PromptCancelled`
+Every such hook stops with the one constant, `DECLINED`, because rig raises `Cancelled`
 for its own failures too (a lost prompt, a driver protocol violation, a tool round with no
 results), and those are faults. A dependency that is down stays a 503 even when it ends the run
-through `PromptCancelled`: a hook whose own check failed stops with `UNAVAILABLE`, and rig's
+through `Cancelled`: a hook whose own check failed stops with `UNAVAILABLE`, and rig's
 `dynamic_context` says only in its message that the vector store failed. The 500 rows are wiring bugs on this side (a budget too small,
 a tool the model invented, a run rig cancelled itself, a request rig could not build, a hook that
 refused the completion, a revoked key, an unknown model id, a request shape the provider
@@ -166,6 +168,11 @@ carry prompt text, internal URLs and account ids, and `IntoResponse` already ren
 as a constant. The wire shape stays `{ error, request_id, details }`, so document an agent route
 with `(status = 503, body = ErrorBody, description = "The model provider is unavailable")` and
 `(status = 429, body = ErrorBody, description = "The model provider's rate limit")` like any other.
+
+Since rig 0.44 a turn the provider ended in a content filter or an unknown finish reason, and
+malformed tool arguments that ended the run, fail as `Provider(ProviderError::Response(..))`
+with no status. rig marks that variant not retryable, so it takes a 500 row, not the 503
+catch-all.
 
 `provider_response_status()`, `provider_response_headers()` and `provider_request_id()` are
 forwarded through `PromptError`, from its `Report` as well — no destructuring needed.
@@ -191,8 +198,9 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::post;
 use futures::{Stream, StreamExt as _};
 use rig::ErrorKind;
-use rig::agent::{Agent, MultiTurnStreamItem, StreamingError};
+use rig::agent::{Agent, MultiTurnStreamItem};
 use rig::completion::PromptError;
+use rig::error::ProviderError;
 use rig::streaming::{Item, StreamEvent};
 use serde::{Deserialize, Serialize};
 use tower_http::timeout::TimeoutLayer;
@@ -228,7 +236,7 @@ pub struct ChatResponse {
 }
 
 /// The reason every policy hook in this service stops a run with, as in
-/// `CompletionCallAction::stop(DECLINED)`. rig raises `PromptCancelled` for its
+/// `CompletionCallAction::stop(DECLINED)`. rig raises `Cancelled` for its
 /// own failures too, so the reason is how `agent_error` tells a refusal from a fault.
 /// A hook that could not decide, say because its moderation call failed, stops
 /// with `UNAVAILABLE` instead: that is an outage, not a refusal.
@@ -241,24 +249,29 @@ pub const UNAVAILABLE: &str = "policy check unavailable";
 fn agent_error(error: PromptError) -> AppError {
     match error {
         // A policy hook said no: a refusal, not a fault, answered with a constant.
-        PromptError::PromptCancelled { reason, .. } if reason == DECLINED => {
+        PromptError::Cancelled { reason, .. } if reason == DECLINED => {
             AppError::BadRequest("the assistant declined this request".to_owned())
         }
         // A dependency of the run is down, which is a 503 like any backend: a hook
         // whose own check failed, or a vector store `dynamic_context` could not
         // query. rig marks the latter only in its message.
-        PromptError::PromptCancelled { ref reason, .. }
+        PromptError::Cancelled { ref reason, .. }
             if reason == UNAVAILABLE
                 || reason.starts_with("failed to retrieve dynamic context") =>
         {
             AppError::Unavailable(error.to_string())
         }
-        // Out of turns, a tool the model invented, or a run rig cancelled itself:
-        // a bug on this side. `Other` is 500, logged with its cause chain,
-        // answered with a constant.
-        PromptError::MaxTurnsError { .. }
+        // Out of turns, a tool the model invented, a run rig cancelled itself, a reply
+        // rig could not use (a filtered turn, an unknown finish reason, malformed tool
+        // arguments) or an option the model does not take: a bug on this side or a
+        // request that cannot succeed, none of it retryable. `Other` is 500, logged
+        // with its cause chain, answered with a constant.
+        PromptError::MaxTurns { .. }
         | PromptError::UnknownToolCall { .. }
-        | PromptError::PromptCancelled { .. } => AppError::Other(anyhow::Error::from(error)),
+        | PromptError::Cancelled { .. }
+        | PromptError::Provider(
+            ProviderError::Response(_) | ProviderError::UnsupportedOption(_),
+        ) => AppError::Other(anyhow::Error::from(error)),
         // A failure rig raised before any provider replied: a request it could
         // not build, an unregistered model label, a broken invariant, a hook or
         // layer that skipped or denied the completion.
@@ -314,7 +327,7 @@ pub async fn chat(
     let response = request.await.map_err(agent_error)?;
 
     Ok(Json(ChatResponse {
-        reply: response.output,
+        reply: response.output(),
         input_tokens: response.usage.input_tokens,
         output_tokens: response.usage.output_tokens,
     }))
@@ -338,7 +351,7 @@ pub async fn chat_stream(
 /// again, so the state turns `None` after the last frame: the next poll ends the
 /// stream without touching the run, which drops it and the provider call.
 fn sse_events(
-    run: impl Stream<Item = Result<MultiTurnStreamItem, StreamingError>> + 'static,
+    run: impl Stream<Item = Result<MultiTurnStreamItem, PromptError>> + 'static,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let run = Box::pin(tokio_stream::StreamExt::timeout(run, REQUEST_TIMEOUT));
     futures::stream::unfold(Some(run), |run| async move {
@@ -366,7 +379,7 @@ enum Frame {
 }
 
 fn frame(
-    item: Result<Result<MultiTurnStreamItem, StreamingError>, tokio_stream::Elapsed>,
+    item: Result<Result<MultiTurnStreamItem, PromptError>, tokio_stream::Elapsed>,
 ) -> Frame {
     let cause = match item {
         Ok(Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Text {
@@ -384,9 +397,7 @@ fn frame(
             return Frame::Send(Event::default().event("done").data(output_tokens));
         }
         Ok(Ok(_)) => return Frame::Skip,
-        Ok(Err(StreamingError::Prompt(error)))
-            if matches!(&error, PromptError::PromptCancelled { reason, .. } if reason == DECLINED) =>
-        {
+        Ok(Err(PromptError::Cancelled { reason, .. })) if reason == DECLINED => {
             return Frame::Last(
                 Event::default()
                     .event("declined")
@@ -421,7 +432,7 @@ mod tests {
     use rig::agent::{
         AgentBuilder, AgentHook, CompletionCallAction, CompletionCallEvent, HookContext,
     };
-    use rig::completion::Usage;
+    use rig::completion::{FinishReason, Usage};
     use rig::test_utils::{MockCompletionModel, MockStreamEvent, MockTurn};
     use serde_json::json;
 
@@ -479,6 +490,17 @@ mod tests {
         let server = server(MockCompletionModel::from_turns([MockTurn::request_error(
             "`max_tokens` must be set for Anthropic",
         )]));
+
+        let response = server.post("/chat").json(&json!({ "message": "hi" })).await;
+
+        response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn a_filtered_turn_is_a_500_not_an_outage() {
+        let server = server(MockCompletionModel::from_turns([
+            MockTurn::text("partial").with_finish_reason(FinishReason::ContentFilter),
+        ]));
 
         let response = server.post("/chat").json(&json!({ "message": "hi" })).await;
 
@@ -575,7 +597,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_stalled_run_ends_the_stream_after_one_error_event() {
-        let stalled = futures::stream::pending::<Result<MultiTurnStreamItem, StreamingError>>();
+        let stalled = futures::stream::pending::<Result<MultiTurnStreamItem, PromptError>>();
 
         let events: Vec<_> = sse_events(stalled).collect().await;
 
@@ -648,7 +670,7 @@ the provider call with it. `max_turns` bounds how many model calls one run makes
 
 ## Notes on the Handlers
 
-- **The stream item type is `Result<MultiTurnStreamItem, StreamingError>` — per chunk, not
+- **The stream item type is `Result<MultiTurnStreamItem, PromptError>` — per chunk, not
   per stream.** Starting a stream always succeeds, so the handler's own error type is
   `Infallible`: the status was committed before the first token and no later failure can
   change it. See Streaming for the full item list.
@@ -723,7 +745,7 @@ alongside your axum spans with no extra wiring. Two shapes reach the collector.
 
 | Span | Target | Key fields |
 |---|---|---|
-| `chat` / `chat_streaming` | `rig::agent_chat` (`rig::completions` for a direct model call) | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.usage.{input_tokens,output_tokens,cache_read.input_tokens,cache_creation.input_tokens,reasoning_tokens}` |
+| `chat` (`gen_ai.request.stream` is `true` when streamed) | `rig::agent_chat` (`rig::completions` for a direct model call) | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.usage.{input_tokens,output_tokens,cache_read.input_tokens,cache_creation.input_tokens,reasoning_tokens}` |
 | `execute_tool` | default | `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.call.outcome`, `gen_ai.tool.error.type` |
 
 **The gotcha, specific to a web service:** rig creates the run-level `invoke_agent` span
