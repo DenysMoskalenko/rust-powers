@@ -2,7 +2,7 @@
 name: rust-tooling
 description: "Use when changing or debugging the tooling of an existing Rust service — rust-toolchain.toml, cargo add, upgrading one dependency, the lockfile, the workspace lints table or a member clippy skips, clippy.toml, rustfmt.toml, nextest, llvm-cov and the coverage gate, cargo-deny, cargo-machete, bacon, prek or pre-commit hooks, the Makefile, a Dockerfile rebuilding every dependency, docker-compose, CI recompiling, target/ size, unknown lint warnings. Not for a new repository (rust-scaffolding), one clippy finding (rust-code-style), or what coverage measures (rust-testing)."
 metadata:
-  version: "0.2.2"
+  version: "0.3.0"
 ---
 
 # Rust Tooling
@@ -114,7 +114,9 @@ There is no `[test-groups]` entry: each test owns a private database, so a concu
 tests that never contend. A `filter = 'binary(name)'` override is validated at config-parse time, and a name
 matching no test binary makes every nextest command fail.
 
-nextest cannot run doctests, so `make test` runs `cargo test --doc` as a second step.
+nextest cannot run doctests, so `make test` runs `cargo test --doc` as a second step. `make test` and
+`make cov` export `TEST_RUN` to name the run's test databases and drop them after a pass; export it nowhere
+else (`references/configs.md`).
 
 Coverage is `cargo llvm-cov nextest --no-report` then `cargo llvm-cov report`. `--fail-under-lines` is the
 threshold and `--ignore-filename-regex` the denominator; the `cov` recipe and CI's coverage step each carry

@@ -10,6 +10,7 @@
 4. "tests/users.rs passes when I run it alone and fails under `cargo nextest run`. looks like one test sees rows another one created"
 5. "in tests, how do I point the app at a throwaway database and a stub for the billing API instead of the real ones?"
 6. "write the first tests for our new `GET /orders` endpoint"
+7. "every API test takes about a second under nextest on my mac, even the liveness one. where does the time go?"
 
 **Should not load**
 
@@ -97,6 +98,19 @@ Reasoning check only: the scaffold has no such endpoint or upstream setting, so 
 - `mockall` on a one-implementor HTTP client trait added just for the test
 - `mock.hits()`, `path_contains(..)` or `json_body_partial(..)`
 - the test calling `app.state.http` or the mock URL itself
+
+### Eval 5 - where a slow test's time goes
+
+**Prompt**: "Each API test in this service takes close to a second under `cargo nextest run` on my Mac, even `GET /health/live`. Where does the time go, and what can we cut?"
+
+**Must produce**:
+- The Prometheus recorder that `build_router` builds named as a per-process cost of about 0.2 s, from quanta calibrating its clock.
+- No switch inside the recorder to skip that calibration, since `metrics-exporter-prometheus` calls `Clock::new()` itself; leaving the metrics layer out of tests may be offered as the remedy.
+- `.no_proxy()` on the test HTTP client named as the remedy for the macOS system proxy lookup in `reqwest::Client::new()`.
+
+**Must not produce**:
+- One transaction per test rolled back at the end.
+- `sea_orm::MockDatabase` in place of the database.
 
 ### Probe 1 - building a TestServer
 
