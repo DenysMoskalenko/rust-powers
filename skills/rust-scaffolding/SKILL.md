@@ -2,7 +2,7 @@
 name: rust-scaffolding
 description: "Use when creating a brand-new Rust axum service from nothing — 'create a service that...', an empty directory with no Cargo.toml, a new API or microservice that needs migrations, tests, lints, Docker and CI green from the first commit, or a repo that still errors with could not find Cargo.toml. Greenfield only. Not for adding a route (axum-service), entity (sea-orm-postgres) or test (rust-testing) to an existing crate, nor changing tooling in an existing service (rust-tooling)."
 metadata:
-  version: "0.3.1"
+  version: "0.4.0"
 ---
 
 # Rust Scaffolding (Greenfield Only)
@@ -116,7 +116,8 @@ make check && make test
 `check` is fmt, clippy `-D warnings`, cargo-deny and cargo-machete; `test` is nextest plus
 doctests. The tests use `TEST_DATABASE_URL` when set and otherwise start one reusable
 container named `rust-powers-test-postgres`, so a running compose stack and a bare machine
-both work. If a run hangs at startup after a Docker restart, that container's data is
+both work. `make test` drops a passing run's test databases from that container, and any
+older than an hour. If a run hangs at startup after a Docker restart, that container's data is
 corrupt: `docker rm -f rust-powers-test-postgres` and run again.
 
 ## 8. First commit

@@ -166,11 +166,13 @@ docs cache hittable, not about isolating it.
 ## Postgres: service container, not testcontainers
 
 The `services:` block starts one Postgres for the whole job and `TEST_DATABASE_URL` points the tests at it;
-each test then creates its own database. testcontainers stays the local fallback for developers who have set
-no environment variable.
+each test then clones its own database from a template the run migrates once. The run id is nextest's own
+`NEXTEST_RUN_ID`, so the job sets none, and the container goes away with the job, so nothing is cleaned up.
+testcontainers stays the local fallback for developers who have set no environment variable.
 
 Leaving `TEST_DATABASE_URL` unset in CI while the tests fall back to testcontainers is the failure mode worth
-avoiding: nextest forks one process per test, so a 16-core runner starts one container per test.
+avoiding: every job then pulls the image, and nextest's first processes race to create the reused container.
+A service container is up and healthy before the first test.
 
 Docker is preinstalled on `ubuntu-latest`, so nothing extra is needed for the fallback path to work either.
 

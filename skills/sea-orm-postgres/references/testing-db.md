@@ -1,11 +1,12 @@
 # Per-test database isolation
 
 - [Why a real Postgres](#why-a-real-postgres)
+- [Why not a rolled-back transaction](#why-not-a-rolled-back-transaction)
 - [The nextest process model](#the-nextest-process-model)
 - [Dev-dependencies](#dev-dependencies)
 - [The harness](#the-harness)
 - [Using it in a test](#using-it-in-a-test)
-- [Template databases](#template-databases)
+- [One template per run](#one-template-per-run)
 - [Cleanup and recovery](#cleanup-and-recovery)
 - [MockDatabase](#mockdatabase)
 
@@ -16,11 +17,27 @@ constraints, `ON CONFLICT`, `jsonb` operators and `timestamptz` semantics are th
 test, and none of them exist in a substitute. A suite that passes against a fake and fails against
 the real server has tested nothing.
 
-Isolation comes from giving every test its own database, not from wrapping tests in a transaction.
-Wrapping each test in an outer transaction does not work: sea-orm has no "join the enclosing transaction" mode,
-a service function that opens its own transaction escapes the outer one, and a
-`DatabaseTransaction` cannot be handed to code that wants a `DatabaseConnection`. Truncating
-between tests needs a shared connection and serialises the suite.
+Isolation comes from giving every test its own database, not from wrapping tests in a
+transaction, and truncating between tests needs a shared connection and serialises the suite.
+
+## Why not a rolled-back transaction
+
+Running each test inside one transaction and rolling it back at the end does not fit sea-orm 2.0
+and nextest:
+
+- sea-orm has no mode that joins an enclosing transaction. `AppState.db` is a pool, every handler
+  checks out a connection of its own, and what it commits escapes the test's transaction.
+  `DatabaseExecutor` (new in 2.0) borrows or owns one transaction and is not `Clone`, so it cannot
+  sit in `AppState`.
+- A transaction the code under test opens itself becomes a `SAVEPOINT`, and Postgres then rejects
+  `begin_with_config(Some(level), ..)`: `SET TRANSACTION ISOLATION LEVEL must be called before any
+  query` (25001), unless the outer transaction already runs at that level.
+- One failed statement aborts the whole outer transaction. Code that catches a 23505 and retries
+  gets `current transaction is aborted` (25P02) under test and a 500, where production recovers.
+- Parallel tests share one database, so an uncommitted insert of a unique key blocks every other
+  test inserting that key until the first test ends.
+- `now()` stands still for the whole test, a second connection cannot see the test's rows, and a
+  test of `FOR UPDATE` or an advisory lock needs sessions that one connection cannot give.
 
 ## The nextest process model
 
@@ -32,9 +49,9 @@ help; the boundary is the process, not the task.
 Two arrangements survive that, and the harness below supports both:
 
 1. **An external server — the default.** `TEST_DATABASE_URL` points at the compose `postgres`
-   service locally (`docker compose up -d postgres` first; `make test` runs only nextest) and at a
-   `services:` container in CI. Nothing to start, nothing to clean up, no race, fastest everywhere.
-   Do not rely on container reuse in CI.
+   service locally (`docker compose up -d postgres` first; `make test` does not start it) and at a
+   `services:` container in CI. Nothing to start, no race, fastest everywhere. Do not rely on
+   container reuse in CI.
 2. **A reusable container — a warm-machine convenience.** The fixed name
    `rust-powers-test-postgres` plus `ReuseDirective::Always` means every process attaches to the
    same container. On a cold machine the processes race to *create* it: one wins and Docker answers
@@ -62,11 +79,10 @@ to the version production runs.
 ## The harness
 
 This is the database half of `tests/common/mod.rs` — the file `rust-testing`'s `test_app()` lives
-in, helper for helper as the scaffold ships it (`admin_url`, `start_reusable_postgres`,
-`is_name_conflict`, `connect_with_retry`). `test_app()` runs exactly `fresh_database()` below and
-then builds `AppState` around the connection; it is split out here so the database part can be
-read on its own. `tests/common/mod.rs`, not `tests/common.rs`: a file directly in `tests/` is
-compiled as its own test binary with no tests in it.
+in, helper for helper as the scaffold ships it. `test_app()` calls `migrated_database()` and then
+builds `AppState` around the connection; it is split out here so the database part can be read on
+its own. `tests/common/mod.rs`, not `tests/common.rs`: a file directly in `tests/` is compiled as
+its own test binary with no tests in it.
 
 ```rust,verify,test
 #![allow(
@@ -79,7 +95,7 @@ compiled as its own test binary with no tests in it.
 use std::sync::LazyLock;
 
 use migration::{Migrator, MigratorTrait as _};
-use sea_orm::{ConnectionTrait as _, Database, DatabaseConnection, EntityTrait, PaginatorTrait, Statement};
+use sea_orm::{ConnectionTrait as _, Database, DatabaseConnection, EntityTrait, PaginatorTrait, raw_sql};
 use testcontainers::runners::AsyncRunner as _;
 use testcontainers::{ContainerAsync, ImageExt as _, ReuseDirective};
 use testcontainers_modules::postgres::Postgres;
@@ -117,6 +133,7 @@ async fn start_reusable_postgres() -> ContainerAsync<Postgres> {
         let attempt = Postgres::default()
             // The module default is 11-alpine.
             .with_tag("18-alpine")
+            // The Makefile's TEST_PG: `make test` drops test databases by this name.
             .with_container_name("rust-powers-test-postgres")
             .with_reuse(ReuseDirective::Always)
             .start()
@@ -154,41 +171,96 @@ async fn connect_with_retry(url: &str) -> DatabaseConnection {
     panic!("could not connect to {url}: {last:?}");
 }
 
-/// A migrated, empty database of its own for this test, plus its name for failure
-/// messages. This is the first half of `test_app()`.
-pub async fn fresh_database() -> (DatabaseConnection, String) {
-    let admin_url = admin_url().await;
-    let admin = connect_with_retry(admin_url).await;
-    // uuid v7 keeps the generated names sortable, which helps when reading a stuck container.
-    let db_name = format!("test_{}", Uuid::now_v7().simple());
+/// `TEST_RUN` under `make test` and `make cov`, nextest's own run id under any
+/// other nextest run (bacon, CI, a direct `cargo nextest run`), and one id per
+/// test binary under `cargo test`.
+fn run_id() -> &'static str {
+    static RUN: LazyLock<String> = LazyLock::new(|| {
+        let id = ["TEST_RUN", "NEXTEST_RUN_ID"]
+            .into_iter()
+            .find_map(|var| std::env::var(var).ok().filter(|id| !id.is_empty()))
+            .unwrap_or_else(|| Uuid::now_v7().simple().to_string());
+        // 20 characters keep every database name inside Postgres's 63 bytes.
+        id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').take(20).collect()
+    });
+    &RUN
+}
+
+/// `test_<run>_<uuid>`: the run leads the name, so `make test` can drop the
+/// databases of a run that passed.
+async fn create_database(admin: &DatabaseConnection, template: Option<&str>) -> String {
+    let db_name = format!("test_{}_{}", run_id(), Uuid::now_v7().simple());
+    let template = template.map(|t| format!(r#" TEMPLATE "{t}""#)).unwrap_or_default();
     admin
-        .execute_raw(Statement::from_string(
-            admin.get_database_backend(),
-            format!(r#"CREATE DATABASE "{db_name}""#),
-        ))
+        .execute_unprepared(&format!(r#"CREATE DATABASE "{db_name}"{template}"#))
         .await
         .unwrap();
-    admin.close().await.unwrap();
+    db_name
+}
 
-    // NOT `admin_url.replace("/postgres", ..)`: that would also rewrite the `postgres://` scheme.
-    let (prefix, _) = admin_url.rsplit_once('/').unwrap();
-    let db = connect_with_retry(&format!("{prefix}/{db_name}")).await;
-    // Running the real migrations is also how the migrations get tested.
+async fn database_exists(admin: &DatabaseConnection, name: &str) -> bool {
+    admin
+        .query_one_raw(raw_sql!(Postgres, "SELECT FROM pg_database WHERE datname = {name}"))
+        .await
+        .unwrap()
+        .is_some()
+}
+
+/// The run's first test processes each migrate a candidate and rename it into
+/// place; the first rename wins and the others drop theirs.
+async fn build_template(admin: &DatabaseConnection, admin_url: &str, template: &str) {
+    let candidate = create_database(admin, None).await;
+    let db = connect_with_retry(&database_url(admin_url, &candidate)).await;
     Migrator::up(&db, None).await.unwrap();
-    (db, db_name)
+    // `CREATE DATABASE .. TEMPLATE` refuses a template anyone is connected to.
+    db.close().await.unwrap();
+    let renamed = admin
+        .execute_unprepared(&format!(r#"ALTER DATABASE "{candidate}" RENAME TO "{template}""#))
+        .await;
+    // Racing renames can fail with 23505 instead of "already exists": ask, never match.
+    if let Err(err) = renamed {
+        assert!(
+            database_exists(admin, template).await,
+            "could not rename {candidate} to {template}: {err}"
+        );
+        admin
+            .execute_unprepared(&format!(r#"DROP DATABASE "{candidate}""#))
+            .await
+            .unwrap();
+    }
+}
+
+/// A migrated, empty database of this test's own, and its name. Every test
+/// clones the run's template instead of running every migration.
+pub async fn migrated_database(admin_url: &str) -> (DatabaseConnection, String) {
+    let admin = connect_with_retry(admin_url).await;
+    // Keyed by package too: a workspace's crates share one run, not one schema.
+    let template = format!("test_{}_{:.20}_template", run_id(), env!("CARGO_PKG_NAME"));
+    if !database_exists(&admin, &template).await {
+        build_template(&admin, admin_url, &template).await;
+    }
+    let db_name = create_database(&admin, Some(&template)).await;
+    admin.close().await.unwrap();
+    (connect_with_retry(&database_url(admin_url, &db_name)).await, db_name)
+}
+
+/// NOT `admin_url.replace("/postgres", ..)`: that would also rewrite the `postgres://` scheme.
+fn database_url(admin_url: &str, db_name: &str) -> String {
+    let (prefix, _) = admin_url.rsplit_once('/').unwrap();
+    format!("{prefix}/{db_name}")
 }
 
 #[tokio::test]
 async fn each_test_gets_an_empty_database() {
-    let (db, _name) = fresh_database().await;
+    let (db, _name) = migrated_database(admin_url().await).await;
     let count = app::entities::user::Entity::find().count(&db).await.unwrap();
     assert_eq!(count, 0);
 }
 ```
 
-The identifier is interpolated into the `CREATE DATABASE` string because Postgres does not accept a
-bind parameter there. It is a locally generated uuid, never anything from a test fixture or the
-environment, which is what makes that safe.
+The names are interpolated into `CREATE DATABASE` and `ALTER DATABASE` because Postgres does not
+accept a bind parameter there. They are built from a uuid generated here and the run id, which the
+Makefile or nextest sets, never from a test fixture, which is what makes that safe.
 
 Do not call `std::env::set_var` to point a test at a different database. It is `unsafe` in edition
 2024 and the crate lints forbid unsafe code outright, so the attempt ends in a wall rather than a
@@ -237,50 +309,60 @@ async fn rejects_a_duplicate_email() {
 Because each test owns its database, tests can insert freely, run in parallel, and never need to
 clean up after themselves. Test structure, fixtures and data factories belong to `rust-testing`.
 
-## Template databases
+## One template per run
 
-`CREATE DATABASE` plus `Migrator::up` costs about 0.17 s per test against a warm server. Under
-nextest a process runs one test, so a template built inside the test process never pays for itself:
-it is an extra `CREATE DATABASE` and a migration run on top of the clone. A template only helps when
-a single test's migration time hurts, and then it is prepared *before* the suite, once, with a fixed
-name on a server that outlives the run — a `make test` step, not test code:
+A plain `CREATE DATABASE` copies `template1`, and `Migrator::up` then replays every migration; that
+cost grows with every migration. `CREATE DATABASE .. TEMPLATE` from a database already migrated is a
+file copy, whatever the schema holds. The harness therefore migrates one template per run and
+package, and every test clones it.
 
-```sh
-psql "$TEST_DATABASE_URL" -c 'CREATE DATABASE tmpl_app' 2>/dev/null || true   # exists after the first run
-sea-orm-cli migrate up -u "${TEST_DATABASE_URL%/*}/tmpl_app"                  # no-op when nothing is pending
-```
+- **The run.** `TEST_RUN`, which `make test` and `make cov` set; otherwise `NEXTEST_RUN_ID`, which
+  nextest sets in every test process of a run, so bacon's nextest job, CI's `cargo llvm-cov
+  nextest` and a direct `cargo nextest run` need no variable of their own. Plain `cargo test` has
+  neither, so each test binary takes an id of its own. A template that belongs to one run picks up a
+  migration edited before the next run; one kept across runs under a fixed name would not, because
+  `migrate up` skips a migration it has applied, edited or not.
+- **One per package.** The template is `test_<run>_<package>_template`: one run covers a whole
+  workspace, and two crates with migrations of their own must not clone each other's schema.
+- **No step before the suite.** A test process that finds no template migrates a candidate of its
+  own, closes its pool and renames the candidate into place; the first rename wins.
+  A loser's rename fails with `database "…" already exists`, or with `duplicate key value
+  violates unique constraint "pg_database_datname_index"` when two renames race, so the harness
+  asks whether the template exists now instead of matching the message, and drops its candidate.
+  An advisory lock would let one process build while the rest wait, but it needs one pinned
+  connection, since a pool may take the lock and release it on different ones, and the rest would
+  wait about as long as they now spend building.
+- **Nothing connects to the template.** `CREATE DATABASE .. TEMPLATE` fails while any session is
+  connected to the source, which is why the builder closes its pool before the rename. Concurrent
+  clones of one template are fine.
 
-Nothing is connected to the template while tests run and no process races another to build it, so
-the per-test step shrinks to a file copy of roughly ten milliseconds, in place of the
-`CREATE DATABASE` plus `Migrator::up` pair in `test_app()`:
-
-```rust,verify
-use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbErr};
-use uuid::Uuid;
-
-// `CREATE DATABASE .. TEMPLATE` refuses a template that anything is connected to, which is the
-// other reason the template is built outside the test processes.
-pub async fn clone_from_template(
-    admin: &DatabaseConnection,
-    prefix: &str,
-) -> Result<DatabaseConnection, DbErr> {
-    let db_name = format!("test_{}", Uuid::now_v7().simple());
-    admin
-        .execute_unprepared(&format!(
-            r#"CREATE DATABASE "{db_name}" TEMPLATE "tmpl_app""#
-        ))
-        .await?;
-    Database::connect(format!("{prefix}/{db_name}")).await
-}
-```
+A clone costs what a plain `CREATE DATABASE` costs, about 30 ms, so the template saves the
+migrations, about 4 ms each per test. Measured on the scaffold (macOS arm64, 100 light API tests),
+the median test fell from 370 to 341 ms with two migrations and from 450 to 353 ms with 22. A
+process that builds the template pays a rename, a clone and a connection more than migrating its own
+database would, so a run of one test is about 70 ms slower, and `make test`'s cleanup adds about
+0.4 s: for a small suite the gain is disk, not time. Most of what remains is not the database;
+`rust-testing` lists it.
 
 ## Cleanup and recovery
 
-Dropped databases are not the interesting cost; a reused container accumulates `test_*` databases
-until it is removed. `docker rm -f rust-powers-test-postgres` resets everything, and a CI job that starts a
-service container per run never accumulates anything. If a local run leaves hundreds behind, drop
-them with a single `DROP DATABASE` loop over `pg_database` rather than adding teardown to every test,
-which would run before an assertion failure has been read.
+A test database is about 8 MB, `template1` plus the schema, so a suite of a thousand tests leaves
+8 GB behind per run, and a reused container fills the Docker disk within days. `make test` and
+`make cov` clean up around the run, in the reused container:
+
+- before the run, they drop every `test_` database older than an hour, by the age of its
+  directory (`pg_stat_file('base/<oid>/PG_VERSION')`, superuser only, which the container's
+  `postgres` is): leftovers of failed runs, of bacon and of direct nextest runs;
+- after a passing run, they drop the run's own databases, its template included, by the
+  `test_<TEST_RUN>_` prefix. A failing run keeps them for an hour, so the database a test failed
+  on (`TestApp::db_name`) can still be opened.
+
+`TEST_RUN` reaches only those two targets, and each run drops only its own databases, so two
+worktrees or two services sharing `rust-powers-test-postgres` can run at once. With
+`TEST_DATABASE_URL` the Makefile leaves the server alone: a CI service container is thrown away with
+the job, and a long-lived server takes the same query by hand. Teardown inside each test is the
+wrong place: it would run before an assertion failure has been read. `docker rm -f
+rust-powers-test-postgres` resets everything.
 
 If every database test suddenly fails to connect, the reused container is wedged — its Postgres has
 exited or its data directory is corrupt — and reuse attaches to it without checking. A reused
@@ -290,6 +372,6 @@ container is never health-checked again. `docker rm -f rust-powers-test-postgres
 
 `sea_orm::MockDatabase`, behind the `mock` feature, pre-loads query results and asserts generated
 statements. It parses no SQL and enforces no constraint, so it accepts every query Postgres would
-reject, and it is not used in this stack: a fresh database costs 0.17 s, less than reasoning about
-what the mock does not check. Logic that has no query in it is tested as a plain function with no
+reject, and it is not used in this stack: a cloned database costs less than reasoning about what
+the mock does not check. Logic that has no query in it is tested as a plain function with no
 database at all (`rust-testing`).

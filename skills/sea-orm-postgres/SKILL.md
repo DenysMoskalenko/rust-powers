@@ -2,7 +2,7 @@
 name: sea-orm-postgres
 description: "Use when working with Postgres through sea-orm — entities, pagination queries, eager loading, load().with and LoaderTrait, N+1, transactions, advisory locks, foreign key and unique violations, idempotency rows, outbox, migrations with sea-orm-migration, sea-orm-cli migrate generate and generate entity, pool sizing, per-test databases, upgrading from sea-orm 1.x. Also for RecordNotUpdated, no method named like found for enum Expr, duplicate key value violates unique constraint. Not for a new service (rust-scaffolding), nor test structure, test_app or factories (rust-testing)."
 metadata:
-  version: "0.2.1"
+  version: "0.3.0"
 ---
 
 # Postgres with sea-orm
@@ -33,8 +33,9 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
   advisory locks, idempotency rows and the outbox.
 - `references/relations.md` — read when a response needs related rows, or latency grows with row
   count: the four strategies, their SQL, a statement-counting test.
-- `references/testing-db.md` — read when setting up database tests: the nextest process model,
-  the scaffold's harness half by half, template databases, recovering a wedged container.
+- `references/testing-db.md` — read when setting up or speeding up database tests: why not a
+  rolled-back transaction, the nextest process model, the harness, the per-run template, cleanup,
+  recovering a wedged container.
 
 ## sea-orm 2.0 is not 1.x
 
@@ -215,10 +216,11 @@ which reaches `axum-service`'s 422 arm ("invalid reference"). Every status is
 
 ## Testing
 
-Tests run against real Postgres, one database per test: `CREATE DATABASE test_<uuid>`, then
-`Migrator::up`, on `TEST_DATABASE_URL` or a reused, named `postgres:18-alpine` container.
-`test_app()` (`rust-testing`) does all of this; the nextest process model, the cold-start race and
-recovering a wedged container are in `references/testing-db.md`.
+Tests run against real Postgres, one database per test, cloned with `CREATE DATABASE .. TEMPLATE`
+from a template each run migrates once, on `TEST_DATABASE_URL` or a reused, named
+`postgres:18-alpine` container. Never a transaction rolled back per test: handlers commit on pool
+connections of their own, outside it, and a caught 23505 aborts it. `test_app()` (`rust-testing`)
+does all of this; the template race, cleanup and a wedged container are in `references/testing-db.md`.
 
 ## Red Flags — STOP
 

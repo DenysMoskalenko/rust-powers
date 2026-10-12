@@ -11,6 +11,7 @@
 5. "After upgrading sea-orm from 1.x, `Expr::col(Alias::new(\"name\")).like(\"%a%\")` fails with `no method named like found for enum Expr`."
 6. "Creating a post for a user id that does not exist blows up with a foreign key violation. How should the service handle it?"
 7. "Only one of our three replicas should rebuild the nightly report. Can Postgres do the locking instead of Redis?"
+8. Why don't our sea-orm tests just roll back a transaction per test? A fresh database for every test feels slow.
 
 **Should not load**
 
@@ -81,17 +82,19 @@
 **Fixture**: empty
 
 **Must produce**:
-- One database per test: `CREATE DATABASE test_<uuid>` followed by `Migrator::up`.
+- One database per test, created with `CREATE DATABASE .. TEMPLATE` from a migrated template.
+- The template migrated once per run, its name keyed on a run id (`TEST_RUN` or `NEXTEST_RUN_ID`).
+- The template built by the test processes themselves, a process that loses the race dropping its own candidate.
 - A server resolved from `TEST_DATABASE_URL` when set.
 - Otherwise a testcontainers Postgres pinned with `with_tag("18-alpine")`.
-- `with_container_name("rust-powers-test-postgres")` plus `ReuseDirective::Always` on the fallback container.
+- `with_container_name(..)` with one fixed name plus `ReuseDirective::Always` on the fallback container.
 - The nextest process-per-test model given as the reason a `static` container is not enough.
 - `testcontainers` with `reusable-containers` as a dev-dependency next to `testcontainers-modules` with `postgres`.
 - A retry around `start()` for the cold-start 409 race, and for that error only.
 - A retry around the first connection.
 - The helper placed in `tests/common/mod.rs` as the database half of `test_app()`.
 - `clippy::unwrap_used` and `clippy::expect_used` allowed in that helper file with a reason.
-- `docker rm -f rust-powers-test-postgres` named as the recovery for a wedged reused container.
+- `docker rm -f` of that container named as the recovery for a wedged reused container.
 
 **Must not produce**:
 - `MockDatabase` or SQLite as a substitute for Postgres.
@@ -99,6 +102,7 @@
 - A bare `static OnceCell` container with no reuse directive.
 - A `make test` step that starts compose.
 - A `test_db()` helper presented as something `test_app()` wraps.
+- A template database whose name is the same in every run (such as `tmpl_app`), migrated before the suite instead of once per run.
 
 ### Eval 5 - writes and the save trap
 
@@ -127,6 +131,20 @@
 - The blocking `pg_advisory_xact_lock` presented as making the job run once.
 - `pg_advisory_lock` with a manual `pg_advisory_unlock`.
 - The lock taken on the pool instead of a `DatabaseTransaction`.
+
+### Eval 7 - rolling back a transaction per test
+
+**Prompt**: "Our sea-orm tests create a database per test and the suite is getting slow. Make every test run inside one transaction that is rolled back at the end instead."
+
+**Must produce**:
+- A refusal to switch to a rolled-back transaction per test, or an explanation of why it does not fit before any code.
+- sea-orm having no mode that joins an enclosing transaction, so handlers using `AppState.db` commit outside it.
+- A caught unique violation (23505) aborting the outer transaction, so code that retries after it fails under test.
+- Each test's database cloned from a template migrated once per run named as the database speed-up, whether proposed or found already in `test_app()`.
+
+**Must not produce**:
+- A test fixture that begins a transaction and rolls it back as the isolation mechanism.
+- `MockDatabase` or SQLite to make the tests faster.
 
 ### Probe 1 - save on a new row
 

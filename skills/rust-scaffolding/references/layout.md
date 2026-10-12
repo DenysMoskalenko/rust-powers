@@ -41,8 +41,9 @@ migration/
   src/main.rs            the binary sea-orm-cli migrate runs
   src/m2026...rs         one file per schema change
 tests/
-  common/mod.rs          test_app(): throwaway database, frozen clock, mock server
+  common/mod.rs          test_app(): a clone of the run's migrated template, frozen clock, mock server
   health.rs              the probes and both router fallbacks
+  migrations.rs          every migration rolled back and applied again
   panic.rs               the catch-panic layer, wired in its own binary
   users.rs               the cases that prove the wiring
 ```
