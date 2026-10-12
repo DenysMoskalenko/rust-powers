@@ -156,7 +156,7 @@ and ignores them, so the repo is silently unformatted in exactly the way that wa
 ## .config/nextest.toml
 
 ```toml
-nextest-version = { required = "0.9.120", recommended = "0.9.146" }
+nextest-version = { required = "0.9.120", recommended = "0.9.148" }
 
 [profile.default]
 retries = 0

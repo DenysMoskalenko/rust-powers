@@ -123,7 +123,10 @@ contradicts the skill it tests or a sibling skill.
 `make evals` generates `claude plugin eval` cases from these files into the gitignored
 `evals/.run/` and runs every eval and probe with and without the plugin, so each case reports
 what the skill adds. Runs are billed model calls: run the suite before a release, when a new
-model ships, and after a description change, never in CI. Keep the per-case summary that
+model ships, and after a description change, never in CI. An agent that plans to run any eval
+in a session asks the user in chat for approval at the start of that session, naming the
+cases, whether each runs with or without the plugin, and a cost cap, and runs only what was
+approved. Keep the per-case summary that
 justifies an `## Important` bullet or a Red Flags row under `maintenance/`.
 
 A behaviour change that changes what a good agent response looks like updates the matching

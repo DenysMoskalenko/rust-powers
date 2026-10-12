@@ -3,7 +3,7 @@
 Read this file when the user wants an agent grounded in their own documents, semantic
 search, or tool-RAG for a large tool inventory.
 
-Verified against `rig` 0.43.0.
+Verified against `rig` 0.44.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -133,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .dynamic_context(2, index) // top 2 documents per model call
         .build();
 
-    let answer = agent.prompt("What is Rig?").max_turns(1).await?.output;
+    let answer = agent.prompt("What is Rig?").max_turns(1).await?.output();
     println!("{answer}");
 
     Ok(())
@@ -145,7 +145,7 @@ prompt's first text part, falling back to the first text part of the latest user
 history, and appends
 the retrieved documents to the request **after** static context. Retrieval failure stops
 the run before any provider I/O — a broken store fails loudly rather than silently
-answering ungrounded. It arrives as `PromptCancelled` with a reason starting `failed to
+answering ungrounded. It arrives as `Cancelled` with a reason starting `failed to
 retrieve dynamic context`, which a service answers 503 like any backend that is down.
 
 Because it is a hook, it composes with your own hooks in registration order: register a
@@ -164,13 +164,14 @@ let req = VectorSearchRequest::builder()
     .build();
 
 let results = index.top_n::<String>(req).await?;
-for (score, id, doc) in results {
-    println!("score={score} id={id} doc={doc}");
+for result in results {
+    println!("score={} id={} doc={}", result.score, result.id, result.document);
 }
 ```
 
-`top_n::<T>` returns `Vec<(f64, String, T)>` — score, id, deserialized document.
-`top_n_ids` returns just `(score, id)` when you only need to look something up elsewhere.
+`top_n::<T>` returns `Vec<VectorSearchResult<T>>` — `score`, `id` and the deserialized
+`document`. `top_n_ids` returns just `score` and `id` when you only need to look something
+up elsewhere.
 The request builder also accepts `.threshold(f64)` to drop weak matches and `.filter(..)`
 for backend-specific metadata filtering.
 
@@ -190,10 +191,7 @@ read-mostly corpora. Its constructors:
 | `from_documents_with_id_f(..)` | Derive the id from the document — the tool-RAG pattern |
 | `builder()` | Configure the index strategy instead of the default brute-force scan |
 
-Mind the bounds on the document type `D`: `Default` is required for `default()`, and
-`Serialize + Eq` for `builder()`, `add_documents` and the `from_documents*` family, and for
-searching the index. A document type that
-derives neither will fail to resolve the constructor rather than fail at the call site.
+The document type `D` needs only `Serialize`, plus `Send + Sync` for searching the index.
 
 `store.index(embedding_model)` turns a store into a searchable `VectorStoreIndex`.
 
@@ -204,7 +202,7 @@ They all implement the same `VectorStoreIndex` trait, so swapping the store does
 the agent code:
 
 ```toml
-rig = { version = "0.43", features = ["qdrant"] }
+rig = { version = "0.44", features = ["qdrant"] }
 ```
 
 ## Tool-RAG
@@ -265,7 +263,7 @@ let agent = AgentBuilder::new(client.completion(MODEL))
 `retrieved_tools(n, index, toolset)` fetches the `n` most relevant tool definitions per
 request and offers only those to the model; called tools are executed from the toolset.
 
-Note the method name: in 0.43 `dynamic_tools(..)` means *runtime-defined* tools, not
+Note the method name: in 0.44 `dynamic_tools(..)` means *runtime-defined* tools, not
 retrieved ones. Website snippets using `dynamic_tools(2, index, toolset)` will not compile.
 
 ## Beyond Top-K

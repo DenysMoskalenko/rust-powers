@@ -3,7 +3,7 @@
 Read this file when the user wants an agent that remembers: a multi-turn conversation, a
 durable session, bounded context growth, or facts that survive across sessions.
 
-Verified against `rig` 0.43.0.
+Verified against `rig` 0.44.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -26,7 +26,7 @@ ways to do that, from most manual to most automatic.
 ```rust
 use rig::completion::Message;
 
-let reply = agent.prompt("What's my name?").history(history.iter()).max_turns(1).await?.output;
+let reply = agent.prompt("What's my name?").history(history.iter()).max_turns(1).await?.output();
 
 // `history(..)` does NOT record the turn. Push it yourself.
 history.push(Message::user("What's my name?"));
@@ -41,7 +41,7 @@ control.
 
 ```rust
 let mut history: Vec<Message> = Vec::new();
-let reply = agent.chat("Hello!", &mut history).await?.output;
+let reply = agent.chat("Hello!", &mut history).await?.output();
 ```
 
 `chat` takes the history by mutable reference and appends the committed turn — the user
@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Each conversation id keeps its own isolated history.
     let _ = agent.prompt("My name is Ada.").conversation("user-42").max_turns(1).await?;
     let reply = agent.prompt("What's my name?").conversation("user-42").max_turns(1).await?;
-    println!("{}", reply.output);
+    println!("{}", reply.output());
 
     Ok(())
 }
@@ -117,7 +117,9 @@ pub trait ConversationMemory: Send + Sync {
 ```
 
 `Message` is `Serialize`/`Deserialize`, so persisting a conversation is ordinary serde
-work — a JSON column keyed by conversation id is a perfectly good first backend.
+work — a JSON column keyed by conversation id is a perfectly good first backend. The stored
+shape is rig's own and can change in a minor release: rig 0.44 cannot read 0.43 assistant
+turns that hold tool calls or reasoning, so clear or migrate those rows before upgrading.
 `ConversationId` (`rig::id::ConversationId`) wraps that id: `as_str()` gives the key back,
 and `.conversation("..")` still takes a plain string.
 
@@ -146,7 +148,7 @@ Reusable policies live in `rig-memory`. Reach them either as their own crate or 
 the `memory` feature of `rig`, which re-exports the same types into `rig::memory`:
 
 ```toml
-rig = { version = "0.43", features = ["memory"] }
+rig = { version = "0.44", features = ["memory"] }
 ```
 
 `InMemoryConversationMemory` is in `rig::memory` with or without the feature; only the
@@ -182,11 +184,14 @@ Bounding by estimated tokens tracks what you actually pay for; bounding by messa
 simpler and more predictable. Both drop a leading orphaned tool result when its paired tool
 call is truncated away, since most providers reject unpaired tool results.
 
-Neither window, and neither adapter below, suits Claude Opus 5.5 or Fable 5.1. Each thinking
-block those models return is bound to every message before it, and rig stores the blocks in
-memory and replays them. Dropping the oldest turns, or splicing a summary in their place,
+Neither window, and neither adapter below, suits Claude Fable 5.1, Opus 5.5, Sonnet 5.5 or
+Haiku 5.5. Each thinking block those models return is bound to every message before it, and
+rig stores the blocks in memory and replays them. Dropping the oldest turns, or splicing a summary in their place,
 changes that prefix under every block that stays, so the next request is a 400 wherever the
-API enforces the check, which includes every account created from 31 August 2026. On those
+API enforces the check, which includes every account created from 31 August 2026. On
+Anthropic's own API in adaptive thinking, rig 0.44 asks for those blocks to be dropped
+instead, which loses their reasoning; not on Haiku 5.5, which is missing from rig's model
+catalog (see Request Patches in Hooks and Runner). On those
 models, bound history with the summarize-and-restart shape in Rolling Your Own Compaction,
 which replays nothing from before the summary.
 
@@ -240,7 +245,7 @@ async fn compact_history(
              questions:\n\n{transcript}"
         ))
         .await?
-        .output;
+        .output();
 
     Ok(vec![Message::user(format!(
         "Context from the previous conversation:\n{summary}"

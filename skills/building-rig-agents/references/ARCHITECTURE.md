@@ -68,7 +68,7 @@ Need typed output?
         └── No                             → agent.prompt(..)
 ```
 
-There is no `Completion` trait in 0.43 — it was removed after 0.39. Drop to a model's
+There is no `Completion` trait in 0.44 — it was removed after 0.39. Drop to a model's
 `call(CompletionRequest::new(..))` when you want full control of one request.
 
 ### Which tool form?
@@ -85,7 +85,7 @@ Does it need runtime values the model must not see (auth, tenant, session)?
 Then:
   Many tools, only a few relevant per request? → retrieved_tools(n, index, toolset)
   Tools defined at runtime?                    → dynamic_tool / dynamic_tools
-  Tools served by another process?             → tools_from_server → DynamicTool::from → dynamic_tools
+  Tools served by another process?             → tools_from_server → DynamicTool::try_from → dynamic_tools
   Several agents sharing one mutable set?      → ToolServer + tool_server_handle
 ```
 

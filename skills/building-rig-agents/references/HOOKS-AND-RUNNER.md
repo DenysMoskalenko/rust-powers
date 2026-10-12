@@ -3,8 +3,8 @@
 Read this file when the user wants per-run controls, audit logging, approval flows,
 guardrails, request shaping, invalid-tool-call recovery, or concurrent tool execution.
 
-Verified against `rig` 0.43.0. The `on_event(StepEvent) -> Flow` hook API documented on
-rig.rs is the 0.40 one, **replaced in 0.41**; 0.43 uses per-event methods with per-event action types. See
+Verified against `rig` 0.44.0. The `on_event(StepEvent) -> Flow` hook API documented on
+rig.rs is the 0.40 one, **replaced in 0.41**; 0.44 uses per-event methods with per-event action types. See
 Version Drift.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
@@ -54,7 +54,7 @@ let response = agent
     .run()
     .await?;
 
-println!("answer: {}", response.output);
+println!("answer: {}", response.output());
 println!("model calls: {}", response.completion_calls.len());
 println!("tokens: {:?}", response.usage.total_tokens);
 ```
@@ -66,6 +66,8 @@ println!("tokens: {:?}", response.usage.total_tokens);
 |---|---|
 | `max_turns(n)` | Total model-call budget, including the initial call and every retry |
 | `max_invalid_tool_call_retries(n)` | Retry budget for invalid-tool-call recovery, `0` by default; retries also consume the normal turn budget |
+| `max_consecutive_malformed_tool_calls(n)` | Fail the run once malformed tool arguments repeat on more than `n` consecutive turns; no limit by default |
+| `accept_unknown_finish_reasons(true)` | Treat a reply's unknown finish reason as a normal stop instead of failing the run |
 | `unhandled_invalid_tool_call(UnhandledInvalidToolCall::Ignore)` | Drop an invalid call no hook resolves and continue the turn, instead of failing (`rig::run::UnhandledInvalidToolCall`) |
 | `history(iter)` | Explicit history — **bypasses conversation memory for this run** |
 | `conversation(id)` | Conversation id used to load and save memory |
@@ -282,7 +284,7 @@ use rig::agent::{AgentHook, CompletionCallAction, CompletionCallEvent, HookConte
 use rig::message::ToolChoice;
 
 /// With `.max_turns(3)` the third model call is the last one, and a tool call there ends
-/// the run in `MaxTurnsError`.
+/// the run in `MaxTurns`.
 struct AnswerOnLastTurn;
 
 impl AgentHook for AnswerOnLastTurn {
@@ -303,12 +305,17 @@ impl AgentHook for AnswerOnLastTurn {
 `RequestPatch` builders: `preamble`, `context`, `extra_context`, `history`,
 `active_tools`, `tool_choice`, `temperature`, `max_tokens`, `additional_params`.
 
-On Claude Opus 5.5 and Fable 5.1 every thinking block is bound to the `system` prompt, the
-tool set and the messages before it. A patch to `preamble`, `active_tools` or `history`
-changes that prefix, so the next request that replays the block gets a 400 wherever the API
-enforces the check, which includes every account created from 31 August 2026.
+On Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 every thinking block is bound to the
+`system` prompt, the tool set and the messages before it. A patch to `preamble`,
+`active_tools` or `history` changes that prefix, so the next request that replays the block
+gets a 400 wherever the API enforces the check, which includes every account created from
+31 August 2026. On Anthropic's own API in adaptive thinking, the default, rig 0.44 asks for
+such a block to be dropped rather than the request rejected (`thinking.block_binding`, beta
+`thinking-binding-controls-2026-08-01`), so the request goes through without that reasoning.
+Haiku 5.5 is missing from rig's model catalog, so rig does not send `block_binding` for it and
+the 400 stands.
 `tool_choice`, `max_tokens` and `additional_params` sit outside the prefix. A forced
-`ToolChoice::Required` or `Specific` is a 400 on both, and on Sonnet 5.5, regardless.
+`ToolChoice::Required` or `Specific` is a 400 on Fable 5.1, Opus 5.5 and Sonnet 5.5 regardless.
 
 Patches are per-turn and non-sticky. If you narrow `active_tools`, make sure any
 `tool_choice` still names a tool that is advertised — otherwise the model's only legal move
@@ -316,12 +323,14 @@ is a call it cannot make.
 
 ## Invalid Tool Calls
 
-An invalid tool call is a name that is unknown, not advertised for the turn, or disallowed
-by the active `ToolChoice` — or, since 0.43 and only in a streamed run, a call whose
-arguments are not JSON; `event.reason` tells the two apart. By default Rig fails fast with
-`PromptError::UnknownToolCall`, or for malformed arguments a `PromptError::Report` of kind
-`Response`, which is also how a blocking run fails on them without consulting any hook. A
-hook can opt into recovery.
+An invalid tool call is a name that is unknown or not advertised for the turn, one the
+active `ToolChoice` disallows, or — on either run path since 0.44 — a call whose arguments
+are not a JSON object; `event.reason` (`UnknownTool`, `DisallowedByToolChoice`,
+`MalformedArguments`) tells them apart. By default Rig fails fast on a bad name with
+`PromptError::UnknownToolCall`, and answers malformed arguments with an error result the
+model sees, until `max_turns` or `max_consecutive_malformed_tool_calls(n)` ends the run. A
+hook can opt into recovery; for malformed arguments `Repair` fails the run like `Fail`, and
+`Retry` answers with its feedback whatever the retry budget.
 
 ```rust,verify
 use rig::agent::{
@@ -337,7 +346,7 @@ impl AgentHook for RepairDefaultApi {
         event: &InvalidToolCallContext,
     ) -> Option<InvalidToolCallAction> {
         if !matches!(event.reason, InvalidToolCallReason::UnknownTool) {
-            return None; // malformed arguments: a repaired name would not fix them
+            return None; // only unknown names; renaming cannot fix malformed arguments
         }
         // Some providers emit a placeholder name like `default_api` when the model
         // means "call the obvious tool". Repair it rather than failing the run.
@@ -358,15 +367,15 @@ impl AgentHook for RepairDefaultApi {
 Recovery options:
 
 - `Fail` — preserve fail-fast behavior.
-- `Retry { feedback }` — append corrective feedback and ask the model again. The budget,
-  `max_invalid_tool_call_retries(n)`, defaults to `0`, so a `Retry` fails like `Fail` until
-  you set it; each retry also consumes normal turn budget.
+- `Retry { feedback }` — append corrective feedback and ask the model again. For a bad name
+  the budget, `max_invalid_tool_call_retries(n)`, defaults to `0`, so a `Retry` fails like
+  `Fail` until you set it; each retry also consumes normal turn budget.
 - `Repair { tool_name }` — rewrite only the tool name, then revalidate it.
 - `Skip { reason }` — record a synthetic tool result without executing anything.
 - `Stop { reason }` — end the run.
 
 Returning `None` leaves the decision to a later hook. If every hook returns `None`, Rig
-keeps its fail-fast default.
+keeps the default above.
 
 `InvalidToolCallContext` carries `tool_name`, `tool_call_id`, `args`, `available_tools`,
 `allowed_tools`, `tool_choice`, `chat_history`, `is_streaming` and `reason` —

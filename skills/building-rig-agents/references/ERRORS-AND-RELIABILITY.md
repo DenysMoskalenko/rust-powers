@@ -3,7 +3,7 @@
 Read this file when a Rig call fails, a build fails, or the user needs retries, rate-limit
 handling, or production hardening.
 
-Verified against `rig` 0.43.0.
+Verified against `rig` 0.44.0.
 
 ## Contents
 
@@ -16,8 +16,8 @@ Verified against `rig` 0.43.0.
 
 ## Compile Errors First
 
-Most compile errors against rig 0.43 come from code written for 0.42. Check the shape
-before you doubt the imports.
+Most compile errors against rig 0.44 come from code written for 0.43 or 0.42. Check the
+shape before you doubt the imports.
 
 ### `cannot find 'Client' in 'openai'`, `no method named 'agent' / 'embedding_model' found`
 
@@ -25,13 +25,13 @@ before you doubt the imports.
 error[E0433]: cannot find `Client` in `openai`
 ```
 
-That is 0.42 code. rig 0.43 has no client traits: a provider client is a concrete type
+That is 0.42 code. rig 0.44 has no client traits: a provider client is a concrete type
 (`OpenAI`, `Anthropic`, `Gemini`) whose methods are inherent, and an agent wraps one of its
 models — `AgentBuilder::new(OpenAI::from_env()?.completion(MODEL))`. `prompt`, `chat` and
 `prompt_typed` are inherent on `Agent`, so no trait import is missing either;
 `use rig::prelude::*;` re-exports types such as `AgentBuilder` and `Agent`, plus the `Tool`,
 `PortableTool` and `VectorStoreIndex` traits (`top_n` needs the last in scope). The
-0.42 → 0.43 table in Version Drift pairs every old call with its replacement.
+0.43 → 0.44 and 0.42 → 0.43 tables in Version Drift pair every old call with its replacement.
 
 ### `the async keyword is missing from the function declaration`
 
@@ -50,7 +50,7 @@ loaders), `audio`, `image`, and one per vector store (`lancedb`, `qdrant`, `post
 
 ### `Agent<M>` does not compile
 
-`Agent` has no type parameter in 0.43 — `AgentBuilder::new` takes the model as a
+`Agent` has no type parameter since 0.43 — `AgentBuilder::new` takes the model as a
 `DynModel`. Write `Agent`. Same for hooks: `impl AgentHook for MyHook`, not
 `impl<M: CompletionModel> AgentHook<M> for MyHook`. See
 Version Drift.
@@ -60,16 +60,17 @@ Version Drift.
 `agent.prompt(..)` returns `Result<PromptResponse, PromptError>`:
 
 ```rust
+#[non_exhaustive]
 pub enum PromptError {
-    CompletionError(ProviderError),
+    Provider(ProviderError),
     Report(ErrorReport),           // a failure relayed over the agent's bus
-    MemoryError(MemoryError),
-    MaxTurnsError {
+    Memory(MemoryError),
+    MaxTurns {
         max_turns: usize,
         chat_history: Vec<Message>,
         prompt: Message,
     },
-    PromptCancelled {
+    Cancelled {
         chat_history: Vec<Message>,
         reason: String,
     },
@@ -82,7 +83,7 @@ pub enum PromptError {
 }
 ```
 
-A provider failure usually reaches an agent run as `Report`, not `CompletionError`: the provider's
+A provider failure usually reaches an agent run as `Report`, not `Provider`: the provider's
 reply crosses the agent's bus as an `ErrorReport`, whose `kind` classifies it and whose
 `provider_response_status()` still reads the HTTP status.
 
@@ -90,9 +91,9 @@ reply crosses the agent's bus as an `ErrorReport`, whose `kind` classifies it an
 use rig::completion::PromptError;
 
 match agent.prompt("What is 2 + 2?").max_turns(3).await {
-    Ok(reply) => println!("{}", reply.output),
+    Ok(reply) => println!("{}", reply.output()),
 
-    Err(PromptError::MaxTurnsError { max_turns, chat_history, .. }) => {
+    Err(PromptError::MaxTurns { max_turns, chat_history, .. }) => {
         // The model kept calling tools past the budget.
         eprintln!("hit the {max_turns}-call budget after {} messages", chat_history.len());
     }
@@ -102,15 +103,16 @@ match agent.prompt("What is 2 + 2?").max_turns(3).await {
         eprintln!("model called {tool_name}; available: {available_tools:?}");
     }
 
-    Err(PromptError::PromptCancelled { reason, .. }) => {
+    Err(PromptError::Cancelled { reason, .. }) => {
         // A hook returned a stop action, or rig cancelled the run itself (a lost
         // prompt, a protocol violation): only the reason tells them apart.
         eprintln!("cancelled: {reason}");
     }
 
-    Err(PromptError::MemoryError(e)) => eprintln!("memory backend failed: {e}"),
+    Err(PromptError::Memory(e)) => eprintln!("memory backend failed: {e}"),
     Err(PromptError::Report(report)) => eprintln!("{:?} failure: {report}", report.kind),
-    Err(PromptError::CompletionError(e)) => eprintln!("provider call failed: {e}"),
+    Err(PromptError::Provider(e)) => eprintln!("provider call failed: {e}"),
+    Err(other) => eprintln!("{other}"), // `#[non_exhaustive]`
 }
 ```
 
@@ -118,7 +120,7 @@ Every variant that can carries `chat_history`, so a failure is diagnosable witho
 instrumentation. Log it (minus content you should not persist) when a run fails in
 production.
 
-**`MaxTurnsError` is usually a design signal, not a transient fault.** Either the budget is
+**`MaxTurns` is usually a design signal, not a transient fault.** Either the budget is
 too low for the tool chain (raise `max_turns`), or the model is stuck in a loop because the
 tools are too many, too similar, or badly described. Retrying the same prompt with the same
 budget will fail the same way.
@@ -209,7 +211,7 @@ async fn prompt_with_retry(
     loop {
         attempt += 1;
         match agent.prompt(input).max_turns(5).await {
-            Ok(reply) => return Ok(reply.output),
+            Ok(reply) => return Ok(reply.output()),
 
             Err(e) if attempt < max_attempts && is_retryable(&e) => {
                 let backoff = Duration::from_millis(200 * 2u64.pow(attempt - 1));
@@ -222,12 +224,12 @@ async fn prompt_with_retry(
 }
 
 /// rig's own classification: a transport failure, a truncated reply, or a
-/// provider 408, 425, 429 or 5xx. Anything else, a 401 or `MaxTurnsError`
+/// provider 408, 425, 429 or 5xx. Anything else, a 401 or `MaxTurns`
 /// included, fails the same way again.
 fn is_retryable(error: &PromptError) -> bool {
     match error {
         PromptError::Report(report) => report.is_retryable(),
-        PromptError::CompletionError(error) => error.is_retryable(),
+        PromptError::Provider(error) => error.is_retryable(),
         _ => false,
     }
 }
@@ -235,7 +237,7 @@ fn is_retryable(error: &PromptError) -> bool {
 
 Three things this gets right and hand-rolled loops often do not:
 
-- **Retry only what can succeed.** `MaxTurnsError`, `UnknownToolCall` and a provider 4xx
+- **Retry only what can succeed.** `MaxTurns`, `UnknownToolCall` and a provider 4xx
   other than 408 and 429 are deterministic given the same inputs; retrying them just spends
   money.
 - **Exponential backoff, bounded.** A fixed 100 ms retry against a rate limit is a
@@ -281,6 +283,10 @@ override it.
   fixed choices.
 - **The agent forgot the conversation** — memory without a conversation id is silently
   bypassed. See Memory.
+- **`ResponseError: the provider failed the turn: ...`** — since 0.44 a reply that ends in
+  an unknown finish reason, a content filter or a provider-reported failure fails the run as
+  `PromptError::Provider(ProviderError::Response(..))`, even when it holds text.
+  `.accept_unknown_finish_reasons(true)` accepts the unknown reasons only.
 - **RAG returns irrelevant documents** — the query and the documents were embedded with
   different models, or there is no similarity threshold.
 

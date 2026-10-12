@@ -1,4 +1,4 @@
-# Version Drift: rig.rs Docs vs Released 0.43
+# Version Drift: rig.rs Docs vs Released 0.44
 
 Read this file before copying any code sample from <https://rig.rs/docs>, and whenever a
 snippet that "should work" does not compile.
@@ -6,6 +6,7 @@ snippet that "should work" does not compile.
 ## Contents
 
 - [The Situation](#the-situation)
+- [0.43 → 0.44](#043--044)
 - [0.42 → 0.43](#042--043)
 - [The Divergences That Bite](#the-divergences-that-bite)
   - [1. `Agent` is no longer generic](#1-agent-is-no-longer-generic)
@@ -29,7 +30,7 @@ Rig has two documentation surfaces and they are not in sync:
 - **<https://rig.rs/docs>** — the narrative guide. Excellent on concepts, mental models,
   and *why* to reach for something. Its code samples were written across roughly 0.38–0.41
   plus a few pages describing unreleased `main`, and several no longer compile.
-- **<https://docs.rs/rig/0.43.0>** — the released API. Exhaustive and always correct for
+- **<https://docs.rs/rig/0.44.0>** — the released API. Exhaustive and always correct for
   the version you actually depend on.
 
 The Rig maintainers say as much: several pages carry a "Main branch API" banner, and the
@@ -40,14 +41,56 @@ they disagree, docs.rs wins — it is generated from the code you compiled again
 
 Rig also ships a `MIGRATING.md` in the repository covering every breaking change from 0.30
 onward, including a "Silent behavior changes" section for changes that still compile. Read
-the section for the version you are on; in 0.43.0 the newest is `0.41 → next`, which covers
-0.42 and 0.43.
+the section for the version you are on. The copy in the 0.44.0 tag stops at `0.42 → 0.43`;
+the `0.43 → 0.44` section was added on `main` after the release.
+
+## 0.43 → 0.44
+
+0.44 keeps the 0.43 run surface; the breaks are in results, errors, streaming and tool
+names. Old spelling on the left; where the old one still compiles, the right cell says what
+it now does.
+
+| 0.43 | 0.44 |
+|---|---|
+| `agent.prompt(p).await?.output` | `.await?.output()`, an owned `String` built from `content`; call it before moving `messages` out. `TypedPromptResponse::output` stays a field |
+| `response.messages.unwrap_or_default()` | `response.messages`, a `Vec<Message>` every run fills |
+| `PromptError::{CompletionError, MemoryError, MaxTurnsError, PromptCancelled}` | `PromptError::{Provider, Memory, MaxTurns, Cancelled}`; the enum is `#[non_exhaustive]`, so a `match` needs a `_` arm |
+| `StreamingError`, `Err(StreamingError::Prompt(e))` | gone: a stream item fails with the same `PromptError` an awaited run returns |
+| `MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult { tool_result })` | `MultiTurnStreamItem::ToolResult { tool_result }`; the enum is `#[non_exhaustive]` |
+| one `StreamEvent::Arguments` per tool call, holding its whole JSON | one per provider delta: join a call's fragments by `part`, or take the call from its `End`; `Start` gains `name` |
+| `Message::Assistant { id, content }` | `Message::Assistant(AssistantMessage)`; build one with `Message::assistant(text)` |
+| `DynamicTool::from(mcp_tool)` / `agent.into_tool()` | `DynamicTool::try_from(mcp_tool)?` / `agent.into_tool()?`: a tool name is a validated `ToolName` |
+| `ToolDefinition { name: "add".to_string(), .. }` | `ToolDefinition { name: ToolName::new("add")?, .. }` |
+| `for (score, id, doc) in index.top_n(req).await?` | `for result in index.top_n(req).await?` (`result.score`, `.id`, `.document`); `top_n_ids` likewise yields `score` and `id` fields |
+| `StructuredOutputError::PromptError(e)` / `DeserializationError(e)` | `Prompt(e)` / `Deserialization { output, error }`, which keeps the text that failed to parse |
+| `ExtractorBuilder::tool_choice(..)`, `retries(u64)` | `tool_choice` removed: extraction always forces `submit`, and still drops the force on models that reject one; `retries` takes `usize` |
+| `UserContent::audio(..)` / `video(..)` / `document(..)` | `audio_base64` / `video_base64` / `document_text`, and `document_base64` for a base64 PDF |
+| `Usage { input_tokens: Some(3), ..Usage::default() }` | `Usage::new().input_tokens(3)` |
+| `stream_to_stdout` printing a run error and returning `Ok` | it returns the run's error |
+| span `chat_streaming` | `chat` with `gen_ai.request.stream = true` |
+
+Behavior that changed with no compile error:
+
+- A turn that ends with an unknown finish reason or a content-filter stop fails the run with
+  `PromptError::Provider(ProviderError::Response(..))`, even when it holds text; 0.43 returned
+  the text. `.accept_unknown_finish_reasons(true)` on the builder, the run or the request
+  accepts unknown reasons.
+- `on_tool_call_delta` fires once per argument fragment, and `ToolCallDelta` carries the
+  text so far in `aggregated`.
+- Anthropic tool definitions carry `eager_input_streaming: true`; for a gateway that rejects
+  the field, set the model's `wire` to `with_tool_input_streaming(ToolInputStreaming::BetaHeader)`
+  or `Off`.
+- rig-core turns on serde_json's `preserve_order` for the whole binary, so `serde_json::Map`
+  keeps insertion order: a snapshot of a `serde_json::Value` can reorder once rig is added.
+- History stored by 0.43 loads only where its assistant turns are plain text; a turn holding
+  tool calls or reasoning no longer deserializes. A serialized 0.43 `AgentRun` is refused on
+  resume ("the run is format 1, this rig reads format 2").
 
 ## 0.42 → 0.43
 
 0.43 rebuilt the provider layer and the run surface, so most 0.42 code no longer compiles.
 Old spelling on the left; where the old one still compiles, the right cell says what it now
-does.
+does. The right column is the 0.43 spelling: apply the 0.43 → 0.44 table above on top of it.
 
 | 0.42 | 0.43 |
 |---|---|
@@ -118,7 +161,7 @@ Behavior that changed with no compile error:
 let agent: Agent<openai::responses_api::ResponsesCompletionModel> = ...;
 struct Router { routes: HashMap<String, Agent<ResponsesCompletionModel>> }
 
-// 0.42 and 0.43
+// 0.42 to 0.44
 let agent: Agent = ...;
 struct Router { routes: HashMap<String, Agent> }
 ```
@@ -137,6 +180,9 @@ Message::Assistant { id: None, content: OneOrMany::one(AssistantContent::text("h
 
 // 0.42 and 0.43
 Message::Assistant { id: None, content: vec![AssistantContent::text("hi")] }
+
+// 0.44
+Message::assistant("hi")
 ```
 
 Content lists are plain `Vec<T>`. `Message` also gained a third variant,
@@ -155,7 +201,7 @@ async fn definition(&self, _prompt: String) -> ToolDefinition {
 }
 async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> { ... }
 
-// 0.42 and 0.43
+// 0.42 to 0.44
 fn description(&self) -> String { "...".to_string() }
 fn parameters(&self) -> serde_json::Value { json!({...}) }
 async fn call(&self, ctx: &mut ToolContext, args: Self::Args)
@@ -176,7 +222,7 @@ implements `Tool`. Prefer it for pure functions.
 // rig.rs
 Err(rig::tool::ToolError::ToolCallError("Division by zero".into()))
 
-// 0.42 and 0.43
+// 0.42 to 0.44
 Err(rig::tool::ToolExecutionError::invalid_args("divide requires a non-zero y"))
 ```
 
@@ -194,7 +240,7 @@ impl<M: CompletionModel> AgentHook<M> for MyHook {
     }
 }
 
-// 0.43
+// 0.43 and 0.44
 impl AgentHook for MyHook {
     async fn on_dispatch(&self, _ctx: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
         if event.tool_name().is_some() { DispatchAction::skip("no") } else { DispatchAction::proceed() }
@@ -202,8 +248,8 @@ impl AgentHook for MyHook {
 }
 ```
 
-0.43 has per-event methods, each returning its own action type. All methods are provided,
-so you implement only what you need. `RequestOverride` is `RequestPatch`;
+Since 0.43 there are per-event methods, each returning its own action type. All methods are
+provided, so you implement only what you need. `RequestOverride` is `RequestPatch`;
 `Flow::override_request` is `CompletionCallAction::patch`. `StepEventKind` still exists,
 for `observes`.
 
@@ -213,7 +259,7 @@ for `observes`.
 // rig.rs — tool-RAG
 .dynamic_tools(2, tool_index, toolset)
 
-// 0.42 and 0.43 — tool-RAG
+// 0.42 to 0.44 — tool-RAG
 .retrieved_tools(2, tool_index, toolset)
 ```
 
@@ -227,7 +273,7 @@ Related: `ToolSet::builder()` no longer exists. Use `ToolSet::default()` plus
 
 The Evals page on rig.rs documents `Eval`, `EvalOutcome`, `LlmJudgeBuilder`,
 `LlmScoreMetric`, and `SemanticSimilarityMetric` behind an `experimental` feature. That
-module shipped in 0.39 and was **removed by 0.41**. `rig` 0.43 has no `experimental`
+module shipped in 0.39 and was **removed by 0.41**. `rig` 0.44 has no `experimental`
 feature and no `evals` module — `cargo add rig -F experimental` fails.
 
 Build judges and scorers on extractors instead; see
@@ -244,18 +290,18 @@ by an answer needs at least two, and any tool-using prompt needs an explicit
 ### 9. Vector stores are features, not separate crates
 
 rig.rs describes `rig-mongodb`, `rig-lancedb`, `rig-qdrant`, and friends as companion
-crates you add alongside `rig`. The `rig` 0.43 facade re-exports them as feature-gated
+crates you add alongside `rig`. The `rig` 0.44 facade re-exports them as feature-gated
 modules:
 
 ```toml
-rig = { version = "0.43", features = ["qdrant", "lancedb"] }
+rig = { version = "0.44", features = ["qdrant", "lancedb"] }
 ```
 
 The companion crates still exist and still work; the feature is usually simpler.
 
 ### 10. Builder method names
 
-| rig.rs | 0.43 |
+| rig.rs | 0.44 |
 |---|---|
 | `AgentBuilder::conversation_id(..)` | `AgentBuilder::conversation(..)` |
 | `tool_extensions(..)` | `tool_context(..)` on the `AgentRunner`, not on `AgentBuilder` |
@@ -276,13 +322,13 @@ than APIs.
   `rig-rmcp` crate, reached as `rig::tool::rmcp`.
 - `record_content_telemetry` (default `false`) is newer than most website prose, which
   predates the opt-in.
-- An `Agent` used as another agent's tool goes through `Agent::into_tool()` →
+- An `Agent` used as another agent's tool goes through `Agent::into_tool()?` →
   `DynamicTool` → `.dynamic_tool(..)`. `Agent` does not implement `Tool`, so `.tool(agent)`
   does not compile.
 
 ## How to Check Something Yourself
 
-1. Open `https://docs.rs/rig/0.43.0/rig/all.html` and search for the symbol. Absent means
+1. Open `https://docs.rs/rig/0.44.0/rig/all.html` and search for the symbol. Absent means
    it does not exist in this release.
 2. Open the item page for the exact signature, and check for an "Available on crate
    feature `x` only" banner.
