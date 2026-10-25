@@ -10,6 +10,7 @@
 4. `warning[E0602]: unknown lint: clippy::string_to_string` — clippy prints this on every build but CI is green.
 5. I want to raise our coverage gate from 80 to 85 percent. Where does that number live so local runs and CI agree?
 6. How do I upgrade one dependency without `cargo update` moving everything else in the lock file?
+7. `target/` is 30 GB again two weeks after I last cleaned it. Why does it keep growing, and how do I stop it?
 
 **Should not load**
 
@@ -132,9 +133,9 @@
 **Must produce**:
 
 - A statement that no Cargo setting caps `target/`; Cargo's own cleanup (the nightly `cargo clean gc` size limits, stable's age-based auto-clean) covers only `~/.cargo`.
-- `[profile.dev.package."*"] debug = false` in the root `Cargo.toml`.
-- The note that the service's own crates keep full debuginfo.
-- `cargo clean` as the way to reclaim what is already there.
+- The cause: cargo keeps one set of artifacts per toolchain, dependency version, feature set and profile, and deletes none of them.
+- `debug = "line-tables-only"` under `[profile.dev]` and `debug = false` under `[profile.dev.package."*"]`, both in the root `Cargo.toml`.
+- `cargo clean` as the way to reclaim what is already there, and the Makefile's `TARGET_CAP_GB`, which runs it from `make test` and `make cov` once the directory passes the cap.
 
 **Must not produce**:
 
@@ -142,6 +143,7 @@
 - A `[profile.*]` table in `migration/Cargo.toml`.
 - Disabling `Swatinem/rust-cache`.
 - Adding `cargo clean` to CI.
+- Installing cargo-sweep, which is unmaintained.
 
 ### Probe 1 - grouping imports
 

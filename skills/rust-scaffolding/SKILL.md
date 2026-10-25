@@ -2,7 +2,7 @@
 name: rust-scaffolding
 description: "Use when creating a brand-new Rust axum service from nothing — 'create a service that...', an empty directory with no Cargo.toml, a new API or microservice that needs migrations, tests, lints, Docker and CI green from the first commit, or a repo that still errors with could not find Cargo.toml. Greenfield only. Not for adding a route (axum-service), entity (sea-orm-postgres) or test (rust-testing) to an existing crate, nor changing tooling in an existing service (rust-tooling)."
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
 ---
 
 # Rust Scaffolding (Greenfield Only)
@@ -52,7 +52,7 @@ comments of `.env.example` and `docker-compose.yml`; those stay.
 | File | Replace |
 | --- | --- |
 | `Cargo.toml` | the one `name = "app"` line with `name = "<name>"`; then `cargo update --workspace` moves the `Cargo.lock` entry and touches nothing else |
-| `src/main.rs`, `tests/common/mod.rs`, `tests/panic.rs` | every `app::` path prefix with `<snake>::` |
+| `src/main.rs`, `tests/api/common.rs`, `tests/api/panic.rs` | every `app::` path prefix with `<snake>::` |
 | `src/lib.rs` | `info(title = "app"` with `<name>` |
 | `Dockerfile` | `--bin app`, `/build/target/release/app /usr/local/bin/app` and `CMD ["app"]` with `<name>` |
 | `.env.example` | the trailing `/app` in both database URLs and the `app=` in `RUST_LOG` with `<snake>` |
@@ -134,8 +134,8 @@ The template ships `users` and `posts` as a worked example of every layer. Repla
 rather than adding beside them.
 
 1. **Rename the resource.** `git mv src/api/users.rs src/api/<resource>.rs` and
-   `git mv tests/users.rs tests/<resource>.rs`, update `src/api/mod.rs`, then rename
-   `CreateUser`, `UserResponse`, `ListUsers`, the route paths, the `tag = "users"` attributes
+   `git mv tests/api/users.rs tests/api/<resource>.rs`, update `src/api/mod.rs` and the `mod`
+   line in `tests/api/main.rs`, then rename `CreateUser`, `UserResponse`, `ListUsers`, the route paths, the `tag = "users"` attributes
    and the `users` tag in `src/lib.rs`. Keep `Page` as it is, so every list endpoint shares one
    wire shape; once a second resource lists, move it to `src/api/mod.rs`.
 2. **Add an entity.** Write the migration first: sea-orm-cli has no autogenerate and can

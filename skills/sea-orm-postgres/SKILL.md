@@ -2,7 +2,7 @@
 name: sea-orm-postgres
 description: "Use when working with Postgres through sea-orm — entities, pagination queries, eager loading, load().with and LoaderTrait, N+1, transactions, advisory locks, foreign key and unique violations, idempotency rows, outbox, migrations with sea-orm-migration, sea-orm-cli migrate generate and generate entity, pool sizing, per-test databases, upgrading from sea-orm 1.x. Also for RecordNotUpdated, no method named like found for enum Expr, duplicate key value violates unique constraint. Not for a new service (rust-scaffolding), nor test structure, test_app or factories (rust-testing)."
 metadata:
-  version: "0.3.0"
+  version: "0.3.1"
 ---
 
 # Postgres with sea-orm

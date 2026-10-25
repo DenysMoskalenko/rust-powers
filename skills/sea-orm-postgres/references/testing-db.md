@@ -78,11 +78,10 @@ to the version production runs.
 
 ## The harness
 
-This is the database half of `tests/common/mod.rs` — the file `rust-testing`'s `test_app()` lives
+This is the database half of `tests/api/common.rs` — the file `rust-testing`'s `test_app()` lives
 in, helper for helper as the scaffold ships it. `test_app()` calls `migrated_database()` and then
 builds `AppState` around the connection; it is split out here so the database part can be read on
-its own. `tests/common/mod.rs`, not `tests/common.rs`: a file directly in `tests/` is compiled as
-its own test binary with no tests in it.
+its own.
 
 ```rust,verify,test
 #![allow(
@@ -273,11 +272,11 @@ fresh database as `app.state.db`, next to the frozen clock and the mock upstream
 `AppState` carries.
 
 ```rust,verify,test
-mod common;
-
 use app::entities::user;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, PaginatorTrait};
 use uuid::Uuid;
+
+use crate::common;
 
 #[tokio::test]
 async fn rejects_a_duplicate_email() {

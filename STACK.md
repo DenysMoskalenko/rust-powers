@@ -51,6 +51,7 @@ Re-validated on rustc 1.99.0 / clippy 0.1.99, 12 October 2026: `cargo update` (5
 - Tool versions the skills were verified against: cargo-nextest 0.9, cargo-llvm-cov 0.9, cargo-deny 0.20, cargo-machete 0.9, bacon 3.26, prek 0.5, sea-orm-cli 2.0.4.
 - **Complexity**: clippy lints only, configured in `[lints.clippy]`.
 - **Linker**: default `lld` on x86_64 Linux since Rust 1.90. Add `mold` only after measuring.
+- **Disk**: stable cargo never deletes anything from `target/` (target-directory GC is cargo#13136, open), so `make test` and `make cov` run `cargo clean` past `TARGET_CAP_GB` (15). `debug = "line-tables-only"` for workspace crates, none for dependencies. cargo-sweep is unmaintained and not used.
 
 ### Web
 
@@ -113,6 +114,7 @@ sea-orm 1.x → 2.0 — the renames that break nearly every pre-2026 snippet:
 
 - **rstest** for fixtures and parametrised cases. **test-log** for tracing output in tests.
 - **API tests** with axum-test `TestServer::new(app)`; no HTTP port.
+- **One integration-test binary**, `tests/api/main.rs` with a module per area: every file directly in `tests/` links the whole graph again. Measured on the scaffold, four binaries to one took the full dev loop's `target/` from 4.7 to 4.1 GB and a library-edit rebuild from about 13 to 7 s.
 - **Database tests**: nextest runs every test in its own process, so a `static`/`OnceCell` container is per *test*, not per binary — measured, two tests started two containers. Read `TEST_DATABASE_URL` when it is set (docker compose locally, `services:` in CI) and fall back to testcontainers-modules Postgres with `.with_tag("18-alpine")` — the module default is `11-alpine` — plus `.with_container_name(..).with_reuse(ReuseDirective::Always)`. That needs a second dev-dependency, `testcontainers = { version = "0.27", features = ["reusable-containers"] }`, because modules 0.15 does not re-export the feature; reused containers are never cleaned up. Each test clones (`CREATE DATABASE .. TEMPLATE`) a template migrated once per run, never a transaction rolled back per test; `make test` and `make cov` drop a passing run's databases and any older than an hour. The test HTTP client is built with `.no_proxy()`. sea-orm `MockDatabase` only for pure logic.
 - `TEST_NATS_URL` / `TEST_REDIS_URL` follow the `TEST_DATABASE_URL` pattern: read when set, else a testcontainers-modules container with an explicit `.with_tag(..)`.
 - **Test data**: fake `#[derive(Dummy)]` for random valid values, bon builders for "valid default, override one field".
@@ -121,7 +123,7 @@ sea-orm 1.x → 2.0 — the renames that break nearly every pre-2026 snippet:
 - **Snapshots**: insta with `json` and `redactions`.
 - **Diff assertions**: similar-asserts.
 - **Time**: inject a `Clock` trait (`fn now(&self) -> DateTime<Utc>`) and swap a fixed clock in tests. For tokio timers use `#[tokio::test(start_paused = true)]` and `tokio::time::advance`, which need `tokio = { features = ["test-util"] }` in `[dev-dependencies]` — `full` does not include it. Cargo unions features across dependency kinds, so the dev entry only turns `test-util` on for test builds of a crate that already depends on tokio normally.
-- `clippy.toml`'s `allow-unwrap-in-tests` covers only the body of a `#[test]` / `#[tokio::test]` function. Measured: a helper in `tests/common/mod.rs` called from a test still warns. Put `#![allow(clippy::unwrap_used, clippy::expect_used, reason = "test helpers")]` at the top of every `tests/*.rs` that has non-`#[test]` helpers.
+- `clippy.toml`'s `allow-unwrap-in-tests` covers only the body of a `#[test]` / `#[tokio::test]` function. Measured: a helper in `tests/api/common.rs` called from a test still warns. Put `#![allow(clippy::unwrap_used, clippy::expect_used, reason = "test helpers")]` at the top of every test module that has non-`#[test]` helpers.
 - **Property tests**: proptest, add when needed.
 
 ### AI (add when needed)
@@ -173,9 +175,12 @@ members = ["migration"]   # created by `sea-orm-cli migrate init`
 [lints]
 workspace = true
 
-# Dependencies compile without debuginfo: target/ is about a third smaller and
-# links faster. Your own crates keep full debuginfo, so backtraces into them still
-# carry line numbers.
+# Backtraces need only line tables, so your crates keep those and dependencies
+# keep no debuginfo: target/ is smaller and links faster. For a debugger session
+# that inspects variables, build with CARGO_PROFILE_DEV_DEBUG=true.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
 debug = false
 

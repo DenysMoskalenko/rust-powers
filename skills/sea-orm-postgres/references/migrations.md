@@ -153,7 +153,7 @@ impl MigrationTrait for Migration {
 
 Write `down` unless the project is forward-only: it makes `migrate down -n 1` useful while a
 migration is still being written and `migrate refresh` work at all (`migrate fresh` drops every
-table and never calls it). The scaffold's `tests/migrations.rs` runs every `down` through
+table and never calls it). The scaffold's `tests/api/migrations.rs` runs every `down` through
 `Migrator::refresh`, so none rots. A forward-only project leaves `down` out, keeping
 sea-orm-migration's default that returns an error, and deletes that test.
 

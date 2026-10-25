@@ -63,8 +63,8 @@ testcontainers-modules = { version = "0.15", features = ["postgres", "redis", "n
 testcontainers = { version = "0.27", features = ["reusable-containers"] }   # modules does not re-export it
 ```
 
-In a real suite the fixture lives in `tests/common/mod.rs` and each test binary opens with
-`mod common;`. It is shown inline here so the file is complete.
+In a real suite the fixture lives in `tests/api/common.rs` and each test module reaches it with
+`use crate::common;`. It is shown inline here so the file is complete.
 
 ```rust,verify,test
 #![allow(

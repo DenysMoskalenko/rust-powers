@@ -52,11 +52,11 @@ async fn profile_maps_a_billing_outage_to_503() {
 The scaffold has no such endpoint yet, so the block below demonstrates the matcher API by driving `app.state.http` at `app.mock.base_url()` by hand. It tests httpmock and reqwest, not the service; a real test has the shape above.
 
 ```rust,verify,test
-mod common;
-
 use httpmock::Method::{GET, POST};
 use serde_json::json;
 use uuid::Uuid;
+
+use crate::common;
 
 #[tokio::test]
 async fn upstream_profile_is_parsed() {
@@ -254,13 +254,13 @@ Rule of thumb: a clock or an email sender is a hand-written fake; a six-method p
 A `tokio::time::sleep` before the assertion is a bet on the CI box. Keep the `JoinHandle` and await it: it carries the task's `Result` and its panic, a sleep carries neither. For work the handler spawns and does not hand back, have it signal a `oneshot`/`Notify` the test owns.
 
 ```rust,verify,test
-mod common;
-
 use app::entities::user;
 use sea_orm::ActiveModelTrait as _;
 use sea_orm::ActiveValue::Set;
 use serde_json::json;
 use uuid::Uuid;
+
+use crate::common;
 
 #[tokio::test]
 async fn a_row_written_by_a_background_task_is_listed() {

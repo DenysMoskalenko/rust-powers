@@ -2,7 +2,7 @@
 name: rust-testing
 description: "Use when writing or fixing tests for an axum service or a new endpoint, or stabilizing a flaky test — API tests through axum-test and TestServer, test_app and its dependency overrides, rstest fixtures, fake and bon factories, httpmock, insta snapshots, injected Clock, nextest filters, coverage exclusions. Also for PoolTimedOut, or tests that leak state under nextest. Not for nextest.toml, llvm-cov flags or CI (rust-tooling), the Postgres container and per-test database (sea-orm-postgres), or rig mocks (building-rig-agents)."
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
 ---
 
 # Testing an axum service
@@ -38,13 +38,14 @@ One HTTP request exercises routing, extractors, validation, serialisation, error
 ```text
 src/lib.rs            everything public, build_router included
 src/main.rs           process wiring only
-tests/common/mod.rs   test_app() and factories
-tests/users.rs        one file per bounded area
+tests/api/main.rs     the one test binary: `mod common;`, `mod users;`, …
+tests/api/common.rs   test_app() and factories
+tests/api/users.rs    one module per bounded area
 ```
 
-Integration tests reach only `pub` items of a **library** target, so a binary-only crate cannot be integration-tested. Every `.rs` file directly in `tests/` becomes its own test binary, so a `tests/common.rs` shows up as a spurious empty target. Each test file is one more link step, and link time dominates test builds: three to five files per service. nextest forks per test, not per binary, so parallelism is unaffected.
+Integration tests reach only `pub` items of a **library** target, so a binary-only crate cannot be integration-tested. Every `.rs` file directly in `tests/` becomes its own test binary that links the whole dependency graph again, one more link on every library edit: merging the scaffold's four cut that rebuild from about 13 to 7 s. So `tests/` holds one directory, and a new area is a module that reaches the harness as `crate::common`, declared with `mod <area>;` in `tests/api/main.rs`: an undeclared file never compiles, and cargo does not warn. nextest forks per test, not per binary, so parallelism is unaffected. In a project whose `tests/*.rs` each open with `mod common;`, keep that layout: a new area is one more such file, with `mod common;` in place of `use crate::common;`. Propose the merge; do not do it unasked.
 
-`allow-unwrap-in-tests` in `clippy.toml` covers only the body of a `#[test]` function. Any `tests/*.rs` holding helpers, `tests/common/mod.rs` included, opens with the scaffold's attribute: `#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "test helpers")]`.
+`allow-unwrap-in-tests` in `clippy.toml` covers only the body of a `#[test]` function. Any test module holding helpers, `tests/api/common.rs` included, opens with the scaffold's attribute: `#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "test helpers")]`.
 
 ## test_app(): overriding dependencies
 
@@ -58,20 +59,20 @@ pub struct TestApp {
     pub mock: httpmock::MockServer,     // a running stub; give out base_url()
 }
 
-pub async fn test_app() -> TestApp { /* in tests/common/mod.rs */ }
+pub async fn test_app() -> TestApp { /* in tests/api/common.rs */ }
 ```
 
-`test_app()` gives the test a database of its own, cloned from a template the run migrated once, pins the clock to `FixedClock(2026-09-13T12:00:00Z)` so `created_at` is assertable, and starts a `MockServer`: give its `base_url()` to whatever setting the code under test reads for an upstream. Two dependencies swapped, one stub started, nothing global. For how the database is provisioned see `sea-orm-postgres`. A project without `test_app()` copies `tests/common/mod.rs` from the rust-scaffolding template, then adapts `AppState` and the settings map to its own.
+`test_app()` gives the test a database of its own, cloned from a template the run migrated once, pins the clock to `FixedClock(2026-09-13T12:00:00Z)` so `created_at` is assertable, and starts a `MockServer`: give its `base_url()` to whatever setting the code under test reads for an upstream. Two dependencies swapped, one stub started, nothing global. For how the database is provisioned see `sea-orm-postgres`. A project without `test_app()` copies `tests/api/common.rs` from the rust-scaffolding template, then adapts `AppState` and the settings map to its own.
 
 Do **not** add an `Arc<dyn Trait>` to `AppState` to make something swappable: Postgres and outbound HTTP have real local stand-ins.
 
 ## The shape of a test
 
 ```rust,verify,test
-mod common;
-
 use axum::http::StatusCode;
 use serde_json::json;
+
+use crate::common;
 
 #[tokio::test]
 async fn creates_user_returns_201() {
@@ -132,8 +133,8 @@ An underscore-prefixed fixture parameter trips `clippy::used_underscore_binding`
 |---|---|
 | Everything | `cargo nextest run` |
 | One test by name | `cargo nextest run -E 'test(creates_user)'` |
-| One binary, or a regex | `cargo nextest run -E 'binary(users)'`, `-E 'test(/^db_/)'` |
-| Combine | `-E 'binary(users) and not test(slow)'` |
+| One area, or a regex | `cargo nextest run -E 'test(/^users::/)'`, `-E 'test(/::db_/)'` |
+| Combine | `-E 'test(/^users::/) and not test(slow)'` |
 | Include `#[ignore]`d tests | `cargo nextest run --run-ignored all` |
 | See output live, serially | `cargo nextest run --no-capture` |
 | Doctests | `cargo test --doc`; nextest skips them |
@@ -192,4 +193,4 @@ The per-run template, its clone and cleanup are `sea-orm-postgres`'s.
 | `tokio::time::sleep` to wait for background work | await the `JoinHandle` or a oneshot; `start_paused` auto-advances past every timeout on the way to Postgres, so `test_app()` fails at once |
 | Assert on `Utc::now()` output | inject the `Clock`; `Utc::now()` has no hook a test can intercept |
 | `std::env::set_var` to configure a test | build settings from a map; `set_var` is `unsafe` under a forbid lint |
-| Create `tests/common.rs` | `tests/common/mod.rs`; a file directly in `tests/` is its own test binary |
+| Add a file directly under `tests/` | a module in `tests/api/`, declared in `main.rs`; each file in `tests/` is one more binary to link |

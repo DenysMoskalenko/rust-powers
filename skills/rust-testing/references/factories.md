@@ -18,7 +18,7 @@ Test data comes from two crates, not one: `fake` supplies random-but-valid value
 | A row with one meaningful field | a `bon::Builder` factory whose defaults come from fake |
 | A value an assertion depends on | a literal, or a seeded RNG |
 
-The factory below is shown inline in the test file; move it to `tests/common/mod.rs` beside `test_app()` when a second file needs it. If unit tests need it too, put it behind `#[cfg(test)] pub mod factories` in the library instead.
+The factory below is shown inline in the test file; move it to `tests/api/common.rs` beside `test_app()` when a second module needs it. If unit tests need it too, put it behind `#[cfg(test)] pub mod factories` in the library instead.
 
 ## fake: any valid instance
 
@@ -63,8 +63,6 @@ fn faker_fills_every_field_with_something_valid() {
 `#[builder(default = expr)]` is evaluated at `build()` time, so every call gets fresh data rather than one value shared across the suite. The factory holds plain fields and converts at the end, which keeps one factory usable for both an HTTP payload and an `ActiveModel`.
 
 ```rust,verify,test
-mod common;
-
 use app::entities::user;
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
@@ -73,6 +71,8 @@ use fake::faker::internet::en::SafeEmail;
 use fake::faker::name::en::Name;
 use sea_orm::{ActiveModelTrait, Set};
 use uuid::Uuid;
+
+use crate::common;
 
 #[derive(Debug, Clone, bon::Builder)]
 #[builder(start_fn = user, finish_fn = build)]
@@ -126,8 +126,6 @@ Seed rows through the database or the service, not through the endpoint under te
 Seed the RNG when a failure has to reproduce byte for byte: the same seed yields the same payload on every machine, so the request that failed can be replayed. The assertion still compares the response with the payload the test sent, never one helper call with another.
 
 ```rust,verify,test
-mod common;
-
 use axum::http::StatusCode;
 use fake::faker::internet::en::SafeEmail;
 use fake::faker::name::en::Name;
@@ -135,6 +133,8 @@ use fake::{Dummy, Fake, Faker};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use serde::Serialize;
+
+use crate::common;
 
 #[derive(Debug, Clone, Dummy, Serialize)]
 struct SignupPayload {
@@ -170,11 +170,11 @@ fake 5.1 is built on rand 0.10, so the dev-dependency must be `rand = "0.10"`. r
 `#[case]` is the tuple form and `#[values]` the cartesian product. Name every case: nextest reports them as `create_user_rejects_bad_email::case_1_missing_at`, while generated `#[values]` names are unreadable.
 
 ```rust,verify,test
-mod common;
-
 use axum::http::StatusCode;
 use rstest::{fixture, rstest};
 use serde_json::json;
+
+use crate::common;
 
 #[fixture]
 async fn app() -> common::TestApp {

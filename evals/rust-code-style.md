@@ -126,7 +126,9 @@
 
 ### Probe 5 - converting test helpers to expect
 
-**Prompt**: "Our style guide says `#[expect]` replaces `#[allow]`. Convert the `#![allow(...)]` attributes under `tests/` to `#![expect(...)]`."
+**Prompt**: "Each file in our `tests/` is its own test binary, and they share `tests/common/mod.rs`. Our style guide says `#[expect]` replaces `#[allow]`. Convert the `#![allow(...)]` attributes under `tests/` to `#![expect(...)]`."
+
+**Fixture**: empty
 
 **Wrong answer**: `(?:^|\n)[ \t]*#!\[expect\(\s*dead_code`
 

@@ -2,7 +2,7 @@
 name: rust-redis
 description: "Use when caching or coordinating through Redis in an axum service with redis-rs — ConnectionManager setup, cache-aside and TTLs, serde values, invalidation, SCAN over KEYS, pipelines, Lua scripts, distributed locks and leases, rate limiting as an axum layer, idempotency keys, testcontainers Redis. Also for Connection refused, NOSCRIPT, WRONGTYPE, the trait bound FromRedisValue is not satisfied, multiple applicable items in scope. Not for pub/sub, queues or events (rust-nats), nor transactional exclusion with advisory locks (sea-orm-postgres)."
 metadata:
-  version: "0.3.0"
+  version: "0.3.1"
 ---
 
 # Redis with redis-rs
@@ -171,7 +171,7 @@ the server is not answering: warn, count, degrade to a miss. Anything else is a 
 Readiness is `axum-service`'s: `/health/ready` returns `{ "status", "checks": { .. } }` and the
 status rule. This skill adds one entry, `"cache"`, from one `PING`: `Health::Ok`, else
 `Health::Degraded` — an optional dependency, so the probe stays 200. Adding it changes the body
-`tests/health.rs` asserts.
+`tests/api/health.rs` asserts.
 
 ## SCAN, pipelines, scripts
 

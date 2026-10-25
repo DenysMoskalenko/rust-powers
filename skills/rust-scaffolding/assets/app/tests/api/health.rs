@@ -2,11 +2,10 @@
 //! handler that grows a real query stops being a probe and starts being an outage.
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test helpers")]
 
-mod common;
-
 use axum::http::StatusCode;
-use common::test_app;
 use serde_json::json;
+
+use crate::common::test_app;
 
 #[tokio::test]
 async fn liveness_is_ok_and_touches_nothing() {

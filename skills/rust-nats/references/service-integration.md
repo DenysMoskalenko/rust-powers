@@ -596,7 +596,7 @@ messages the worker had not reached are redelivered after `ack_wait`.
 `GET /health/ready`, its body `{ "status", "checks": { "<name>": .. } }` and the rule that only a
 required dependency turns the probe into a 503 are `axum-service`'s. This skill may add one entry
 to the `checks` map: `"messaging"`, from `readiness(&state.nats)` above — optional, and only once
-the client is in `AppState`. Adding it changes the `/health/ready` body, which `tests/health.rs`
+the client is in `AppState`. Adding it changes the `/health/ready` body, which `tests/api/health.rs`
 asserts verbatim, so that test changes in the same commit. It reads
 `client.connection_state()` — local, synchronous, no round trip — because a probe that does a round
 trip turns a NATS hiccup into every replica leaving rotation at once. With

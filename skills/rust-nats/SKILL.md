@@ -2,7 +2,7 @@
 name: rust-nats
 description: "Use when publishing or consuming NATS messages, or when events or background work must survive a restart — event bus, pub/sub or durable work queue on async-nats: subjects, request-reply, queue groups, JetStream streams and durable pull consumers, Nats-Msg-Id deduplication, ack, nak and term, dead-letter and poison messages, KV buckets, flaky NATS tests under nextest. Also for no responders, consumer deleted, timed out, MAX_DELIVERIES. Not for Redis caching (rust-redis), nor the readiness endpoint itself (axum-service)."
 metadata:
-  version: "0.2.1"
+  version: "0.2.2"
 ---
 
 # NATS with async-nats
@@ -221,7 +221,7 @@ site (`.map_err(messaging_error)?`) onto the canonical variants — `AppError` i
 `/health/ready` is `axum-service`'s: it returns `{ "status", "checks": { .. } }` and the status
 rule. This skill may add one entry, `"messaging"`: `Health::Ok` when `client.connection_state()`
 is `Connected` (local, no round trip), else `Health::Degraded` — optional, so the probe stays 200.
-Adding it changes the body `tests/health.rs` asserts.
+Adding it changes the body `tests/api/health.rs` asserts.
 
 ## Envelopes, idempotency, telemetry
 

@@ -7,7 +7,7 @@
 1. "how do I freeze time in the axum service tests so I can assert on `created_at` in the POST /users response?"
 2. "I need lots of valid users in tests, random except for the one field each test checks. what's the pattern in this repo?"
 3. "getting `error[E0599]: no method named `unwrap` found for struct `TestServer`` on every api test after bumping axum-test, what changed"
-4. "tests/users.rs passes when I run it alone and fails under `cargo nextest run`. looks like one test sees rows another one created"
+4. "tests/api/users.rs passes when I run it alone and fails under `cargo nextest run`. looks like one test sees rows another one created"
 5. "in tests, how do I point the app at a throwaway database and a stub for the billing API instead of the real ones?"
 6. "write the first tests for our new `GET /orders` endpoint"
 7. "every API test takes about a second under nextest on my mac, even the liveness one. where does the time go?"
@@ -28,10 +28,10 @@
 
 **Prompt**: "Add integration tests for POST /users: success, duplicate email, and an invalid email address."
 
-The fixture's `tests/users.rs` already has the 201 and duplicate-409 tests, so a good answer adds only the third.
+The fixture's `tests/api/users.rs` already has the 201 and duplicate-409 tests, so a good answer adds only the third.
 
 **Must produce**:
-- says the success and duplicate cases already exist in `tests/users.rs` and adds only the invalid-email case there
+- says the success and duplicate cases already exist in `tests/api/users.rs` and adds only the invalid-email case there
 - the new test starting from `test_app().await`
 - requests sent through `app.server.post("/users").json(&..)`
 - every response's status asserted before its body is read, follow-up reads (such as a `GET /users` after the POST) included
@@ -42,12 +42,12 @@ The fixture's `tests/users.rs` already has the 201 and duplicate-409 tests, so a
 - `sea_orm::MockDatabase`
 - a mock of the service or repository layer
 - `TestServer::new(app).unwrap()`
-- `tests/common.rs`
+- a new file directly under `tests/`, such as `tests/users_validation.rs`
 - a hand-rolled `reqwest` client against a bound port
 
 ### Eval 2 - stabilising a flaky test
 
-**Prompt**: This test in `tests/users.rs` is flaky on CI. Make it deterministic: `#[tokio::test] async fn lists_newest_user_first() { let app = common::test_app().await; app.server.post("/users").json(&json!({ "email": "ada@example.com", "name": "Ada" })).await; let db = app.state.db.clone(); tokio::spawn(async move { user::ActiveModel { id: Set(Uuid::now_v7()), email: Set("grace@example.com".to_owned()), name: Set("Grace".to_owned()), created_at: Set(Utc::now().into()) }.insert(&db).await.unwrap() }); tokio::time::sleep(Duration::from_millis(200)).await; let page = app.server.get("/users").await.json::<serde_json::Value>(); assert_eq!(page["items"][0]["email"], "grace@example.com"); assert_eq!(page["items"][0]["created_at"], json!(Utc::now())); }`
+**Prompt**: This test in `tests/api/users.rs` is flaky on CI. Make it deterministic: `#[tokio::test] async fn lists_newest_user_first() { let app = common::test_app().await; app.server.post("/users").json(&json!({ "email": "ada@example.com", "name": "Ada" })).await; let db = app.state.db.clone(); tokio::spawn(async move { user::ActiveModel { id: Set(Uuid::now_v7()), email: Set("grace@example.com".to_owned()), name: Set("Grace".to_owned()), created_at: Set(Utc::now().into()) }.insert(&db).await.unwrap() }); tokio::time::sleep(Duration::from_millis(200)).await; let page = app.server.get("/users").await.json::<serde_json::Value>(); assert_eq!(page["items"][0]["email"], "grace@example.com"); assert_eq!(page["items"][0]["created_at"], json!(Utc::now())); }`
 
 **Must produce**:
 - the `tokio::time::sleep` replaced by awaiting the background task's `JoinHandle` or a oneshot it signals, or by doing the work inline before the request
@@ -71,7 +71,7 @@ The fixture's `tests/users.rs` already has the 201 and duplicate-409 tests, so a
 - a `bon::Builder` struct with `#[builder(default = ..)]` defaults drawn from `fake` fakers
 - a conversion into `ActiveModel` (or the DTO)
 - rows inserted through the database, not through the endpoint under test
-- placement in `tests/common/mod.rs`
+- placement in `tests/api/common.rs`
 - a note that any field an assertion depends on is overridden explicitly or seeded
 
 **Must not produce**:
@@ -151,3 +151,11 @@ Reasoning check only: the scaffold has no such endpoint or upstream setting, so 
 **Wrong answer**: `\bset_var\s*\(\s*"APP__`
 
 **Right answer**: `from_map\(|HashMap::from\(`
+
+### Probe 6 - a new test area
+
+**Prompt**: "Add API tests for the new `/orders` resource: create, fetch by id, and a 404 for an unknown id. Put them in their own file."
+
+**Wrong answer**: `(?:^|\n)[ \t]*mod common;[ \t]*\n\s*(?:use |#!?\[|(?:pub )?(?:async )?fn )`
+
+**Right answer**: `(?:^|\n)[ \t]*mod orders;`

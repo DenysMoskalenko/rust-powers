@@ -27,7 +27,7 @@ Everything pinned, and where it lives:
 | crate versions | STACK.md `## Cargo.toml` block, add-when-needed comments included; its mirror `skills/rust-scaffolding/assets/app/Cargo.toml` (validator-enforced); `migration/Cargo.toml` (`tokio`, `sea-orm-migration`) drifts silently, check by hand |
 | toolchain | `rust-toolchain.toml` channel, `rust-version` in both scaffold `Cargo.toml` files, the cargo-chef tag in the scaffold `Dockerfile` (channel patch included); mirrored in `rust-tooling/references/docker.md`, `configs.md` and STACK.md |
 | Docker images | scaffold `docker-compose.yml` (postgres, otel-collector), `ci.yml` service, `Dockerfile` runtime `debian:trixie-slim`; `rust-tooling/references/docker.md` and `ci.md`, optional redis and nats blocks too |
-| testcontainers tags | `grep -rn 'with_tag' skills/`: scaffold `tests/common/mod.rs`, the `testing-*.md` references of `sea-orm-postgres`, `rust-redis`, `rust-nats`, and the SKILL.md sentences quoting them |
+| testcontainers tags | `grep -rn 'with_tag' skills/`: scaffold `tests/api/common.rs`, the `testing-*.md` references of `sea-orm-postgres`, `rust-redis`, `rust-nats`, and the SKILL.md sentences quoting them |
 | cargo tools | scaffold `Makefile` `install-tools`, `.config/nextest.toml` `nextest-version`; versions in STACK.md `### Tooling` and the `rust-tooling` pin line |
 | GitHub Actions | `.github/workflows/check.yml`, scaffold `.github/workflows/ci.yml`, `rust-tooling/references/ci.md` (block and `## Action versions`) |
 | prek hooks | `rev:` in both `.pre-commit-config.yaml` files, STACK.md, `rust-tooling/references/configs.md` |

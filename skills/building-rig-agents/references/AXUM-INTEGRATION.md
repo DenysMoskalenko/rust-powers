@@ -704,11 +704,12 @@ so a clone is your probe — assert `probe.request_count() == 0` on a rejected b
 validation ran *before* the paid call.
 
 The inline `mod tests` above builds a router with only the agent in state. In the scaffold the
-tests live in `tests/chat.rs` behind `test_app()`, so `tests/common/mod.rs` gains one sibling
-that takes the model; everything else in it is unchanged:
+tests live in `tests/api/chat.rs`, declared with `mod chat;` in `tests/api/main.rs`, behind
+`test_app()`, so `tests/api/common.rs` gains one sibling that takes the model; everything else in
+it is unchanged:
 
 ```rust
-// tests/common/mod.rs delta
+// tests/api/common.rs delta
 use rig::DynModel;
 use rig::agent::AgentBuilder;
 use rig::operation::Completion;

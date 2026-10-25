@@ -217,12 +217,9 @@ turns "is it N+1?" into an assertion that survives refactors; a request that log
 `SELECT ... WHERE "user_id" = $1` fifty times has the answer in the log.
 
 ```rust,verify,test
-mod common;
-
 use std::sync::{Arc, Mutex};
 
 use app::entities::{post, user};
-use common::{frozen_now, test_app};
 use sea_orm::{
     ActiveModelTrait as _, ActiveValue::Set, ConnectOptions, ConnectionTrait, Database, DbErr,
     EntityTrait, LoaderTrait as _,
@@ -231,6 +228,8 @@ use secrecy::ExposeSecret as _;
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt as _};
 use uuid::Uuid;
+
+use crate::common::{frozen_now, test_app};
 
 /// The function under test: the parents, then one batched `IN` over the children.
 async fn users_and_posts<C: ConnectionTrait>(

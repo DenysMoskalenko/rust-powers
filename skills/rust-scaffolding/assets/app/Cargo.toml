@@ -13,9 +13,12 @@ members = ["migration"]   # created by `sea-orm-cli migrate init`
 [lints]
 workspace = true
 
-# Dependencies compile without debuginfo: target/ is about a third smaller and
-# links faster. Your own crates keep full debuginfo, so backtraces into them still
-# carry line numbers.
+# Backtraces need only line tables, so your crates keep those and dependencies
+# keep no debuginfo: target/ is smaller and links faster. For a debugger session
+# that inspects variables, build with CARGO_PROFILE_DEV_DEBUG=true.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
 debug = false
 
