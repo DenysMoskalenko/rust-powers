@@ -143,7 +143,9 @@ An independent, fresh-context review of the diff against the inventory table: ev
 has exactly one edit, no edit lacks a row. Show the complete diff; the pull request opens only on
 the owner's explicit approval, its body the inventory table plus what was verified. After merge, tag
 `rust-powers--vX.Y.Z` matching the manifests (`claude plugin tag --push`, the name Claude Code's
-dependency resolution looks for) and update the `Decided` and `Re-validated on` date lines in STACK.md.
+dependency resolution looks for). The `Re-validated on` line is set in the release pull request itself
+(section 4, step 1); `Decided` at the top of STACK.md changes only in a pull request that adds,
+replaces or rejects a pick.
 
 ## Red Flags — STOP
 
