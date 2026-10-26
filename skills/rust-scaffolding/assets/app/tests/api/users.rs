@@ -2,12 +2,11 @@
 //! the three rejections that answer before the handler ever runs.
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test helpers")]
 
-mod common;
-
 use axum::http::StatusCode;
-use common::{frozen_now, test_app};
 use serde_json::json;
 use uuid::Uuid;
+
+use crate::common::{frozen_now, test_app};
 
 #[tokio::test]
 async fn create_user_returns_201_and_the_created_row() {

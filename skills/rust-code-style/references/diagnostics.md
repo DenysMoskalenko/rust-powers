@@ -127,6 +127,6 @@ async fn refresh(state: &State, key: String) -> std::io::Result<()> {
 ## Gotchas
 
 - `await_holding_lock` only catches bound guards, so a clean clippy run is not proof the rule held.
-- `allow-unwrap-in-tests` covers only the body of a `#[test]` or `#[tokio::test]` function. A helper in the same file, `tests/common/mod.rs` included, still warns. Such a file needs `#![allow(clippy::unwrap_used, clippy::expect_used, reason = "test helpers")]`; a bare `#![allow(..)]` with no reason trips `allow_attributes_without_reason`.
+- `allow-unwrap-in-tests` covers only the body of a `#[test]` or `#[tokio::test]` function. A helper in the same file, `tests/api/common.rs` included, still warns. Such a file needs `#![allow(clippy::unwrap_used, clippy::expect_used, reason = "test helpers")]`; a bare `#![allow(..)]` with no reason trips `allow_attributes_without_reason`.
 - An unknown lint name in the `[lints]` table stays a warning even under `-D warnings`, so a typo there silently does nothing: after editing the table, read the first lines of `cargo clippy` for `unknown lint`.
 - Fixing a lint by deleting the code it complains about is usually right. Fixing it with an attribute is only right when the reason string would convince a reviewer.

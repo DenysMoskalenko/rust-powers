@@ -2,7 +2,7 @@
 name: rust-code-style
 description: "Use when writing or reviewing Rust for an axum or tokio backend service — ownership and cloning, thiserror versus anyhow, no-panic rules, newtypes, derive_more and strum, async discipline, module layout, dependency injection. Also for E0502, E0499, a clone added to satisfy the borrow checker, future cannot be sent between threads safely, or a clippy finding in code such as ptr_arg or needless_pass_by_value. Not for lint configuration (rust-tooling), framework patterns (axum-service), or tests (rust-testing)."
 metadata:
-  version: "0.2.1"
+  version: "0.2.2"
 ---
 
 # Rust Code Style
@@ -99,7 +99,7 @@ Iterators over index loops; past four chained adaptors, a `for` loop (*house*).
 
 `main.rs` is thin: everything testable lives in `lib.rs` and below, because integration tests can only import the lib target. For the service tree and the one-ORM-statement-per-handler rule see `axum-service`.
 
-`foo.rs` beside `foo/` for modules you write by hand, never mixed with `mod.rs` at one level (*house*). `mod.rs` where a generator or a convention fixes it: `tests/common/` (cargo), generated `src/entities/` (sea-orm-cli), `src/api/` (*house*). No `utils.rs`, `helpers.rs` or `types.rs`, and no crate-wide prelude (*house*): a `prelude::*` makes every file's dependencies invisible. Imports in three blocks — std, external crates, then `crate` (*house*; rustfmt does not enforce it).
+`foo.rs` beside `foo/` for modules you write by hand, never mixed with `mod.rs` at one level (*house*). `mod.rs` where a generator or a convention fixes it: `tests/common/` beside one test binary per file (cargo), generated `src/entities/` (sea-orm-cli), `src/api/` (*house*). No `utils.rs`, `helpers.rs` or `types.rs`, and no crate-wide prelude (*house*): a `prelude::*` makes every file's dependencies invisible. Imports in three blocks — std, external crates, then `crate` (*house*; rustfmt does not enforce it).
 
 Three visibility levels only: private, `pub(crate)`, `pub`. No `pub(super)` or `pub(in path)` (*house*): moving the module silently changes the caller set. Never widen visibility for a test. A new workspace crate needs a second consumer.
 
@@ -122,7 +122,7 @@ Fix the finding rather than silencing it. A justified suppression is `#[expect(l
 ## Valid Patterns — Do Not Flag
 
 - `#[expect(clippy::expect_used, reason = "...")]` on an item whose `expect` cannot fail, and `unwrap` or `expect` under `cfg(test)` or in `tests/`.
-- `#![allow(lint, reason = "...")]` in a file several targets compile, such as `tests/common/mod.rs`, when the lint fires in only some: `#![expect]` there fails as unfulfilled.
+- `#![allow(lint, reason = "...")]` where `#![expect]` would go unfulfilled: a file several targets compile when the lint fires in only some (a `tests/common/mod.rs` shared by per-file test binaries, a library module `--all-targets` also builds under `cfg(test)`), or a test module whose lint-tripping helpers come and go.
 - A `match` with one arm per variant and no `_` arm — exhaustiveness is the point.
 - A module named after its type (`user::User`).
 - A bare `Uuid` id in an entity, a `Path<Uuid>`, a DTO, or a function taking one id.

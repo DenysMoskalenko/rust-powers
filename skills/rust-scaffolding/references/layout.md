@@ -40,11 +40,12 @@ migration/
   src/lib.rs             the Migrator and its list of migrations
   src/main.rs            the binary sea-orm-cli migrate runs
   src/m2026...rs         one file per schema change
-tests/
-  common/mod.rs          test_app(): a clone of the run's migrated template, frozen clock, mock server
+tests/api/
+  main.rs                the one test binary: a `mod` line per file below
+  common.rs              test_app(): a clone of the run's migrated template, frozen clock, mock server
   health.rs              the probes and both router fallbacks
   migrations.rs          every migration rolled back and applied again
-  panic.rs               the catch-panic layer, wired in its own binary
+  panic.rs               the catch-panic layer, wired around a panicking route of its own
   users.rs               the cases that prove the wiring
 ```
 
@@ -77,5 +78,6 @@ the shutdown order are `axum-service`'s; this file only says which file holds ea
 | A schema change | a new file in `migration/src/`, then `make migrate` and `make entity` |
 | A new middleware | `build_router` in `src/lib.rs` |
 | A new timeout | `src/config.rs`, next to the other four |
-| A new test helper | `tests/common/mod.rs` |
+| A new test helper | `tests/api/common.rs` |
+| A new test area | a new `tests/api/<area>.rs` plus `mod <area>;` in `tests/api/main.rs` |
 | A new configuration file or CI job | see `rust-tooling` |

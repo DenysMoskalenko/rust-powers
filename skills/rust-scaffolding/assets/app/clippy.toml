@@ -2,7 +2,7 @@
 
 # `unwrap_used` / `expect_used` stay on for src/, off inside test functions.
 # NOTE: this covers the body of a `#[test]` fn only. A helper in
-# tests/common/mod.rs still warns and needs its own `#![allow(...)]`.
+# tests/api/common.rs still warns and needs its own `#![allow(...)]`.
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true

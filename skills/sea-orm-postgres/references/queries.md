@@ -580,11 +580,11 @@ after a success no-ops. The same try-lock is how a test proves
 the lock without a race: the second transaction cannot take it until the first commits.
 
 ```rust,verify,test
-mod common;
-
 use sea_orm::{
     ConnectionTrait, DatabaseTransaction, DbErr, TransactionSession, TransactionTrait, raw_sql,
 };
+
+use crate::common;
 
 async fn try_lock(txn: &DatabaseTransaction, key: &str) -> Result<bool, DbErr> {
     txn.query_one_raw(raw_sql!(

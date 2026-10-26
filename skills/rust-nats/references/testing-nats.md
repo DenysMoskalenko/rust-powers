@@ -61,8 +61,8 @@ subscription that never yields hangs the whole run.
 
 ## The harness and the tests
 
-In a real suite the harness is `tests/common/mod.rs` and every test binary opens with
-`mod common;`. It is shown inline so the file is complete.
+In a real suite the harness lives in `tests/api/common.rs` and each test module reaches it with
+`use crate::common;`. It is shown inline so the file is complete.
 
 ```rust,verify,test
 #![allow(

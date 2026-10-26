@@ -11,11 +11,11 @@ Every value that varies per run must be redacted, or the snapshot fails on the n
 ```rust,verify,test
 #![allow(clippy::unwrap_used, reason = "test helpers")]
 
-mod common;
-
 use axum::http::StatusCode;
 use insta::assert_json_snapshot;
 use serde_json::json;
+
+use crate::common;
 
 #[tokio::test]
 async fn create_user_response_shape() {
@@ -36,11 +36,11 @@ async fn create_user_response_shape() {
 }
 ```
 
-That writes `tests/snapshots/<binary>__create_user_response_shape.snap`, which is committed and reviewed like any other file:
+In `tests/api/users.rs` that writes `tests/api/snapshots/api__users__create_user_response_shape.snap`, which is committed and reviewed like any other file:
 
 ```text
 ---
-source: tests/users.rs
+source: tests/api/users.rs
 expression: "response.json::<serde_json::Value>()"
 ---
 {

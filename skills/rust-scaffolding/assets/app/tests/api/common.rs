@@ -1,10 +1,8 @@
-//! Shared test setup.
-//!
-//! `tests/common/mod.rs`, NOT `tests/common.rs`: every `.rs` directly in
-//! `tests/` is compiled as its own test binary, so `tests/common.rs` would show
-//! up as an empty test target. A subdirectory module is only compiled by the
-//! binaries that declare `mod common;`.
-#![allow(dead_code, reason = "each test binary compiles the whole file")]
+//! Shared test setup, reached from every area as `crate::common`.
+#![allow(
+    dead_code,
+    reason = "which helpers go unused changes as tests are added, so #![expect] would go unfulfilled"
+)]
 // `clippy.toml`'s allow-unwrap-in-tests covers the body of a `#[test]` function
 // only. Helpers like these still warn without an explicit allow.
 #![allow(

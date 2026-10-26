@@ -64,6 +64,12 @@ Rules that keep the cache working:
 - Install the tool with `cargo install cargo-chef --locked --version 0.1.78` when building on a plain
   `rust:` image yourself; the chef image ships the same version.
 
+Every change to `Cargo.toml` or `Cargo.lock` leaves the previous `cargo chef cook` layer behind, up to about
+1 GB each for a service on this stack, and BuildKit keeps unused cache until it passes
+`builder.gc.defaultKeepStorage`: 20 GB in Docker Desktop's default `daemon.json`. Lower it under Settings →
+Docker Engine (`"defaultKeepStorage": "5GB"`), or reclaim on demand with `docker builder prune`;
+`--filter until=168h` keeps the last week.
+
 `ENV APP__SERVER__HOST=0.0.0.0` restates the settings default (`ServerSettings::default()` is already
 `0.0.0.0`). It is belt and braces: a deployment that sets `APP__SERVER__HOST=127.0.0.1` for a local run and
 then ships the image publishes a dead port, and the `ENV` line is where the next person looks first.

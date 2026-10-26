@@ -92,7 +92,7 @@
 - `testcontainers` with `reusable-containers` as a dev-dependency next to `testcontainers-modules` with `postgres`.
 - A retry around `start()` for the cold-start 409 race, and for that error only.
 - A retry around the first connection.
-- The helper placed in `tests/common/mod.rs` as the database half of `test_app()`.
+- The helper placed in `tests/api/common.rs` as the database half of `test_app()`.
 - `clippy::unwrap_used` and `clippy::expect_used` allowed in that helper file with a reason.
 - `docker rm -f` of that container named as the recovery for a wedged reused container.
 

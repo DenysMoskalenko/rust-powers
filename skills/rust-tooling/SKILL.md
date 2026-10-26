@@ -2,7 +2,7 @@
 name: rust-tooling
 description: "Use when changing or debugging the tooling of an existing Rust service — rust-toolchain.toml, cargo add, upgrading one dependency, the lockfile, the workspace lints table or a member clippy skips, clippy.toml, rustfmt.toml, nextest, llvm-cov and the coverage gate, cargo-deny, cargo-machete, bacon, prek or pre-commit hooks, the Makefile, a Dockerfile rebuilding every dependency, docker-compose, CI recompiling, target/ size, unknown lint warnings. Not for a new repository (rust-scaffolding), one clippy finding (rust-code-style), or what coverage measures (rust-testing)."
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
 ---
 
 # Rust Tooling
@@ -25,14 +25,15 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
 ## References
 
 - `references/configs.md` — every configuration file verbatim, identical to the template's, with the
-  reasoning inline. Open it before creating or editing `rust-toolchain.toml`, the `[workspace.lints]` table,
+  reasoning inline, and why `target/` grows. Open it when `target/` is large, and before creating or
+  editing `rust-toolchain.toml`, the `[workspace.lints]` table,
   `clippy.toml`, `rustfmt.toml`, `.config/nextest.toml`, `deny.toml`, `bacon.toml`,
   `.pre-commit-config.yaml` or the Makefile.
 - `references/ci.md` — the GitHub Actions workflow, the toolchain step, the RUSTFLAGS and cache-key trap, the
   Postgres service container and the optional Redis and NATS ones. Open it when adding or debugging a CI job.
 - `references/docker.md` — the cargo-chef Dockerfile, `.dockerignore`, release profile, base image choice and
-  docker-compose with the optional Redis and NATS services. Open it when containerising the service or
-  running dependencies locally.
+  docker-compose with the optional Redis and NATS services. Open it when containerising the service,
+  running dependencies locally, or when Docker's build cache fills the disk.
 
 ## Quick reference
 
@@ -46,7 +47,7 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
 | Find duplicate versions | `cargo tree -d` |
 | Install the cargo tools | `make install-tools` |
 | Run the hooks over everything | `prek run --all-files` |
-| Reclaim disk from `target/` | `cargo clean`; deps build without debuginfo (`references/configs.md`) |
+| `target/` keeps growing | `cargo clean`; the cap and its causes are in `references/configs.md` |
 
 ## Toolchain
 
@@ -59,8 +60,11 @@ toolchain names literally: a `"1.99"` channel is a second toolchain, downloaded 
 versions that build on it, so an MSRV set too low silently holds dependencies back; the lock step prints
 `(available: vX, requires Rust Y)` and moves on.
 
-Bumping the toolchain is a lint bump: edit the channel and the chef image tag in one commit, run
-`cargo clippy --workspace --all-targets --all-features -- -D warnings`, fix whatever the new clippy added.
+Bumping the toolchain is a lint bump: edit the channel and the chef image tag in one commit, `cargo clean`
+first unless the target directory is shared, since the new toolchain rebuilds everything beside the old
+artifacts and nothing deletes them, then run
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` and fix whatever the new clippy added.
+Tell the user the previous toolchain can go with `rustup toolchain uninstall` once no other checkout pins it.
 
 ## Dependencies and the lockfile
 
@@ -111,8 +115,8 @@ slow-timeout and JUnit output; select it with `-P ci`. The JUnit file lands in `
 relative to the profile store dir rather than the repository root.
 
 There is no `[test-groups]` entry: each test owns a private database, so a concurrency cap only serializes
-tests that never contend. A `filter = 'binary(name)'` override is validated at config-parse time, and a name
-matching no test binary makes every nextest command fail.
+tests that never contend. Scope an override to an area by module, `test(/^users::/)`: the one test binary is
+`api`, and a `binary(name)` filter naming no test binary makes every nextest command fail.
 
 nextest cannot run doctests, so `make test` runs `cargo test --doc` as a second step. `make test` and
 `make cov` export `TEST_RUN` to name the run's test databases and drop them after a pass; export it nowhere

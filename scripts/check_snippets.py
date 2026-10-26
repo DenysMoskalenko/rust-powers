@@ -5,7 +5,8 @@ Stdlib only, Python 3.11+.
 
   ```rust,verify        -> verify/src/bin/<skill>_<file>_<n>.rs   (cargo check + clippy)
                            (blocks mentioning sea_orm_migration go to verify/migration/src/bin/)
-  ```rust,verify,test   -> verify/tests/<skill>_<file>_<n>.rs     (cargo nextest run)
+  ```rust,verify,test   -> verify/tests/api/<skill>_<file>_<n>.rs (cargo nextest run)
+                           (a module of the scaffold's one test binary, declared in its main.rs)
   ```rust,ignore        -> deliberately non-compiling, skipped
   ```rust               -> fragment, skipped
 
@@ -34,6 +35,7 @@ VERIFY = ROOT / "verify"
 
 BIN_TAG = "rust,verify"
 TEST_TAG = "rust,verify,test"
+TEST_DIR = "tests/api"
 IGNORE_TAG = "rust,ignore"
 FRAGMENT_TAG = "rust"
 
@@ -162,7 +164,8 @@ def is_migration(block: Block) -> bool:
 
 def render(block: Block) -> str:
     root_crate = "migration" if is_migration(block) else "app"
-    code = block.code.replace("crate::", f"{root_crate}::")
+    # In a test module `crate::common` is the test binary's own harness, not the scaffold crate.
+    code = re.sub(r"\bcrate::(?!common\b)", f"{root_crate}::", block.code)
     out = allow_prefix(code) + code
     if not out.endswith("\n"):
         out += "\n"
@@ -249,7 +252,7 @@ def main() -> int:
 
     if args.dry_run:
         for b in blocks:
-            print(f"{b.origin}  ->  {'tests' if b.kind == 'test' else 'src/bin'}/{b.stem}.rs")
+            print(f"{b.origin}  ->  {TEST_DIR if b.kind == 'test' else 'src/bin'}/{b.stem}.rs")
         if not ASSETS.is_dir():
             print(f"\nnote: {ASSETS.relative_to(ROOT)} does not exist yet, so a full run is not possible.")
         return 0
@@ -266,12 +269,15 @@ def main() -> int:
         shutil.rmtree(VERIFY)
     shutil.copytree(ASSETS, VERIFY)
     (VERIFY / "src" / "bin").mkdir(parents=True, exist_ok=True)
-    (VERIFY / "tests").mkdir(parents=True, exist_ok=True)
 
     (VERIFY / "migration" / "src" / "bin").mkdir(parents=True, exist_ok=True)
+    test_main = VERIFY / TEST_DIR / "main.rs"
     for b in blocks:
         if b.kind == "test":
-            sub = "tests"
+            sub = TEST_DIR
+            with test_main.open("a", encoding="utf-8") as f:
+                # `pub`, so a snippet's pub items stay exported API, as they were at a crate root.
+                f.write(f"pub mod {b.stem};\n")
         elif is_migration(b):
             sub = "migration/src/bin"
         else:

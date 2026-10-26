@@ -90,8 +90,9 @@ directory inside a skill.
 - ` ```rust,verify ` - a complete, self-contained item set, imports included. Extracted to a
   bin, compiled, and linted. It may refer to the scaffold crate as `crate::...`; the
   extractor rewrites that to `app::...`.
-- ` ```rust,verify,test ` - a complete test file body. Extracted to an integration test and
-  run. It may `mod common;` to reach `test_app()`.
+- ` ```rust,verify,test ` - a complete test module body. Extracted as a module of the
+  scaffold's one test binary, `tests/api/`, and run. It may `use crate::common;` to reach
+  `test_app()`; any other `crate::` path is rewritten to `app::...` as above.
 - ` ```rust,ignore ` - deliberately non-compiling: bad examples and counter-examples.
 - ` ```rust ` - a fragment. Not extracted and not verified, so keep fragments short and push
   anything load-bearing into a tagged block.
@@ -155,7 +156,7 @@ that ref without a version bump (CI passes the pull request's base branch).
 
 `make snippets` runs `scripts/check_snippets.py`: it deletes and regenerates `verify/` as a
 copy of `skills/rust-scaffolding/assets/app/`, writes every `rust,verify` block into
-`verify/src/bin/` and every `rust,verify,test` block into `verify/tests/`, appends the
+`verify/src/bin/` and every `rust,verify,test` block into `verify/tests/api/` as a module, appends the
 add-when-needed crates to `verify/Cargo.toml`, then runs `cargo check --workspace
 --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings`, and
 `cargo nextest run --workspace`. When cargo fails it prints which `skill/file.md:line` the

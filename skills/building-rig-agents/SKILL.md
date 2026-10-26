@@ -2,7 +2,7 @@
 name: building-rig-agents
 description: "Use when adding an LLM, assistant, or chatbot endpoint to an axum service, or building, testing, or debugging rig agents against OpenAI, Anthropic or Gemini — AgentBuilder, tools, structured extraction, streaming, RAG, conversation history, MCP tools via rmcp, mapping PromptError onto AppError. Also for max turns limit errors (MaxTurnsError), rig-core versus rig, or E0599 no method named agent. Not for SSE framing or routes (axum-service), nor rate limits or caching around the model call (rust-redis)."
 metadata:
-  version: "0.4.0"
+  version: "0.4.1"
 ---
 
 # Building AI Agents with Rig
