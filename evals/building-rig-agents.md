@@ -100,7 +100,7 @@
 - A `#[ignore]`d test.
 - A hand-written mock model (`impl Wire`, or the removed `CompletionModel` trait) when `rig::test_utils` covers it.
 
-### Eval 4 - every user shares one history
+### Eval 4 - one user sees another user's history
 
 **Prompt**: "Our support agent is built with `.name(\"support\").memory(MemoryStore::default())` and `POST /chat` calls `agent.prompt(body.message).max_turns(3).await?`. Users now see other users' earlier messages in the answers."
 
