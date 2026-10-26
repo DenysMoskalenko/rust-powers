@@ -3,7 +3,7 @@
 Read this file when a Rig call fails, a build fails, or the user needs retries, rate-limit
 handling, or production hardening.
 
-Verified against `rig` 0.44.0.
+Verified against `rig` 0.45.0.
 
 ## Contents
 
@@ -16,7 +16,7 @@ Verified against `rig` 0.44.0.
 
 ## Compile Errors First
 
-Most compile errors against rig 0.44 come from code written for 0.43 or 0.42. Check the
+Most compile errors against rig 0.45 come from code written for 0.44 or earlier. Check the
 shape before you doubt the imports.
 
 ### `cannot find 'Client' in 'openai'`, `no method named 'agent' / 'embedding_model' found`
@@ -25,12 +25,12 @@ shape before you doubt the imports.
 error[E0433]: cannot find `Client` in `openai`
 ```
 
-That is 0.42 code. rig 0.44 has no client traits: a provider client is a concrete type
+That is 0.42 code. rig 0.45 has no client traits: a provider client is a concrete type
 (`OpenAI`, `Anthropic`, `Gemini`) whose methods are inherent, and an agent wraps one of its
 models — `AgentBuilder::new(OpenAI::from_env()?.completion(MODEL))`. `prompt`, `chat` and
 `prompt_typed` are inherent on `Agent`, so no trait import is missing either;
-`use rig::prelude::*;` re-exports types such as `AgentBuilder` and `Agent`, plus the `Tool`,
-`PortableTool` and `VectorStoreIndex` traits (`top_n` needs the last in scope). The
+`use rig::prelude::*;` re-exports types such as `AgentBuilder` and `Agent`, plus the `Tool`
+and `VectorStoreIndex` traits (`top_n` needs the last in scope). The 0.44 → 0.45,
 0.43 → 0.44 and 0.42 → 0.43 tables in Version Drift pair every old call with its replacement.
 
 ### `the async keyword is missing from the function declaration`
@@ -45,8 +45,9 @@ cargo add tokio --features macros,rt-multi-thread
 
 Capabilities are feature-gated. The `agent` feature (on by default) carries `Agent`,
 hooks, extractors and the tool registry; the `Tool` trait itself needs no feature. The rest are opt-in: `test-utils` (mocks, dev-dependencies
-only), `rmcp` (MCP tools), `memory` (history-bounding policies), `pdf` and `epub` (file
-loaders), `audio`, `image`, and one per vector store (`lancedb`, `qdrant`, `postgres`, …).
+only), `rmcp` (MCP tools), `memory` (`rig::memory`: stores, windows, compaction), `pdf` and
+`epub` (file loaders), `audio`, `image`, and one per vector store (`lancedb`, `qdrant`,
+`postgres`, …).
 
 ### `Agent<M>` does not compile
 
@@ -63,8 +64,11 @@ Version Drift.
 #[non_exhaustive]
 pub enum PromptError {
     Provider(ProviderError),
-    Report(ErrorReport),           // a failure relayed over the agent's bus
-    Memory(MemoryError),
+    Report(ErrorReport),           // a handler's, hook's or stream item's failure
+    Memory {
+        error: SessionError,       // rig::memory::SessionError
+        response: Option<Box<PromptResponse>>, // the finished run whose save failed
+    },
     MaxTurns {
         max_turns: usize,
         chat_history: Vec<Message>,
@@ -84,8 +88,15 @@ pub enum PromptError {
 ```
 
 A provider failure usually reaches an agent run as `Report`, not `Provider`: the provider's
-reply crosses the agent's bus as an `ErrorReport`, whose `kind` classifies it and whose
+reply is relayed as an `ErrorReport`, whose `kind` classifies it and whose
 `provider_response_status()` still reads the HTTP status.
+
+`Memory` fails the run when its conversation cannot be loaded, before any model call, or
+saved; a failed save keeps the finished answer in `response`. Two runs that overlap on one log
+end with `SessionError::Changed` on the later save. A store outage and `Changed` can succeed
+on a retry; an invalid log name (`Io` of kind `InvalidInput`) or a refused older session
+(`Format`, `OldLayout`, `Record`) fails the same way every time, so build valid log names and
+start new sessions after an upgrade.
 
 ```rust
 use rig::completion::PromptError;
@@ -109,7 +120,7 @@ match agent.prompt("What is 2 + 2?").max_turns(3).await {
         eprintln!("cancelled: {reason}");
     }
 
-    Err(PromptError::Memory(e)) => eprintln!("memory backend failed: {e}"),
+    Err(PromptError::Memory { error, .. }) => eprintln!("memory store failed: {error}"),
     Err(PromptError::Report(report)) => eprintln!("{:?} failure: {report}", report.kind),
     Err(PromptError::Provider(e)) => eprintln!("provider call failed: {e}"),
     Err(other) => eprintln!("{other}"), // `#[non_exhaustive]`
@@ -223,9 +234,10 @@ async fn prompt_with_retry(
     }
 }
 
-/// rig's own classification: a transport failure, a truncated reply, or a
-/// provider 408, 425, 429 or 5xx. Anything else, a 401 or `MaxTurns`
-/// included, fails the same way again.
+/// rig's own classification: a transport failure, a truncated reply, a
+/// provider 408, 425, 429 or 5xx, or an in-band error envelope with a
+/// transient code. Anything else, a 401 or `MaxTurns` included, fails the
+/// same way again.
 fn is_retryable(error: &PromptError) -> bool {
     match error {
         PromptError::Report(report) => report.is_retryable(),
@@ -281,8 +293,8 @@ override it.
 - **Extraction fails to deserialize** — the schema is ambiguous or a field is
   under-described. Use `///` doc comments, `Option<T>` for optional values, and enums for
   fixed choices.
-- **The agent forgot the conversation** — memory without a conversation id is silently
-  bypassed. See Memory.
+- **Users see each other's conversation** — memory without a conversation saves every run
+  to one log named after the agent. Set `.conversation(..)` per request; see Memory.
 - **`ResponseError: the provider failed the turn: ...`** — since 0.44 a reply that ends in
   an unknown finish reason, a content filter or a provider-reported failure fails the run as
   `PromptError::Provider(ProviderError::Response(..))`, even when it holds text.

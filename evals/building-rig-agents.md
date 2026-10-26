@@ -87,7 +87,7 @@
 
 **Must produce**:
 
-- `rig = { version = "0.44", features = ["test-utils"] }` under `[dev-dependencies]`.
+- `rig = { version = "0.45", features = ["test-utils"] }` under `[dev-dependencies]`.
 - `MockCompletionModel::from_turns([...])` scripting a `MockTurn::tool_call` followed by a `MockTurn::text`.
 - `AgentBuilder::new(model)` in place of a provider client.
 - A clone of the mock used as a probe, asserting two model requests (`request_count() == 2` or `requests().len() == 2`).
@@ -100,22 +100,23 @@
 - A `#[ignore]`d test.
 - A hand-written mock model (`impl Wire`, or the removed `CompletionModel` trait) when `rig::test_utils` covers it.
 
-### Eval 4 - an agent that forgets
+### Eval 4 - every user shares one history
 
-**Prompt**: "I set `.memory(InMemoryConversationMemory::new())` but the agent still does not remember the previous message."
+**Prompt**: "Our support agent is built with `.name(\"support\").memory(MemoryStore::default())` and `POST /chat` calls `agent.prompt(body.message).max_turns(3).await?`. Users now see other users' earlier messages in the answers."
 
 **Fixture**: empty
 
 **Must produce**:
 
-- The diagnosis: without a conversation id, memory is silently bypassed, with no error and no warning.
-- The fix: `.conversation("...")` per request, or `AgentBuilder::conversation(..)` as a default.
-- `history(..)` on the same request bypasses memory: nothing is loaded and the turn is not recorded.
+- The diagnosis: with no conversation set, every run loads and saves the one log named after the agent, `support`, which every caller shares.
+- The fix: `.conversation(..)` on each request, with a log name scoped to the authenticated user.
+- A log name of one path segment, its parts joined with something other than `/`.
 
 **Must not produce**:
 
+- `InMemoryConversationMemory` or `ConversationMemory`, the 0.44 memory types.
 - `with_history(..)`, which was renamed to `history(..)`.
-- Advice to persist history manually before the conversation id has been checked.
+- A `conversation_id` from the request body passed straight to `.conversation(..)`.
 
 ### Eval 5 - streaming the reply
 
@@ -175,7 +176,7 @@
 
 **Prompt**: "Let users continue a conversation by sending a `conversation_id` with each `POST /chat`; the agent already has `.memory(..)`."
 
-**Wrong answer**: `\.conversation\(\s*&?\s*(?:body|req|request|payload|input|params)\.conversation_id\b|(?:Some\(|let\s+(?:mut\s+)?)\s*(\w+)\s*\)?\s*=\s*&?\s*(?:\w+\.)?conversation_id\b(?:(?!let\s+(?:mut\s+)?\1\b)[\s\S]){0,400}?\.conversation\(\s*&?\s*\1(?:\.clone\(\))?\s*\)`
+**Wrong answer**: `\.conversation\(\s*&?\s*(?:body|req|request|payload|input|params)\.conversation_id\b|(?:Some\(|let\s+(?:mut\s+)?)\s*(\w+)\s*\)?\s*=\s*&?\s*(?:\w+\.)?conversation_id\b(?:(?!let\s+(?:mut\s+)?\1\b)[\s\S]){0,400}?\.conversation\(\s*&?\s*\1(?:\.(?:clone|to_string)\(\))?\s*\)`
 
 ### Probe 6 - no forced tool choice on Claude Opus 5.5
 

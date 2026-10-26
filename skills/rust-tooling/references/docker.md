@@ -20,10 +20,10 @@ layer. cargo-chef produces that layer from the manifests alone, so the expensive
 # cargo-chef caches the dependency build: the expensive layer is only rebuilt when
 # Cargo.toml or Cargo.lock changes, not when a source file does.
 #
-# The tag must match `rust-toolchain.toml` EXACTLY. `1.99` and `1.99.0` are two
+# The tag must match `rust-toolchain.toml` EXACTLY. `1.99` and `1.99.1` are two
 # different rustup toolchain names, so a mismatch makes every stage download a
 # second complete toolchain before it compiles anything.
-FROM lukemathwalker/cargo-chef:latest-rust-1.99.0 AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.99.1 AS chef
 WORKDIR /build
 
 FROM chef AS planner
@@ -53,7 +53,7 @@ CMD ["app"]
 Rules that keep the cache working:
 
 - The chef tag and the `channel` in `rust-toolchain.toml` name the same toolchain, patch version included.
-  The image tag carries a full version (`latest-rust-1.99.0`) and rustup matches toolchain names literally,
+  The image tag carries a full version (`latest-rust-1.99.1`) and rustup matches toolchain names literally,
   so a `"1.99"` channel is a different name: `COPY . .` brings the file in, rustup sees a toolchain it does
   not have, and both the planner and the builder stage download a second one before compiling anything. A
   mismatch never errors, it just costs minutes per build. With the names equal, rustup only fetches the three
@@ -165,7 +165,7 @@ services:
   # Off by default. `docker compose --profile otel up -d` starts it; the app only
   # exports once APP__TELEMETRY__OTLP_ENDPOINT points at it.
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.162.0
+    image: otel/opentelemetry-collector-contrib:0.163.2
     profiles: ["otel"]
     command: ["--config=/etc/otel-config.yaml"]
     configs:

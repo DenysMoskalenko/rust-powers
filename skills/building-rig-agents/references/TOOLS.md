@@ -3,7 +3,7 @@
 Read this file when the user wants to expose Rust functions to a model, pass runtime
 context into a tool, share tools across agents, or connect MCP servers.
 
-Verified against `rig` 0.44.0. The `Tool` trait shape changed in 0.4x — the
+Verified against `rig` 0.45.0. The `Tool` trait shape changed in 0.4x — the
 `definition() -> ToolDefinition` form still shown on rig.rs does not compile. See
 Version Drift.
 
@@ -136,12 +136,8 @@ The trait in full:
 - `map_error(..)` (provided) — override to classify your domain error with a more precise
   `ToolErrorKind`, a retryability policy, or safe model-visible output.
 
-### `PortableTool` when you do not need context
-
-`PortableTool` is the same trait minus the `ToolContext` argument:
-`fn call(&self, arguments: Self::Args) -> impl Future<...>`. Every `PortableTool`
-implements `Tool` via a blanket impl, so it plugs into agents the same way. Prefer it when
-the tool is a pure function — it is portable across Rig runtimes and simpler to unit test.
+A tool that needs no context still implements `Tool` and ignores the `ToolContext`
+argument: rig 0.45 removed the context-free `PortableTool`.
 
 ### Generating the schema with schemars
 
@@ -169,7 +165,7 @@ The `self` in that import is load-bearing — the derive macro's generated code 
 `#[schemars(description = "…")]` also works and wins when both are present. Never add your
 own `schemars` dependency; see SKILL.md.
 
-Note for OpenAI: rig 0.44 sends Responses API tools — Rig's default OpenAI integration —
+Note for OpenAI: rig 0.45 sends Responses API tools — Rig's default OpenAI integration —
 with `strict: false`; only a strict tool (`Responses::with_strict_tools`) needs every input
 parameter under `required`. Include the array anyway, or let the macro's type-driven rule
 produce it.
@@ -184,8 +180,10 @@ let agent = AgentBuilder::new(client.completion(MODEL))
     .build();
 ```
 
-The first `.tool(..)` moves the builder into the `WithBuilderTools` typestate. From there
-you can add more tools but not `.tool_server_handle(..)`, and vice versa.
+`.tool(..)` and `.tool_server_handle(..)` combine: since rig 0.45 the builder has no tool
+typestate, and builder tools join the handle's tools when the agent is built, so every agent
+sharing that handle advertises them too. Keep a tool local by building its agent without the
+handle.
 
 Other ways tools reach an agent:
 
@@ -194,10 +192,10 @@ Other ways tools reach an agent:
 | `tool(T)` | A static tool, always advertised |
 | `dynamic_tool(DynamicTool)` / `dynamic_tools(Vec<DynamicTool>)` | Tools whose name and callback are only known at runtime |
 | `retrieved_tools(n, index, toolset)` | Tool-RAG: fetch the `n` most relevant tool definitions from a vector index per request |
-| `dynamic_tools(..)` fed by `rig::tool::rmcp::tools_from_server(..)` | Tools served by an external MCP process |
+| `dynamic_tools(..)` fed by `McpConnection::tools()` | Tools served by an external MCP process |
 | `tool_server_handle(handle)` | A pre-built tool server shared between agents |
 
-`dynamic_tools` does **not** mean vector retrieval in 0.44 — that is `retrieved_tools`.
+`dynamic_tools` does **not** mean vector retrieval in 0.45 — that is `retrieved_tools`.
 See RAG and Embeddings for building the index and toolset.
 
 ## When a Tool Fails
@@ -306,7 +304,7 @@ never smuggle a secret into the prompt just so a tool can read it.
 
 `ToolServerHandle` is a cheaply-cloneable handle to shared tool-server state, so several
 agents can be handed clones of one handle and see the same tools. Operations take locks on
-that state directly — there is no separate task or channel routing behind it in 0.44.
+that state directly — there is no separate task or channel routing behind it in 0.45.
 
 ```rust
 use rig::tool::server::{ToolServer, ToolServerHandle};
@@ -327,21 +325,21 @@ The Model Context Protocol exposes tools served by external processes — filesy
 browsers, databases, SaaS integrations — through one interface. Rig connects as a client
 via the `rmcp` crate.
 
-Match rig's own rmcp major version — rig-rmcp 0.44 is built against `rmcp` 2, and a
-`Peer<RoleClient>` from a different major will not satisfy `tools_from_server`.
+Match rig's own rmcp major version — rig-rmcp 0.45 is built against `rmcp` 3.5, and a
+`RunningService` from a different major will not satisfy `McpConnection::new`.
 
 ```toml
-rig = { version = "0.44", features = ["rmcp"] }
-rmcp = { version = "2", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }
+rig = { version = "0.45", features = ["rmcp"] }
+rmcp = { version = "3", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }
 ```
 
 ```rust,verify
 use rig::prelude::*;
 use rig::providers::openai::{self, OpenAI};
 use rig::tool::DynamicTool;
-use rig::tool::rmcp::tools_from_server;
+use rig::tool::rmcp::McpConnection;
 use rmcp::ServiceExt as _;
-use rmcp::model::{ClientCapabilities, ClientInfo, Implementation, Tool};
+use rmcp::model::{ClientCapabilities, ClientConfig, Implementation};
 use rmcp::transport::StreamableHttpClientTransport;
 
 const MODEL: &str = openai::GPT_5_5;
@@ -350,21 +348,22 @@ const MODEL: &str = openai::GPT_5_5;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let transport = StreamableHttpClientTransport::from_uri("http://localhost:8080");
 
-    // `ClientInfo` and `Implementation` are both `#[non_exhaustive]` in rmcp 2, so
+    // `ClientConfig` and `Implementation` are both `#[non_exhaustive]` in rmcp 3, so
     // a struct literal is rejected outside the crate with `error[E0639]`. Build them
-    // with the constructors; `ClientInfo::default()` also works when the client name
+    // with the constructors; `ClientConfig::default()` also works when the client name
     // does not matter.
-    let client_info = ClientInfo::new(
+    let client_config = ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new("rig", env!("CARGO_PKG_VERSION")),
     );
-    let mcp = client_info.serve(transport).await?;
-
-    let tools: Vec<Tool> = mcp.list_tools(None).await?.tools;
+    // Every tool built from it holds the connection open; `mcp.close().await` ends it for all.
+    let mcp = McpConnection::new(client_config.serve(transport).await?);
 
     // Each MCP tool becomes a `DynamicTool` calling the server through one shared sink.
     // The conversion fails only for a tool the server sent without a name.
-    let mcp_tools = tools_from_server(tools, mcp.peer())
+    let mcp_tools = mcp
+        .tools()
+        .await?
         .into_iter()
         .map(DynamicTool::try_from)
         .collect::<Result<Vec<_>, _>>()?;
@@ -386,7 +385,7 @@ different from every other untrusted source: the *description* enters the model'
 at registration, before the user has typed anything. A hostile or compromised server
 rewrites your agent's effective instructions without ever being called. Pin the tool set
 you expect, and re-check names and descriptions on reconnect rather than trusting whatever
-`list_tools` returns this time.
+`tools()` returns this time.
 
 ## Designing Good Tools
 

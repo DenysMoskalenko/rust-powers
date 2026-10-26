@@ -396,27 +396,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-lock"
-version = "3.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "290f7f2596bd5b78a9fec8088ccd89180d7f9f55b94b0576823bbbdc72ee8311"
-dependencies = [
- "event-listener",
- "event-listener-strategy",
- "pin-project-lite",
-]
-
-[[package]]
-name = "async-object-pool"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1ac0219111eb7bb7cb76d4cf2cb50c598e7ae549091d3616f9e95442c18486f"
-dependencies = [
- "async-lock",
- "event-listener",
-]
-
-[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1637,16 +1616,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "event-listener-strategy"
-version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
-dependencies = [
- "event-listener",
- "pin-project-lite",
-]
-
-[[package]]
 name = "evmap"
 version = "11.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2142,19 +2111,15 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "httpmock"
-version = "0.8.3"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf4888a4d02d8e1f92ffb6b4965cf5ff56dda36ef41975f41c6fa0f6bde78c4e"
+checksum = "654f72e90ee9871781fd37154c1c0049ef20f988f8a2931887dc285170e682ab"
 dependencies = [
  "assert-json-diff",
- "async-object-pool",
- "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
- "crossbeam-utils",
  "form_urlencoded",
  "futures-timer",
- "futures-util",
  "headers",
  "http",
  "http-body-util",
@@ -2164,14 +2129,10 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "serde_regex",
- "similar 2.7.0",
- "stringmetrics",
- "tabwriter",
+ "similar 3.2.1",
  "thiserror",
  "tokio",
  "tracing",
- "url",
 ]
 
 [[package]]
@@ -3911,9 +3872,9 @@ dependencies = [
 
 [[package]]
 name = "rstest"
-version = "0.27.0"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "948203e6d13b83e51a90d7cf236dd58a0065f23f4b902f00f306e7eb2bd09b9c"
+checksum = "b376e512f30a7686a8dbc6aeaace99b3ade1c26c1c63473473a817ade226dafc"
 dependencies = [
  "futures-timer",
  "futures-util",
@@ -3922,9 +3883,9 @@ dependencies = [
 
 [[package]]
 name = "rstest_macros"
-version = "0.27.0"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8d92eaf7b6e51e12471d71ddc72608e7151573de44099aacfbb1128177c0da4"
+checksum = "88512dbfb5b73a0dfa38aef7bc73b5657035fce477b923faf12d332dd83051ea"
 dependencies = [
  "cfg-if",
  "glob",
@@ -4411,16 +4372,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_regex"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bafc8d0c5330cecff10f16b459b479fd9acaa5b4acd7167301414e21b0057012"
-dependencies = [
- "regex",
- "serde",
-]
-
-[[package]]
 name = "serde_repr"
 version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4852,12 +4803,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
-name = "stringmetrics"
-version = "2.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b3c8667cd96245cbb600b8dec5680a7319edd719c5aa2b5d23c6bff94f39765"
-
-[[package]]
 name = "stringprep"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4985,15 +4930,6 @@ checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
 dependencies = [
  "core-foundation-sys",
  "libc",
-]
-
-[[package]]
-name = "tabwriter"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fce91f2f0ec87dff7e6bcbbeb267439aa1188703003c6055193c821487400432"
-dependencies = [
- "unicode-width",
 ]
 
 [[package]]
@@ -5583,12 +5519,6 @@ name = "unicode-segmentation"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
-
-[[package]]
-name = "unicode-width"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "unicode-xid"

@@ -1,4 +1,4 @@
-# Version Drift: rig.rs Docs vs Released 0.44
+# Version Drift: rig.rs Docs vs Released 0.45
 
 Read this file before copying any code sample from <https://rig.rs/docs>, and whenever a
 snippet that "should work" does not compile.
@@ -6,6 +6,7 @@ snippet that "should work" does not compile.
 ## Contents
 
 - [The Situation](#the-situation)
+- [0.44 → 0.45](#044--045)
 - [0.43 → 0.44](#043--044)
 - [0.42 → 0.43](#042--043)
 - [The Divergences That Bite](#the-divergences-that-bite)
@@ -30,7 +31,7 @@ Rig has two documentation surfaces and they are not in sync:
 - **<https://rig.rs/docs>** — the narrative guide. Excellent on concepts, mental models,
   and *why* to reach for something. Its code samples were written across roughly 0.38–0.41
   plus a few pages describing unreleased `main`, and several no longer compile.
-- **<https://docs.rs/rig/0.44.0>** — the released API. Exhaustive and always correct for
+- **<https://docs.rs/rig/0.45.0>** — the released API. Exhaustive and always correct for
   the version you actually depend on.
 
 The Rig maintainers say as much: several pages carry a "Main branch API" banner, and the
@@ -41,14 +42,68 @@ they disagree, docs.rs wins — it is generated from the code you compiled again
 
 Rig also ships a `MIGRATING.md` in the repository covering every breaking change from 0.30
 onward, including a "Silent behavior changes" section for changes that still compile. Read
-the section for the version you are on. The copy in the 0.44.0 tag stops at `0.42 → 0.43`;
-the `0.43 → 0.44` section was added on `main` after the release.
+the section for the version you are on. The copy in the 0.45.0 tag stops at `0.43 → 0.44`;
+the `0.44 → 0.45` section was added on `main` after the release.
+
+## 0.44 → 0.45
+
+0.45 keeps the `AgentRunner` surface; the breaks are in conversation memory, MCP, tool
+plumbing and shared messages. Old spelling on the left; where the old one still compiles, the
+right cell says what it now does.
+
+| 0.44 | 0.45 |
+|---|---|
+| `.memory(InMemoryConversationMemory::new())` | `.memory(MemoryStore::default())` (`rig::memory`, behind `rig`'s `memory` feature); a durable store implements `rig::memory::AsyncStore`, not `ConversationMemory` |
+| `.conversation(id)`, `rig::id::ConversationId` | `.conversation(log)`, a `String` log name of one path segment |
+| `SlidingWindowMemory`, `TokenWindowMemory`, `PolicyMemory`, `.with_filter(..)`, `CompactingMemory`, `DemotingPolicyMemory` | gone: a `rig::memory::recent` rule (`LastMessages`, `TokenBudget`) applied with `view` to a log you load and save, `CompactionPolicy` and `Summarizer` for compaction |
+| `PromptError::Memory(MemoryError)` | `PromptError::Memory { error: SessionError, response }`; `response` holds the answer of a run whose save failed |
+| `response.memory_append`, `MemoryAppend` | gone: a failed save fails the run |
+| `tools_from_server(tools, mcp.peer())` | `McpConnection::new(service).tools().await?`; the tools keep the connection open, `close().await` ends it |
+| `rmcp = "2"`, `rmcp::model::ClientInfo` | `rmcp = "3"`, `ClientConfig`; `ClientInfo` is a deprecated alias |
+| `McpClientError::{ToolFetch, ToolFetchTimeout}` | `McpClientError::{Request, Timeout}` |
+| `impl PortableTool for T`, `rig::tool::portable` | `impl Tool for T`, whose `call` takes `&mut ToolContext` first |
+| `ToolDefinition { name, description, parameters }` | `ToolDefinition::new(name, description, parameters)`; a literal also needs `annotations` |
+| `DispatchAction::try_rewrite_tool_args(kind, &value)` | `rewrite_tool_args(kind, serde_json::to_value(&value)?)` |
+| `effect::Outcome`, `OutcomeAction::Replace(Result<Outcome, _>)` | `effect::Answered` |
+| `StepEventKind::MemoryDispatch`, the memory effect family | gone: memory is a store call, not an effect a hook sees |
+| `AgentBuilder<WithBuilderTools>`, `AgentBuilder<WithToolServerHandle>` | `AgentBuilder`; `.tool(..)` and `.tool_server_handle(..)` combine, and builder tools join the shared registry |
+| `AgentBuilder::model_spec(spec)`, `ProviderError::UnsupportedOption` from a run | `model_spec` removed, and a run no longer returns that variant; the connected model checks options itself, and refuses one as `PromptError::Report` of kind `Request` |
+| `.with_http(h)` on a client | `.connect(h)` on its config, in place of `.client()`: `OpenAIConfig::new(key).connect(h)` |
+| `registry::connect(spec, key)`, `"vendor:model"` references | `Catalog::builtin().connect_with("vendor/model", ConnectOptions::new().api_key(key))?`, a `DynModel` |
+| `request.chat_history: Vec<Message>`, hook and request histories | `Vec<Arc<Message>>`: match through `&**message`, push `message.into()` |
+| `MockTextDocument`, `CountingMemory`, `AppendFailingMemory` | gone: a `String` document; a `MemoryStore` clone to read what a run saved |
+| `rig::bus`, `Bus::channel`, `AgentBuilder::over_bus(..)` | gone: handlers run inline, `AgentBuilder::over_handlers(handlers, owner, model_key)` |
+| `ErrorKind::{BusClosed, MemoryBackend, MemoryPolicy}` | gone |
+
+Behavior that changed with no compile error:
+
+- An agent with memory and no conversation no longer skips memory: every such run loads and
+  saves the log named after the agent (`.name(..)`, else `agent`), one history for every
+  caller.
+- A failed save fails the run, and of two runs that loaded one log, the later save fails with
+  `SessionError::Changed`. Sessions saved by earlier versions are refused.
+- `on_outcome` fires once for every dispatched completion attempt that no hook denied, the
+  rejected, retried, recovered and abandoned ones included, so an `Ok` outcome is no longer an
+  accepted turn; move billing and persistence to `on_model_turn_finished`.
+- A call that invalid-tool-call recovery answers surfaces on the stream as a `ToolCall` and a
+  `ToolResult`; a `ToolResult` no longer proves execution, `ToolExecutionCommitted` does.
+- An error envelope in a 2xx or stream body classifies like an HTTP rejection: a nested
+  numeric code becomes the status, so `{"error":{"code":429}}` is a 429, and transient codes
+  such as Anthropic's `overloaded_error` are retryable.
+- An option a wire used to ignore now follows the request's `OnUnsupported` policy, so a run
+  0.44 sent can fail before the request.
+- A resumed run does not execute answered tool calls again; a run serialized by 0.44 (run
+  format 2) is refused, 0.45 writes format 5.
+- A text document serializes as `"type":"text"`, which 0.44 cannot read; an old
+  `"type":"string"` document loads as plain text.
+- An MCP tool with an output schema returns its structured content alone.
 
 ## 0.43 → 0.44
 
 0.44 keeps the 0.43 run surface; the breaks are in results, errors, streaming and tool
 names. Old spelling on the left; where the old one still compiles, the right cell says what
-it now does.
+it now does. The right column is the 0.44 spelling: apply the 0.44 → 0.45 table above on top
+of it.
 
 | 0.43 | 0.44 |
 |---|---|
@@ -90,7 +145,8 @@ Behavior that changed with no compile error:
 
 0.43 rebuilt the provider layer and the run surface, so most 0.42 code no longer compiles.
 Old spelling on the left; where the old one still compiles, the right cell says what it now
-does. The right column is the 0.43 spelling: apply the 0.43 → 0.44 table above on top of it.
+does. The right column is the 0.43 spelling: apply the 0.43 → 0.44 and 0.44 → 0.45 tables
+above on top of it.
 
 | 0.42 | 0.43 |
 |---|---|
@@ -161,7 +217,7 @@ Behavior that changed with no compile error:
 let agent: Agent<openai::responses_api::ResponsesCompletionModel> = ...;
 struct Router { routes: HashMap<String, Agent<ResponsesCompletionModel>> }
 
-// 0.42 to 0.44
+// 0.42 to 0.45
 let agent: Agent = ...;
 struct Router { routes: HashMap<String, Agent> }
 ```
@@ -181,7 +237,7 @@ Message::Assistant { id: None, content: OneOrMany::one(AssistantContent::text("h
 // 0.42 and 0.43
 Message::Assistant { id: None, content: vec![AssistantContent::text("hi")] }
 
-// 0.44
+// 0.44 and 0.45
 Message::assistant("hi")
 ```
 
@@ -201,7 +257,7 @@ async fn definition(&self, _prompt: String) -> ToolDefinition {
 }
 async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> { ... }
 
-// 0.42 to 0.44
+// 0.42 to 0.45
 fn description(&self) -> String { "...".to_string() }
 fn parameters(&self) -> serde_json::Value { json!({...}) }
 async fn call(&self, ctx: &mut ToolContext, args: Self::Args)
@@ -213,8 +269,8 @@ async fn call(&self, ctx: &mut ToolContext, args: Self::Args)
 (every owned serializable value qualifies). A provided `map_error` lets you classify your
 domain error.
 
-`PortableTool` is the context-free variant — same shape, `call(&self, args)` — and blanket-
-implements `Tool`. Prefer it for pure functions.
+`PortableTool`, the context-free variant with `call(&self, args)`, was removed in 0.45: a
+tool that needs no context implements `Tool` and ignores the `ToolContext`.
 
 ### 4. Tool errors: `ToolError` → `ToolExecutionError`
 
@@ -222,7 +278,7 @@ implements `Tool`. Prefer it for pure functions.
 // rig.rs
 Err(rig::tool::ToolError::ToolCallError("Division by zero".into()))
 
-// 0.42 to 0.44
+// 0.42 to 0.45
 Err(rig::tool::ToolExecutionError::invalid_args("divide requires a non-zero y"))
 ```
 
@@ -240,7 +296,7 @@ impl<M: CompletionModel> AgentHook<M> for MyHook {
     }
 }
 
-// 0.43 and 0.44
+// 0.43 to 0.45
 impl AgentHook for MyHook {
     async fn on_dispatch(&self, _ctx: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
         if event.tool_name().is_some() { DispatchAction::skip("no") } else { DispatchAction::proceed() }
@@ -259,7 +315,7 @@ for `observes`.
 // rig.rs — tool-RAG
 .dynamic_tools(2, tool_index, toolset)
 
-// 0.42 to 0.44 — tool-RAG
+// 0.42 to 0.45 — tool-RAG
 .retrieved_tools(2, tool_index, toolset)
 ```
 
@@ -273,7 +329,7 @@ Related: `ToolSet::builder()` no longer exists. Use `ToolSet::default()` plus
 
 The Evals page on rig.rs documents `Eval`, `EvalOutcome`, `LlmJudgeBuilder`,
 `LlmScoreMetric`, and `SemanticSimilarityMetric` behind an `experimental` feature. That
-module shipped in 0.39 and was **removed by 0.41**. `rig` 0.44 has no `experimental`
+module shipped in 0.39 and was **removed by 0.41**. `rig` 0.45 has no `experimental`
 feature and no `evals` module — `cargo add rig -F experimental` fails.
 
 Build judges and scorers on extractors instead; see
@@ -290,18 +346,18 @@ by an answer needs at least two, and any tool-using prompt needs an explicit
 ### 9. Vector stores are features, not separate crates
 
 rig.rs describes `rig-mongodb`, `rig-lancedb`, `rig-qdrant`, and friends as companion
-crates you add alongside `rig`. The `rig` 0.44 facade re-exports them as feature-gated
+crates you add alongside `rig`. The `rig` 0.45 facade re-exports them as feature-gated
 modules:
 
 ```toml
-rig = { version = "0.44", features = ["qdrant", "lancedb"] }
+rig = { version = "0.45", features = ["qdrant", "lancedb"] }
 ```
 
 The companion crates still exist and still work; the feature is usually simpler.
 
 ### 10. Builder method names
 
-| rig.rs | 0.44 |
+| rig.rs | 0.45 |
 |---|---|
 | `AgentBuilder::conversation_id(..)` | `AgentBuilder::conversation(..)` |
 | `tool_extensions(..)` | `tool_context(..)` on the `AgentRunner`, not on `AgentBuilder` |
@@ -328,7 +384,7 @@ than APIs.
 
 ## How to Check Something Yourself
 
-1. Open `https://docs.rs/rig/0.44.0/rig/all.html` and search for the symbol. Absent means
+1. Open `https://docs.rs/rig/0.45.0/rig/all.html` and search for the symbol. Absent means
    it does not exist in this release.
 2. Open the item page for the exact signature, and check for an "Available on crate
    feature `x` only" banner.

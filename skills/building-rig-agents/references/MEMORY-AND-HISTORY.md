@@ -3,7 +3,7 @@
 Read this file when the user wants an agent that remembers: a multi-turn conversation, a
 durable session, bounded context growth, or facts that survive across sessions.
 
-Verified against `rig` 0.44.0.
+Verified against `rig` 0.45.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -55,8 +55,10 @@ agent's `.default_max_turns(n)`, set on the builder. A tool-using agent driven b
 
 ### 3. Conversation memory — Rig loads and saves
 
+`MemoryStore` is in `rig::memory`, behind `rig`'s `memory` feature.
+
 ```rust,verify
-use rig::memory::InMemoryConversationMemory;
+use rig::memory::MemoryStore;
 use rig::prelude::*;
 use rig::providers::openai::{self, OpenAI};
 
@@ -66,10 +68,10 @@ const MODEL: &str = openai::GPT_5_5;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent = AgentBuilder::new(OpenAI::from_env()?.completion(MODEL))
         .preamble("You are a helpful assistant.")
-        .memory(InMemoryConversationMemory::new())
+        .memory(MemoryStore::default())
         .build();
 
-    // Each conversation id keeps its own isolated history.
+    // Each conversation is its own log in the store.
     let _ = agent.prompt("My name is Ada.").conversation("user-42").max_turns(1).await?;
     let reply = agent.prompt("What's my name?").conversation("user-42").max_turns(1).await?;
     println!("{}", reply.output());
@@ -83,55 +85,71 @@ calls and their results — after a successful response.
 
 ## Memory Rules
 
-These four rules explain nearly every "my agent forgot" report:
+These rules explain nearly every memory surprise:
 
-- **No conversation id, no memory.** Set it per request with `.conversation("...")` or as a
-  builder default with `AgentBuilder::conversation(..)`. With neither, memory is *silently*
-  bypassed — no error, no warning.
+- **No conversation, one shared log.** Without `.conversation(..)` on the request or
+  `AgentBuilder::conversation(..)`, every run loads and saves the log named after the agent
+  (its `.name(..)`, else `agent`), so every caller shares one history — no error, no warning.
+- **A log name is one path segment.** It must not hold `/` or `\`, be empty, `.` or `..`;
+  rig fails such a run with `PromptError::Memory` before the model call. Join parts with
+  `-`, as in `format!("{user}-{id}")`, never `/`, where the id has a fixed format such as a
+  `Uuid`: free-text parts can collide (`a` + `b-c` and `a-b` + `c`).
 - **`history(..)` bypasses memory** for that request, in both directions.
 - **`without_memory()`** gives the same bypass without supplying manual history.
-- **Memory saves only on success.** A failed prompt does not append a partial turn, and a
-  failed append does not fail the prompt: check `response.memory_append`.
+- **A save is all or nothing.** A failed or cancelled run saves nothing. A failed save fails
+  the run with `PromptError::Memory`, whose `response` still holds the finished answer, so
+  use it rather than repeating a tool-using run.
+- **Overlapping runs on one log conflict.** A save appends only if the log is as its run
+  loaded it: of two runs that loaded the same log, the later save fails with
+  `SessionError::Changed` and adds nothing. Serialize requests per conversation: a client
+  retry reruns the whole run, tool calls included.
 
-Prefer setting the id per request. Most agents are reused across users and threads, and a
+Prefer setting the log per request. Most agents are reused across users and threads, and a
 builder-level default is easy to leak between them.
 
 ## Durable Backends
 
-`InMemoryConversationMemory` lives in process memory: ideal for tests and short-lived
-agents, gone on restart. For durable sessions implement `ConversationMemory`:
+`MemoryStore` lives in process memory, and its clones share it: ideal for tests and a
+single process, gone on restart. For durable sessions implement `rig::memory::AsyncStore`,
+which stores each conversation as a named byte log:
 
 ```rust
-// Supertraits are spelled WasmCompatSend + WasmCompatSync in the rustdoc;
-// off wasm they are Send + Sync, so an impl written against this shape compiles.
-pub trait ConversationMemory: Send + Sync {
-    fn load<'a>(&'a self, conversation_id: &'a ConversationId)
-        -> Pin<Box<dyn Future<Output = Result<Vec<Message>, MemoryError>> + Send + 'a>>;
-
-    fn append<'a>(&'a self, conversation_id: &'a ConversationId, messages: Vec<Message>)
-        -> Pin<Box<dyn Future<Output = Result<(), MemoryError>> + Send + 'a>>;
-
-    fn clear<'a>(&'a self, conversation_id: &'a ConversationId)
-        -> Pin<Box<dyn Future<Output = Result<(), MemoryError>> + Send + 'a>>;
+// `WasmCompatSend` is `Send` off wasm, so an impl may write each method as an `async fn`.
+pub trait AsyncStore {
+    fn read_log_async(&self, name: &str)
+        -> impl Future<Output = io::Result<Vec<u8>>> + WasmCompatSend;
+    fn append_log_async(&self, name: &str, len: u64, bytes: &[u8])
+        -> impl Future<Output = Result<(), LogWriteError>> + WasmCompatSend;
+    fn replace_log_async(&self, name: &str, len: u64, bytes: &[u8])
+        -> impl Future<Output = Result<(), LogWriteError>> + WasmCompatSend;
+    fn read_file_async(&self, name: &str)
+        -> impl Future<Output = io::Result<Vec<u8>>> + WasmCompatSend;
+    fn write_file_async(&self, name: &str, bytes: &[u8])
+        -> impl Future<Output = io::Result<()>> + WasmCompatSend;
 }
 ```
 
-`Message` is `Serialize`/`Deserialize`, so persisting a conversation is ordinary serde
-work — a JSON column keyed by conversation id is a perfectly good first backend. The stored
-shape is rig's own and can change in a minor release: rig 0.44 cannot read 0.43 assistant
-turns that hold tool calls or reasoning, so clear or migrate those rows before upgrading.
-`ConversationId` (`rig::id::ConversationId`) wraps that id: `as_str()` gives the key back,
-and `.conversation("..")` still takes a plain string.
+`.memory(..)` takes any `AsyncStore + Send + Sync + 'static`; share one across clones
+through an inner `Arc`. Implementation notes:
 
-Two implementation notes:
-
-- **Keep `append` cheap.** It runs inline before the agent returns its response, so a slow
-  write is latency the user feels. A failed inline append still returns the answer: rig logs
-  a warning and sets `response.memory_append` to `Some(MemoryAppend::Failed { .. })`. You can
-  spawn the write instead, but then a failed append loses the turn with nothing on the
-  response to show it — do that only where a dropped turn is acceptable, and log every
-  failure.
-- **`load` returns an empty `Vec`** for an unknown conversation — that is not an error.
+- **Both log writes compare and write in one step.** Write only if the log is `len` bytes
+  long now, a missing log counting as 0 bytes and created by the write, else return
+  `LogWriteError::Changed`: a conditional `UPDATE … WHERE octet_length(bytes) = $len`, and
+  when it matches no row and `len` is 0, an insert whose unique-key conflict is `Changed`;
+  never a read followed by a write. That check
+  is what turns overlapping runs into `SessionError::Changed` instead of a lost turn.
+- **Keep the writes cheap.** rig saves before the run returns, so a slow write is latency
+  the user feels.
+- **The file methods are storage too.** rig keeps image blobs (`blobs/<sha256>`) and a torn
+  last line it set aside there; a store that drops them loses every image of a resumed
+  conversation without an error.
+- **`io::ErrorKind::NotFound` means none yet** — a new conversation, not an error.
+- **Refuse names `rig::memory::check_name` refuses.** Names reach the store from a log's
+  content as well as from your code.
+- **Store the bytes, do not parse them.** The format, `rig-session/4`, is rig's own; 0.45
+  refuses sessions from earlier versions. Messages a 0.44 `ConversationMemory` kept load
+  through `rig::conversation::Conversation::from_messages(..)` and `rig::memory::save_async(..)`
+  into a new log.
 
 Treat conversation ids as untrusted input when they come from a request: scope them to the
 authenticated user before using them as a storage key, or one user's id guess reads
@@ -142,54 +160,55 @@ another's history.
 Raw history grows without bound, and the cost is not only tokens: stale, off-topic turns
 compete for the model's attention with the ones that matter, and eventually the conversation
 exceeds the context window outright and every request fails. The fix is managed forgetting —
-shape what `load` returns.
+send the model fewer messages than you keep.
 
-Reusable policies live in `rig-memory`. Reach them either as their own crate or through
-the `memory` feature of `rig`, which re-exports the same types into `rig::memory`:
+The stores and windows live in `rig-memory`, which the `memory` feature of `rig` re-exports
+as `rig::memory`:
 
 ```toml
-rig = { version = "0.44", features = ["memory"] }
+rig = { version = "0.45", features = ["memory"] }
 ```
 
-`InMemoryConversationMemory` is in `rig::memory` with or without the feature; only the
-policies need it. The examples below use `rig::memory::` paths throughout, so one import
-root covers both.
+**`.memory(..)` sends the whole log.** rig 0.45 has no window on that path. A `Recent` rule from `rig::memory::recent` picks the newest
+messages a request sends — `LastMessages(n)` by count, `TokenBudget::new(max_tokens)` by
+estimated tokens — and `view` applies it, moving the start past a tool result whose call it
+cut off, since most providers reject unpaired tool results. To use one, load and save the log
+yourself and send the window through `history(..)`:
 
-**A `MemoryPolicy` is not a backend.** `.memory(..)` takes a `ConversationMemory`, so
-`SlidingWindowMemory` and `TokenWindowMemory` cannot be passed to it directly — that is a
-compile error, not a runtime surprise. Attach a policy to a backend with
-`.with_filter(policy.into_filter())`, or wrap the pair in `PolicyMemory`. `CompactingMemory`
-and `DemotingPolicyMemory` *are* backends, so those go straight into `.memory(..)`.
+```rust,verify
+use rig::agent::Agent;
+use rig::memory::recent::{LastMessages, view};
+use rig::memory::{AsyncStore, load_async, save_async};
 
-### Sliding window
-
-```rust
-use rig::memory::{InMemoryConversationMemory, IntoFilter, SlidingWindowMemory};
-
-let memory = InMemoryConversationMemory::new()
-    .with_filter(SlidingWindowMemory::last_messages(20).into_filter());
+/// Keeps the whole conversation in `store` and sends the model only its newest
+/// 20 messages.
+pub async fn ask(
+    agent: &Agent,
+    store: &(impl AsyncStore + Sync),
+    log: &str,
+    prompt: &str,
+) -> anyhow::Result<String> {
+    let mut conversation = load_async(store, log).await?;
+    let window = view(conversation.messages(), &LastMessages(20));
+    // `history(..)` sends the window and keeps this run off the agent's own memory.
+    let response = agent.prompt(prompt).history(window.iter().cloned()).max_turns(3).await?;
+    let answer = response.output();
+    conversation.extend(response.messages);
+    save_async(store, log, &mut conversation).await?;
+    Ok(answer)
+}
 ```
 
-### Token budget
+The save keeps the rules above: one path-segment log, `SessionError::Changed` when another
+request saved first. Bounding by estimated tokens tracks what you actually pay for; bounding
+by message count is simpler and more predictable.
 
-```rust
-use rig::memory::{HeuristicTokenCounter, IntoFilter, TokenWindowMemory};
-
-let memory = InMemoryConversationMemory::new().with_filter(
-    TokenWindowMemory::new(4_000, HeuristicTokenCounter::default()).into_filter(),
-);
-```
-
-Bounding by estimated tokens tracks what you actually pay for; bounding by message count is
-simpler and more predictable. Both drop a leading orphaned tool result when its paired tool
-call is truncated away, since most providers reject unpaired tool results.
-
-Neither window, and neither adapter below, suits Claude Fable 5.1, Opus 5.5, Sonnet 5.5 or
+No window suits Claude Fable 5.1, Opus 5.5, Sonnet 5.5 or
 Haiku 5.5. Each thinking block those models return is bound to every message before it, and
 rig stores the blocks in memory and replays them. Dropping the oldest turns, or splicing a summary in their place,
 changes that prefix under every block that stays, so the next request is a 400 wherever the
 API enforces the check, which includes every account created from 31 August 2026. On
-Anthropic's own API in adaptive thinking, rig 0.44 asks for those blocks to be dropped
+Anthropic's own API in adaptive thinking, rig 0.45 asks for those blocks to be dropped
 instead, which loses their reasoning; not on Haiku 5.5, which is missing from rig's model
 catalog (see Request Patches in Hooks and Runner). On those
 models, bound history with the summarize-and-restart shape in Rolling Your Own Compaction,
@@ -197,33 +216,9 @@ which replays nothing from before the summary.
 
 ### Keeping what you truncate
 
-Truncation silently discards turns. Two adapters turn that loss into something useful:
-
-- **`DemotingPolicyMemory`** hands evicted messages to a `DemotionHook`, so you can archive
-  them into a vector store for semantic recall or cold storage for audit.
-- **`CompactingMemory`** replaces evicted messages with a summary spliced back into the
-  history — the rolling-summary pattern:
-
-```rust
-use rig::memory::{CompactingMemory, InMemoryConversationMemory, SlidingWindowMemory,
-                  TemplateCompactor};
-
-let memory = CompactingMemory::new(
-    InMemoryConversationMemory::new(),
-    SlidingWindowMemory::last_messages(20),
-    TemplateCompactor::new(), // deterministic textual rollup, no model call
-);
-
-let agent = AgentBuilder::new(client.completion(MODEL))
-    .preamble("You are a helpful assistant.")
-    .memory(memory)
-    .build();
-```
-
-`TemplateCompactor` is deterministic and free. For higher-quality summaries implement
-`Compactor` with an LLM call — its `carry_over` parameter hands you the previous summary so
-each compaction folds in what came before. Compactors run inline on the `load` path, so a
-slow one delays every turn.
+The shape above loses nothing: the log keeps every turn and only the request is cut. The
+messages before the window are there to archive into a vector store for semantic recall, or
+to summarize as below.
 
 ## Rolling Your Own Compaction
 
@@ -274,8 +269,8 @@ across sessions. Three common shapes:
 The mechanics are the same for all three: after an exchange, distill with an extractor or a
 plain prompt, then persist. When a new conversation starts, retrieve the most relevant
 items and add them to the system prompt or the opening messages. For semantic retrieval,
-embed them and use a vector store — see RAG and Embeddings. A
-`DemotionHook` is a natural place to feed evicted turns into that store.
+embed them and use a vector store — see RAG and Embeddings. The messages before a `view`
+window are a natural feed for that store.
 
 Two cautions worth building in from the start:
 

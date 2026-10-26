@@ -2,7 +2,7 @@
 name: axum-service
 description: "Use when changing an axum service — routes, extractors, response DTOs, AppError statuses, utoipa OpenAPI, settings, secrets, middleware order, health checks, pagination, SSE, background tasks, shutdown, JWT auth, tracing, JSON logs, OTLP export, traceparent propagation, Prometheus metrics. Also for Handler is not satisfied, Path segments must not start with a colon, no method named tracer, spans never reaching the collector. Not for queries (sea-orm-postgres), a new service (rust-scaffolding), flaky tests (rust-testing), Cargo.toml or CI (rust-tooling)."
 metadata:
-  version: "0.3.0"
+  version: "0.3.1"
 ---
 
 # axum service patterns

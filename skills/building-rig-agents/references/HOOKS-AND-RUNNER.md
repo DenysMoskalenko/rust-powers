@@ -3,8 +3,8 @@
 Read this file when the user wants per-run controls, audit logging, approval flows,
 guardrails, request shaping, invalid-tool-call recovery, or concurrent tool execution.
 
-Verified against `rig` 0.44.0. The `on_event(StepEvent) -> Flow` hook API documented on
-rig.rs is the 0.40 one, **replaced in 0.41**; 0.44 uses per-event methods with per-event action types. See
+Verified against `rig` 0.45.0. The `on_event(StepEvent) -> Flow` hook API documented on
+rig.rs is the 0.40 one, **replaced in 0.41**; 0.45 uses per-event methods with per-event action types. See
 Version Drift.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
@@ -70,7 +70,7 @@ println!("tokens: {:?}", response.usage.total_tokens);
 | `accept_unknown_finish_reasons(true)` | Treat a reply's unknown finish reason as a normal stop instead of failing the run |
 | `unhandled_invalid_tool_call(UnhandledInvalidToolCall::Ignore)` | Drop an invalid call no hook resolves and continue the turn, instead of failing (`rig::run::UnhandledInvalidToolCall`) |
 | `history(iter)` | Explicit history — **bypasses conversation memory for this run** |
-| `conversation(id)` | Conversation id used to load and save memory |
+| `conversation(log)` | The memory log this run loads and saves, one path segment; the agent's name by default |
 | `without_memory()` | Same bypass, without supplying manual history |
 | `tool_concurrency(n)` | Execute up to `n` tool calls from one model turn at once |
 | `tool_context(ToolContext)` | Runtime-only values for tools; invisible to the model |
@@ -113,7 +113,7 @@ use rig::agent::{AgentHook, DispatchAction, DispatchEvent, HookContext, OutcomeA
 struct ToolAudit;
 
 impl AgentHook for ToolAudit {
-    /// Every effect on the agent's bus passes here; only a tool call has a tool name.
+    /// Every effect the agent dispatches passes here; only a tool call has a tool name.
     async fn on_dispatch(&self, ctx: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
         if let Some(tool) = event.tool_name() {
             tracing::info!(turn = ctx.turn(), tool, args = event.tool_args(), "tool call");
@@ -140,8 +140,8 @@ impl AgentHook for ToolAudit {
 | `on_completion_call` | `CompletionCallEvent<'_>` | `CompletionCallAction` |
 | `on_model_turn_finished` | `ModelTurnFinished<'_>` | `ModelTurnAction` |
 | `on_invalid_tool_call` | `&InvalidToolCallContext` | `Option<InvalidToolCallAction>` |
-| `on_dispatch` | `DispatchEvent<'_>` | `DispatchAction` — before every tool call and completion; memory, retrieval, embed, rerank and custom effects only when `observes` opts in |
-| `on_outcome` | `OutcomeEvent<'_>` | `OutcomeAction` — after it, with the tool result or the model reply |
+| `on_dispatch` | `DispatchEvent<'_>` | `DispatchAction` — before every tool call and completion; retrieval, embed, rerank and custom effects only when `observes` opts in |
+| `on_outcome` | `OutcomeEvent<'_>` | `OutcomeAction` — after it, with the tool result or the model reply; every completion attempt no hook denied gets one, so an `Ok` reply is not an accepted turn (that is `on_model_turn_finished`) |
 | `on_text_delta` | `TextDelta<'_>` | `ObservationAction` |
 | `on_reasoning_delta` | `ReasoningDelta<'_>` | `ObservationAction` |
 | `on_tool_call_delta` | `ToolCallDelta<'_>` | `ObservationAction` |
@@ -151,7 +151,7 @@ The action types:
 
 ```rust
 enum DispatchAction { Proceed, Patch(EffectKind), Deny(ErrorReport) }
-enum OutcomeAction  { Proceed, Replace(Result<Outcome, ErrorReport>) }
+enum OutcomeAction  { Proceed, Replace(Result<Answered, ErrorReport>) }
 enum ObservationAction { Continue, Stop(String) }
 enum CompletionCallAction { Continue, Patch(RequestPatch), Stop(String) }
 enum InvalidToolCallAction { Fail, Retry { feedback }, Repair { tool_name }, Skip { reason }, Stop { reason } }
@@ -161,7 +161,7 @@ Construct them through the helpers rather than the variants:
 
 | Action | Constructors |
 |---|---|
-| `DispatchAction` | `proceed()`, `rewrite_tool_args(kind, args)`, `try_rewrite_tool_args(kind, &value)` (serializes for you), `skip(reason)`, `stop(reason)` |
+| `DispatchAction` | `proceed()`, `rewrite_tool_args(kind, args)`, `skip(reason)`, `stop(reason)` |
 | `OutcomeAction` | `proceed()`, `rewrite_tool_result(&event, string)`, `rewrite_tool_output(&event, ToolOutput)`, `stop(reason)` |
 | `ObservationAction` | `continue_run()`, `stop(reason)` |
 | `RunStartAction` | `continue_run()`, `rewrite(prompt)`, `stop(reason)` |
@@ -190,7 +190,7 @@ pub struct DispatchEvent<'a> {
 pub struct OutcomeEvent<'a> {
     pub id: EffectId,
     pub kind: &'a EffectKind,
-    pub outcome: &'a Result<Outcome, ErrorReport>, // including earlier hooks' replacements
+    pub outcome: &'a Result<Answered, ErrorReport>, // including earlier hooks' replacements
     pub turn: usize,
     pub call_id: Option<&'a CallId>,
     pub context: Option<&'a ToolContext>, // inbound values plus result metadata
@@ -309,7 +309,7 @@ On Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 every thinking block is 
 `system` prompt, the tool set and the messages before it. A patch to `preamble`,
 `active_tools` or `history` changes that prefix, so the next request that replays the block
 gets a 400 wherever the API enforces the check, which includes every account created from
-31 August 2026. On Anthropic's own API in adaptive thinking, the default, rig 0.44 asks for
+31 August 2026. On Anthropic's own API in adaptive thinking, the default, rig 0.45 asks for
 such a block to be dropped rather than the request rejected (`thinking.block_binding`, beta
 `thinking-binding-controls-2026-08-01`), so the request goes through without that reasoning.
 Haiku 5.5 is missing from rig's model catalog, so rig does not send `block_binding` for it and
@@ -434,7 +434,8 @@ systems where you serialize the run while tools are pending, wait for an approva
 another service, then deserialize and feed results back. `AgentRun` has no hooks, because
 hooks are async side-effecting driver code and live at the runner layer. Since 0.43,
 `agent.resume(run)` turns a deserialized `AgentRun` back into an `AgentRunner` that continues
-under the agent's hooks and tools; the run keeps its own history and turn budget, and pending
-tool calls execute again.
+under the agent's hooks and tools; the run keeps its own history and turn budget, unanswered
+tool calls execute again and answered ones keep their results. A run serialized by 0.44 does
+not load in 0.45: finish or discard it before upgrading.
 
 Back to the reference index in SKILL.md.

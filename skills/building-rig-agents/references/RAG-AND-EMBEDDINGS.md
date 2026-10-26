@@ -3,7 +3,7 @@
 Read this file when the user wants an agent grounded in their own documents, semantic
 search, or tool-RAG for a large tool inventory.
 
-Verified against `rig` 0.44.0.
+Verified against `rig` 0.45.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -202,7 +202,7 @@ They all implement the same `VectorStoreIndex` trait, so swapping the store does
 the agent code:
 
 ```toml
-rig = { version = "0.44", features = ["qdrant"] }
+rig = { version = "0.45", features = ["qdrant"] }
 ```
 
 ## Tool-RAG
@@ -263,7 +263,7 @@ let agent = AgentBuilder::new(client.completion(MODEL))
 `retrieved_tools(n, index, toolset)` fetches the `n` most relevant tool definitions per
 request and offers only those to the model; called tools are executed from the toolset.
 
-Note the method name: in 0.44 `dynamic_tools(..)` means *runtime-defined* tools, not
+Note the method name: in 0.45 `dynamic_tools(..)` means *runtime-defined* tools, not
 retrieved ones. Website snippets using `dynamic_tools(2, index, toolset)` will not compile.
 
 ## Beyond Top-K

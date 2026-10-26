@@ -4,7 +4,7 @@ One pick per concern. Decided 13 September 2026.
 
 Toolchain: Rust 1.99, edition 2024, resolver 3. python-powers is the sibling project this
 repository mirrors for Python services.
-Re-validated on rustc 1.99.0 / clippy 0.1.99, 12 October 2026: `cargo update` (590 packages in the scaffold lock, 942 with every add-when-needed crate), `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings` with the `[lints]` table below active (zero warnings), and `cargo deny check` (advisories, bans, licenses, sources all ok). The skeleton wires settings, `AppError`, `Valid<T>`/`ValidQuery<T>`, sea-orm + a `migration/` crate, OTLP traces with the W3C propagator and the axum OTel middleware, a traced reqwest client, Prometheus metrics and Swagger UI. Every "add when needed" crate (rig, rmcp, axum-extra, jsonwebtoken, argon2, nutype) is resolved and compiled in the same lock file. The messaging and cache crates (async-nats 0.50, redis 1.7, deadpool-redis 0.23.1) compile clippy-clean in that lock file, and their snippet tests pass against Docker NATS 2.14 / Redis 8.
+Re-validated on rustc 1.99.1 / clippy 0.1.99, 26 October 2026: `cargo update` (583 packages in the scaffold lock, 935 with every add-when-needed crate), `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings` with the `[lints]` table below active (zero warnings), and `cargo deny check` (advisories, bans, licenses, sources all ok). The skeleton wires settings, `AppError`, `Valid<T>`/`ValidQuery<T>`, sea-orm + a `migration/` crate, OTLP traces with the W3C propagator and the axum OTel middleware, a traced reqwest client, Prometheus metrics and Swagger UI. Every "add when needed" crate (rig, rmcp, axum-extra, jsonwebtoken, argon2, nutype) is resolved and compiled in the same lock file. The messaging and cache crates (async-nats 0.50, redis 1.8, deadpool-redis 0.23.1) compile clippy-clean in that lock file, and their snippet tests pass against Docker NATS 2.14 / Redis 8.
 
 ## One Pick Per Concern
 
@@ -26,9 +26,9 @@ Re-validated on rustc 1.99.0 / clippy 0.1.99, 12 October 2026: `cargo update` (5
 | containers in tests | testcontainers-modules 0.15 | |
 | test data | fake (`#[derive(Dummy)]`) + bon (builders) | |
 | time in tests | `Clock` trait + `tokio::time::pause` | nothing can intercept `Utc::now()` |
-| LLM agents | rig 0.44 + rmcp 2 | add when needed |
+| LLM agents | rig 0.45 + rmcp 3 | add when needed |
 | messaging | async-nats 0.50 | add when needed; core `publish`/`subscribe`/`request`, JetStream `get_or_create_consumer` + `consumer.messages()`, `message.ack()` |
-| cache | redis 1.7 (`ConnectionManager`) | add when needed; one multiplexed connection, not a pool |
+| cache | redis 1.8 (`ConnectionManager`) | add when needed; one multiplexed connection, not a pool |
 | telemetry | tracing + tracing-opentelemetry + opentelemetry-otlp (traces); metrics + axum-prometheus (`/metrics`) | |
 | pre-commit hooks | prek | installed with `cargo binstall prek` |
 | task runner | Makefile | calls cargo directly, no task runner underneath |
@@ -128,8 +128,8 @@ sea-orm 1.x → 2.0 — the renames that break nearly every pre-2026 snippet:
 
 ### AI (add when needed)
 
-- **rig 0.44** — the facade crate, not `rig-core`. `rig-core` has no agent layer at all: `Agent` and `Extractor` live in `rig-agent`, which `rig` re-exports. Default features are `rig-core/default`, `reqwest`, `agent`, `derive`, `rustls`. 0.43 rewrote the public API (`AgentBuilder::new(client.completion(model))`, `.output` on `PromptResponse`, `prompt(..).stream()`) and 0.44 renamed the `PromptError` variants and made `output()` a method; the old-to-new tables are the skill's `VERSION-DRIFT.md`. Gives agents, tools, structured output, RAG, 20+ providers, OTel GenAI conventions.
-- **rmcp 2**: rig-rmcp 0.44, which rig's `rmcp` feature pulls in, pins `rmcp ^2`, and two rmcp majors in one graph produce two incompatible `Peer<RoleClient>` types. Enable rig's `rmcp` feature to use MCP tools inside an agent. rmcp 3 is only for a standalone MCP server with no rig in the graph.
+- **rig 0.45** — the facade crate, not `rig-core`. `rig-core` has no agent layer at all: `Agent` and `Extractor` live in `rig-agent`, which `rig` re-exports. Default features are `rig-core/default`, `reqwest`, `agent`, `derive`, `rustls`. 0.43 rewrote the public API (`AgentBuilder::new(client.completion(model))`, `.output` on `PromptResponse`, `prompt(..).stream()`), 0.44 renamed the `PromptError` variants and made `output()` a method, and 0.45 moved conversation memory onto `rig-memory` stores (`.memory(store)` plus a one-segment `.conversation(log)`) and MCP onto `McpConnection`; the old-to-new tables are the skill's `VERSION-DRIFT.md`. MSRV 1.97.1. Gives agents, tools, structured output, RAG, 20+ providers, OTel GenAI conventions.
+- **rmcp 3**: rig-rmcp 0.45, which rig's `rmcp` feature pulls in, needs `rmcp ^3.5`, and two rmcp majors in one graph produce two incompatible `RunningService` types that `McpConnection::new` rejects. Enable rig's `rmcp` feature to use MCP tools inside an agent; the same major serves a standalone MCP server.
 
 ### Auth (add when needed)
 
@@ -149,7 +149,7 @@ sea-orm 1.x → 2.0 — the renames that break nearly every pre-2026 snippet:
 
 ### Cache (add when needed)
 
-- **redis 1.7** (redis-rs), features `tokio-comp`, `tokio-rustls-comp` (`rediss://` to a managed cache), `connection-manager`, `script` (a default, listed so `default-features = false` cannot drop `redis::Script`). BSD-3-Clause, already in `deny.toml`. MSRV 1.88.
+- **redis 1.8** (redis-rs), features `tokio-comp`, `tokio-rustls-comp` (`rediss://` to a managed cache), `connection-manager`, `script` (a default, listed so `default-features = false` cannot drop `redis::Script`). BSD-3-Clause, already in `deny.toml`. MSRV 1.88.
 - One `aio::ConnectionManager` per process, in `AppState` by value: `Clone`, one multiplexed socket, reconnects itself with backoff. Commands take `&mut self`, so clone per call, never a `Mutex`. `get_connection_manager_with_config` connects eagerly; set the `ConnectionManagerConfig` response timeout to ~100 ms (default 500 ms) so a slow cache is not a slow API.
 - A pool only for blocking commands: a multiplexed connection interleaves every caller, so one `BLPOP key 2` stalled an unrelated `GET` on a clone by 1.94 s (measured). A module that issues `BLPOP`/`BRPOP`/`BLMOVE`/`BZPOPMIN`/`XREAD BLOCK`/`WAIT` gets its own small `deadpool-redis` 0.23.1 pool, built with `Manager::new_with_config` and a response timeout longer than the block (the 500 ms default cancels a `BLPOP key 2`).
 - The `json` feature is the RedisJSON server module, not serde support; a `Json<T>` newtype over `serde_json` needs no feature. Keys `app:v1:entity:id`, every write has a TTL, `SCAN` never `KEYS`, an outage degrades to a miss and never a 500.
@@ -232,21 +232,21 @@ derive_more = { version = "2", features = ["full"] }
 strum = { version = "0.28", features = ["derive"] }
 # add when needed (all resolved and compiled in the same lock file):
 # axum-extra = { version = "0.12", features = ["typed-header"] }
-# rig = { version = "0.44", features = ["rmcp"] }   # the facade; rig-core has no agents. Add "memory" for history policies (windowing, compaction), "test-utils" as a dev feature
-# rmcp = { version = "2", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }   # rig-rmcp pins ^2
+# rig = { version = "0.45", features = ["rmcp"] }   # the facade; rig-core has no agents. Add "memory" for rig::memory (stores, windows, compaction), "test-utils" as a dev feature
+# rmcp = { version = "3", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }   # rig-rmcp needs ^3.5
 # jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }   |   argon2 = "0.6"   |   nutype = { version = "0.8", features = ["serde"] }   |   sha2 = "0.11"
 # async-nats = "0.50"   # jetstream, kv, object-store, service are defaults
-# redis = { version = "1.7", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager", "script"] }
+# redis = { version = "1.8", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager", "script"] }
 # deadpool-redis = "0.23.1"   # only for blocking commands (BLPOP & co.)
 
 [dev-dependencies]
-rstest = "0.27"
+rstest = "0.28"
 insta = { version = "1.49", features = ["json", "redactions"] }
 similar-asserts = "2"
 testcontainers-modules = { version = "0.15", features = ["postgres", "redis", "nats"] }
 testcontainers = { version = "0.27", features = ["reusable-containers"] }   # modules does not re-export it
 axum-test = "21"
-httpmock = "0.8"
+httpmock = "0.9"
 mockall = "0.15"
 fake = { version = "5", features = ["derive", "chrono", "uuid", "rust_decimal"] }
 rand = "0.10"                                            # the version fake 5 builds on
@@ -293,7 +293,7 @@ Levels stay in `Cargo.toml`; thresholds go in `clippy.toml` at the repo root: `a
 
 ```toml
 [toolchain]
-channel = "1.99.0"
+channel = "1.99.1"
 components = ["rustfmt", "clippy", "llvm-tools-preview"]
 ```
 
