@@ -17,11 +17,15 @@ STALE_TEST_DB := (pg_stat_file('base/' || oid || '/PG_VERSION', true)).modificat
 TARGET_CAP_GB ?= 15
 # cargo metadata resolves CARGO_TARGET_DIR, .cargo/config.toml and build.build-dir alike;
 # `sort` puts build_directory first, and a cargo without that field reports target_directory.
-cap_target = dir=$$(cargo metadata --no-deps --format-version 1 | grep -oE '"(build|target)_directory":"[^"]*"' \
-	| sort | head -1 | cut -d'"' -f4); \
+# `cargo clean` takes no lock, so a directory outside the workspace, maybe shared, is only reported.
+cap_target = meta=$$(cargo metadata --no-deps --format-version 1); \
+	dir=$$(printf '%s' "$$meta" | grep -oE '"(build|target)_directory":"[^"]*"' | sort | head -1 | cut -d'"' -f4); \
+	root=$$(printf '%s' "$$meta" | grep -oE '"workspace_root":"[^"]*"' | cut -d'"' -f4); \
 	kb=$$(du -sk "$$dir" 2>/dev/null | cut -f1); \
-	if [ "$${kb:-0}" -gt $$(($(TARGET_CAP_GB) * 1048576)) ]; then \
-	echo "$$dir is past $(TARGET_CAP_GB) GB: cargo clean"; cargo clean; fi
+	if [ "$${kb:-0}" -gt $$(($(TARGET_CAP_GB) * 1048576)) ]; then case "$$dir" in \
+	"$$root"/*) echo "$$dir is past $(TARGET_CAP_GB) GB: cargo clean"; cargo clean;; \
+	*) echo "$$dir is past $(TARGET_CAP_GB) GB and outside this workspace: cargo clean it when nothing builds there";; \
+	esac; fi
 
 install-tools:
 	cargo install cargo-binstall

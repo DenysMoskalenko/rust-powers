@@ -154,8 +154,8 @@ Reasoning check only: the scaffold has no such endpoint or upstream setting, so 
 
 ### Probe 6 - a new test area
 
-**Prompt**: "Add API tests for the new `/orders` resource: create, fetch by id, and a 404 for an unknown id. Put them in their own file."
+**Prompt**: "Write API tests for the `/orders` resource a teammate is adding in another branch: create, fetch by id, and a 404 for an unknown id. Tests only, in their own file."
 
 **Wrong answer**: `(?:^|\n)[ \t]*mod common;[ \t]*\n\s*(?:use |#!?\[|(?:pub )?(?:async )?fn )`
 
-**Right answer**: `(?:^|\n)[ \t]*mod orders;`
+**Right answer**: `(?:^|\n)[ \t]*(?:pub )?mod orders;`

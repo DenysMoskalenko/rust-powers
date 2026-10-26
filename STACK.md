@@ -51,7 +51,7 @@ Re-validated on rustc 1.99.0 / clippy 0.1.99, 12 October 2026: `cargo update` (5
 - Tool versions the skills were verified against: cargo-nextest 0.9, cargo-llvm-cov 0.9, cargo-deny 0.20, cargo-machete 0.9, bacon 3.26, prek 0.5, sea-orm-cli 2.0.4.
 - **Complexity**: clippy lints only, configured in `[lints.clippy]`.
 - **Linker**: default `lld` on x86_64 Linux since Rust 1.90. Add `mold` only after measuring.
-- **Disk**: stable cargo never deletes anything from `target/` (target-directory GC is cargo#13136, open), so `make test` and `make cov` run `cargo clean` past `TARGET_CAP_GB` (15). `debug = "line-tables-only"` for workspace crates, none for dependencies. cargo-sweep is unmaintained and not used.
+- **Disk**: stable cargo never deletes anything from `target/` (target-directory GC is cargo#13136, open), so `make test` and `make cov` run `cargo clean` past `TARGET_CAP_GB` (15) on a target directory inside the workspace, and only report one outside it, which may be shared. `debug = "line-tables-only"` for workspace crates, none for dependencies. cargo-sweep is unmaintained and not used.
 
 ### Web
 

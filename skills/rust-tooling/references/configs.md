@@ -134,14 +134,14 @@ one, and a `cargo update` that moves a crate most of the tree depends on nearly 
   removes it.
 - `make test` and `make cov` run `cargo clean` once the target directory passes `TARGET_CAP_GB` (see the
   Makefile below): a full rebuild of about 1.5 minutes now and then, in exchange for a bound. Builds outside
-  them (bacon, an IDE, plain cargo) are never capped.
+  them (bacon, an IDE, plain cargo) are never capped, and `cargo clean` takes no lock: one of them running in
+  the directory at that moment fails once.
 - One integration-test binary (`rust-testing`): every extra file directly in `tests/` adds about 85 MB of
   binary plus its incremental cache, in the test build and the coverage build both.
 - Each checkout of the repository, git worktrees included, pays for the whole set. Pointing several at one
   `CARGO_TARGET_DIR` shares the dependency builds, but their builds then queue on one lock (`Blocking waiting
-  for file lock on build directory`), and the cap's `cargo clean` takes no lock: it empties the directory under
-  all of them, failing any build running there at that moment. With a shared directory, raise `TARGET_CAP_GB`
-  in the environment and run `cargo clean` by hand when nothing is building.
+  for file lock on build directory`). The cap only reports a directory outside the workspace, since it may be
+  shared: run `cargo clean` there by hand when nothing is building.
 
 `cargo clean` re-fetches nothing: sources stay under `~/.cargo`, which cargo prunes on its own (unused for a
 month when it can rebuild them, three months when it downloaded them). Cargo's `cargo clean gc` size limits
@@ -407,11 +407,15 @@ STALE_TEST_DB := (pg_stat_file('base/' || oid || '/PG_VERSION', true)).modificat
 TARGET_CAP_GB ?= 15
 # cargo metadata resolves CARGO_TARGET_DIR, .cargo/config.toml and build.build-dir alike;
 # `sort` puts build_directory first, and a cargo without that field reports target_directory.
-cap_target = dir=$$(cargo metadata --no-deps --format-version 1 | grep -oE '"(build|target)_directory":"[^"]*"' \
-	| sort | head -1 | cut -d'"' -f4); \
+# `cargo clean` takes no lock, so a directory outside the workspace, maybe shared, is only reported.
+cap_target = meta=$$(cargo metadata --no-deps --format-version 1); \
+	dir=$$(printf '%s' "$$meta" | grep -oE '"(build|target)_directory":"[^"]*"' | sort | head -1 | cut -d'"' -f4); \
+	root=$$(printf '%s' "$$meta" | grep -oE '"workspace_root":"[^"]*"' | cut -d'"' -f4); \
 	kb=$$(du -sk "$$dir" 2>/dev/null | cut -f1); \
-	if [ "$${kb:-0}" -gt $$(($(TARGET_CAP_GB) * 1048576)) ]; then \
-	echo "$$dir is past $(TARGET_CAP_GB) GB: cargo clean"; cargo clean; fi
+	if [ "$${kb:-0}" -gt $$(($(TARGET_CAP_GB) * 1048576)) ]; then case "$$dir" in \
+	"$$root"/*) echo "$$dir is past $(TARGET_CAP_GB) GB: cargo clean"; cargo clean;; \
+	*) echo "$$dir is past $(TARGET_CAP_GB) GB and outside this workspace: cargo clean it when nothing builds there";; \
+	esac; fi
 
 install-tools:
 	cargo install cargo-binstall
@@ -473,10 +477,10 @@ nextest's own `NEXTEST_RUN_ID`, new for every nextest run, as CI does. The clean
 `rust-powers-test-postgres` container; what it drops and why is `sea-orm-postgres`'s.
 
 `cap_target` opens `test` and `cov`: it measures the build directory `cargo metadata` reports, wherever
-`CARGO_TARGET_DIR` or a `.cargo/config.toml` put it, and runs `cargo clean` past `TARGET_CAP_GB` whole
-gigabytes. That costs about half a second of `du` on a 9 GB directory, a few seconds cold. Raise the cap per run
-(`make test TARGET_CAP_GB=30`) or in the environment; why the directory needs one is under
-[target/ size](#target-size).
+`CARGO_TARGET_DIR` or a `.cargo/config.toml` put it. Past `TARGET_CAP_GB` whole gigabytes it runs `cargo clean`
+when that directory is inside the workspace, and prints a reminder when it is outside. That costs about half a
+second of `du` on a 9 GB directory, a few seconds cold. Raise the cap per run (`make test TARGET_CAP_GB=30`) or in
+the environment; why the directory needs one is under [target/ size](#target-size).
 
 `cov` writes `lcov.info` into the target directory (`CARGO_TARGET_DIR` when set; a hard-coded `target/` then
 does not exist and the step fails) **before** the gate runs, because `--fail-under-lines` exits non-zero and make

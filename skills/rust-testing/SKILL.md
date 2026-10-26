@@ -193,4 +193,4 @@ The per-run template, its clone and cleanup are `sea-orm-postgres`'s.
 | `tokio::time::sleep` to wait for background work | await the `JoinHandle` or a oneshot; `start_paused` auto-advances past every timeout on the way to Postgres, so `test_app()` fails at once |
 | Assert on `Utc::now()` output | inject the `Clock`; `Utc::now()` has no hook a test can intercept |
 | `std::env::set_var` to configure a test | build settings from a map; `set_var` is `unsafe` under a forbid lint |
-| Add a file directly under `tests/` | a module in `tests/api/`, declared in `main.rs`; each file in `tests/` is one more binary to link |
+| Add a file beside `tests/api/` | a module in `tests/api/`, declared in `main.rs`; each file in `tests/` is one more binary to link |

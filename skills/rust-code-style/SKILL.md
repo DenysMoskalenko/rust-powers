@@ -122,7 +122,7 @@ Fix the finding rather than silencing it. A justified suppression is `#[expect(l
 ## Valid Patterns — Do Not Flag
 
 - `#[expect(clippy::expect_used, reason = "...")]` on an item whose `expect` cannot fail, and `unwrap` or `expect` under `cfg(test)` or in `tests/`.
-- `#![allow(lint, reason = "...")]` in a file several targets compile, such as a `tests/common/mod.rs` shared by one test binary per file, or a library module that `--all-targets` also builds under `cfg(test)`, when the lint fires in only some: `#![expect]` there fails as unfulfilled.
+- `#![allow(lint, reason = "...")]` where `#![expect]` would go unfulfilled: a file several targets compile when the lint fires in only some (a `tests/common/mod.rs` shared by per-file test binaries, a library module `--all-targets` also builds under `cfg(test)`), or a test module whose lint-tripping helpers come and go.
 - A `match` with one arm per variant and no `_` arm — exhaustiveness is the point.
 - A module named after its type (`user::User`).
 - A bare `Uuid` id in an entity, a `Path<Uuid>`, a DTO, or a function taking one id.

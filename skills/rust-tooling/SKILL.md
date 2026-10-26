@@ -60,10 +60,11 @@ toolchain names literally: a `"1.99"` channel is a second toolchain, downloaded 
 versions that build on it, so an MSRV set too low silently holds dependencies back; the lock step prints
 `(available: vX, requires Rust Y)` and moves on.
 
-Bumping the toolchain is a lint bump: edit the channel and the chef image tag in one commit, run
-`cargo clippy --workspace --all-targets --all-features -- -D warnings`, fix whatever the new clippy added.
-It also rebuilds everything beside the old artifacts, which nothing deletes: `cargo clean`, then
-`rustup toolchain uninstall` the previous version unless another checkout still pins it.
+Bumping the toolchain is a lint bump: edit the channel and the chef image tag in one commit, `cargo clean`
+first unless the target directory is shared, since the new toolchain rebuilds everything beside the old
+artifacts and nothing deletes them, then run
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` and fix whatever the new clippy added.
+Tell the user the previous toolchain can go with `rustup toolchain uninstall` once no other checkout pins it.
 
 ## Dependencies and the lockfile
 
