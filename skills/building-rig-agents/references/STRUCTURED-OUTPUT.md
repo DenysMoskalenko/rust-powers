@@ -4,7 +4,7 @@ Read this file when the user wants typed data out of a model instead of a string
 extraction, classification, scoring, or any agent step whose result feeds code rather than
 a human.
 
-Verified against `rig` 0.44.0.
+Verified against `rig` 0.45.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -26,7 +26,7 @@ Verified against `rig` 0.44.0.
 | An agent whose every answer matches a schema | `AgentBuilder::output_schema::<T>()` |
 
 The extractor forces its submit tool with `ToolChoice::Required`. Claude Opus 5.5, Sonnet
-5.5 and Fable 5.1 reject a forced tool choice, so on those models rig 0.44 drops the force
+5.5 and Fable 5.1 reject a forced tool choice, so on those models rig 0.45 drops the force
 and asks for native output instead, which rig sends to Anthropic as `output_config.format`;
 a forced choice you set on an agent yourself still reaches them, and is still a 400.
 `prompt_typed` always runs in `OutputMode::Native`, so the provider guarantees the schema on

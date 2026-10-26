@@ -63,12 +63,12 @@ Need typed output?
 └── No → Need tokens as they arrive?
     ├── Yes → agent.prompt(..).stream()
     └── No  → Carrying conversation history?
-        ├── Yes, and Rig should persist it → memory + .conversation(id)
+        ├── Yes, and Rig should persist it → memory + .conversation(log)
         ├── Yes, and I own the Vec         → agent.chat(prompt, &mut history)
         └── No                             → agent.prompt(..)
 ```
 
-There is no `Completion` trait in 0.44 — it was removed after 0.39. Drop to a model's
+There is no `Completion` trait in 0.45 — it was removed after 0.39. Drop to a model's
 `call(CompletionRequest::new(..))` when you want full control of one request.
 
 ### Which tool form?
@@ -78,14 +78,13 @@ Does it need runtime values the model must not see (auth, tenant, session)?
 ├── Yes → impl Tool, read them from &mut ToolContext
 └── No → Does it hold state, need a custom error type, or need a schema
          the macro cannot express?
-    ├── Yes, and it never needs context → impl PortableTool
-    ├── Yes, otherwise                  → impl Tool
+    ├── Yes                             → impl Tool, ignoring the context if unused
     └── No                              → #[rig::rig_tool]
 
 Then:
   Many tools, only a few relevant per request? → retrieved_tools(n, index, toolset)
   Tools defined at runtime?                    → dynamic_tool / dynamic_tools
-  Tools served by another process?             → tools_from_server → DynamicTool::try_from → dynamic_tools
+  Tools served by another process?             → McpConnection::tools → DynamicTool::try_from → dynamic_tools
   Several agents sharing one mutable set?      → ToolServer + tool_server_handle
 ```
 
@@ -130,16 +129,15 @@ Multi-turn conversation?
 ├── No  → nothing; each prompt is independent
 └── Yes → Who should own the history?
     ├── You  → agent.chat(p, &mut history), or .history(..) + push it yourself
-    └── Rig  → .memory(backend) + .conversation(id)
+    └── Rig  → .memory(store) + .conversation(log)
                    └── Will it outgrow the context window?
-                        ├── No                       → the backend alone
-                        ├── Old turns are disposable → backend + a MemoryPolicy
-                        │                               (SlidingWindowMemory / TokenWindowMemory)
-                        ├── The gist matters         → CompactingMemory(backend, policy, compactor)
-                        └── Evicted turns are needed → DemotingPolicyMemory → vector store
+                        ├── No               → the store alone
+                        ├── Old turns can go → load and save the log yourself, send
+                        │                      view(.., LastMessages / TokenBudget) via .history(..)
+                        └── The gist matters → summarize and restart from the summary
 ```
 
-A `MemoryPolicy` is not a backend and cannot be passed to `.memory(..)` — see
+`.memory(..)` sends the whole log every run; rig 0.45 has no window on that path — see
 Memory and History.
 
 ### How to test it?
@@ -169,13 +167,13 @@ Knowing which layer owns a value answers most "why did it not persist" questions
 |---|---|---|
 | Preamble, static context, tools, default hooks | `Agent` | The agent |
 | Turn budget, tool concurrency, per-run overrides, hooks | `AgentRunner` | One run |
-| Conversation history | `ConversationMemory` backend, or your `Vec<Message>` | Per conversation id |
+| Conversation history | `.memory(..)` store, or your `Vec<Message>` | Per conversation log |
 | Values passed to tools, invisible to the model | `ToolContext` | One run's tool dispatches |
 | Cross-hook state within a run | `HookContext::scratchpad()` | One run |
 | Documents and embeddings | Vector store | Until you delete them |
 
 Nothing in the agent itself is persisted, so anything that must survive a process restart
-needs a durable backend: a `ConversationMemory` implementation or a persistent vector
+needs a durable backend: an `AsyncStore` implementation or a persistent vector
 store.
 
 Back to the reference index in SKILL.md.

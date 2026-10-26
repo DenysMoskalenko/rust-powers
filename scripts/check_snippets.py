@@ -62,8 +62,8 @@ def allow_prefix(code: str) -> str:
 
 # Crates STACK.md keeps commented out as "add when needed"; snippets may use any of them.
 ADD_WHEN_NEEDED = [
-    'rig = { version = "0.44", features = ["memory", "rmcp", "test-utils"] }',
-    'rmcp = { version = "2", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }',
+    'rig = { version = "0.45", features = ["memory", "rmcp", "test-utils"] }',
+    'rmcp = { version = "3", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }',
     'deadpool-redis = "0.23.1"',
     'sha2 = "0.11"',
     'jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }',
@@ -71,7 +71,7 @@ ADD_WHEN_NEEDED = [
     'axum-extra = { version = "0.12", features = ["typed-header"] }',
     'nutype = { version = "0.8", features = ["serde"] }',
     'async-nats = "0.50"',
-    'redis = { version = "1.7", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager", "script"] }',
+    'redis = { version = "1.8", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager", "script"] }',
 ]
 
 

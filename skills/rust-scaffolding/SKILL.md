@@ -2,12 +2,12 @@
 name: rust-scaffolding
 description: "Use when creating a brand-new Rust axum service from nothing — 'create a service that...', an empty directory with no Cargo.toml, a new API or microservice that needs migrations, tests, lints, Docker and CI green from the first commit, or a repo that still errors with could not find Cargo.toml. Greenfield only. Not for adding a route (axum-service), entity (sea-orm-postgres) or test (rust-testing) to an existing crate, nor changing tooling in an existing service (rust-tooling)."
 metadata:
-  version: "0.5.0"
+  version: "0.5.1"
 ---
 
 # Rust Scaffolding (Greenfield Only)
 
-Assumes Rust 1.99.0 edition 2024, axum 0.8, sea-orm 2.0, utoipa 6, cargo-nextest, Docker.
+Assumes Rust 1.99.1 edition 2024, axum 0.8, sea-orm 2.0, utoipa 6, cargo-nextest, Docker.
 
 ## Important
 
@@ -29,7 +29,7 @@ Assumes Rust 1.99.0 edition 2024, axum 0.8, sea-orm 2.0, utoipa 6, cargo-nextest
 
 ## 1. Prerequisites
 
-`rustup` (the template's `rust-toolchain.toml` fetches 1.99.0 on the first cargo command),
+`rustup` (the template's `rust-toolchain.toml` fetches 1.99.1 on the first cargo command),
 Docker and `git`; step 4 installs everything else.
 
 ## 2. Copy the template and rename the crate

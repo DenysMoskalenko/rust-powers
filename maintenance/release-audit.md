@@ -132,8 +132,8 @@ cap: trim before adding. Never edit `verify/`; it is regenerated.
 - In the scaffold, `make check && make test`; at the root, `prek run --all-files`.
 - The exercise: scaffold a throwaway service from the `rust-scaffolding` text alone in a scratch
   directory, run `make check && make test`, delete it.
-- `grep -rn '<crate>'` and read each hit for the old number (a bare `0.27` also hits
-  `rstest 0.27`): it survives only in correction tables and STACK.md history.
+- `grep -rn '<crate>'` and read each hit for the old number (a bare `0.15` also hits
+  `mockall 0.15`): it survives only in correction tables and STACK.md history.
 - Containers: only the reusable `rust-powers-test-postgres`, `-redis`, `-nats`; `docker ps -a | wc -l`
   is equal before and after. Report `du -sh` of the scratch directory after cleanup.
 

@@ -4,7 +4,7 @@ Read this file when the user wants more than one model call wired together: work
 model routing, multi-agent systems, runtime provider selection, document loading, or an
 interactive REPL.
 
-Verified against `rig` 0.44.0.
+Verified against `rig` 0.45.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 

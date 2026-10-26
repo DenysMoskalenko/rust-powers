@@ -3,7 +3,7 @@
 Read this file when a Rig agent has to live inside an axum service: held in state, called
 from a handler, streamed to a browser, tested offline, and traced.
 
-Verified against `rig` 0.44.0, axum 0.8, axum-test 21. The agent adds one sub-struct to
+Verified against `rig` 0.45.0, axum 0.8, axum-test 21. The agent adds one sub-struct to
 `Settings`, one field to `AppState`, one module, two routes inside the middleware stack and one
 parameter to `test_app()`; `error.rs` is not touched. This
 file shows those deltas and names what stays as it is. For routes, extractors, the error
@@ -26,16 +26,15 @@ type itself, SSE transport rules and OpenAPI see `axum-service`.
 `OpenAI::from_env()` is the quick-start form. In the service the key is a setting like every
 other secret: one more sub-struct on `Settings`, read from `APP__AGENT__*` by the same
 `config` source the scaffold already has (`Settings::from_map` in tests), `SecretString` so
-it never prints, exposed once where the client is built.
+it never prints, exposed once where the model is connected.
 
 ```rust,verify,test
 //! `config.rs` delta, and the `build_agent` that `main` calls with it.
 use std::collections::HashMap;
 
 use rig::agent::{Agent, AgentBuilder};
-use rig::providers::anthropic::Anthropic;
-use rig::providers::gemini::Gemini;
-use rig::providers::openai::OpenAI;
+use rig::catalog::Catalog;
+use rig::providers::registry::ConnectOptions;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 
@@ -55,30 +54,36 @@ pub struct AgentSettings {
     pub api_key: SecretString,
 }
 
-/// A fixed set is an enum, never a `String`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// A fixed set is an enum, never a `String`. `IntoStaticStr` gives the vendor id
+/// rig's catalog files the provider under, which is `gcp.gemini` for Gemini.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, strum::IntoStaticStr)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
+    #[strum(serialize = "openai")]
     OpenAi,
+    #[strum(serialize = "anthropic")]
     Anthropic,
+    #[strum(serialize = "gcp.gemini")]
     Gemini,
 }
 
-/// rig 0.44 fails every prompt to a Claude id it does not know unless this is set,
+/// rig 0.45 fails every prompt to a Claude id it does not know unless this is set,
 /// and thinking counts toward the limit.
 const MAX_TOKENS: u64 = 16_000;
 
-/// Built once in `main`, held as `Arc<Agent>` in `AppState`. Every arm yields the
-/// same `AgentBuilder`: the model type is erased at `AgentBuilder::new(..)`.
+/// Built once in `main`, held as `Arc<Agent>` in `AppState`. The catalog connects
+/// any `vendor/model` reference, listed or not, to a `DynModel`, so one call
+/// covers every provider.
 pub fn build_agent(settings: &AgentSettings) -> anyhow::Result<Agent> {
-    let key = settings.api_key.expose_secret();
-    let model = &settings.model;
-    let builder = match settings.provider {
-        Provider::OpenAi => AgentBuilder::new(OpenAI::new(key).completion(model)),
-        Provider::Anthropic => AgentBuilder::new(Anthropic::new(key).completion(model)),
-        Provider::Gemini => AgentBuilder::new(Gemini::new(key).completion(model)),
-    };
-    Ok(builder.name("chat").preamble("You are terse.").max_tokens(MAX_TOKENS).build())
+    let vendor: &str = settings.provider.into();
+    let reference = format!("{vendor}/{}", settings.model);
+    let options = ConnectOptions::new().api_key(settings.api_key.expose_secret());
+    let model = Catalog::builtin().connect_with(reference.as_str(), options)?;
+    Ok(AgentBuilder::new(model)
+        .name("chat")
+        .preamble("You are terse.")
+        .max_tokens(MAX_TOKENS)
+        .build())
 }
 
 #[test]
@@ -103,8 +108,17 @@ fn agent_settings_parse_like_every_other_sub_struct() {
         .unwrap();
 
     assert_eq!(settings.agent.provider, Provider::Anthropic);
-    // Building a client is offline; only a prompt talks to the provider.
+    // Connecting a model is offline; only a prompt talks to the provider.
     assert!(build_agent(&settings.agent).is_ok());
+    // The vendor ids are strings now, so check each, with a model the catalog does not list.
+    for provider in [Provider::OpenAi, Provider::Gemini] {
+        let unlisted = AgentSettings {
+            provider,
+            model: "a-model-rig-does-not-list".to_owned(),
+            ..settings.agent.clone()
+        };
+        assert!(build_agent(&unlisted).is_ok(), "{provider:?}");
+    }
 }
 ```
 
@@ -144,8 +158,7 @@ the handler calls it with `.map_err(agent_error)?`:
 | `Cancelled` with the reason `UNAVAILABLE` (a policy hook whose own dependency is down) or starting `failed to retrieve dynamic context` (a vector store that is down) | `Unavailable(error.to_string())` | 503 | `"service unavailable"` |
 | `MaxTurns`, `UnknownToolCall`, any other `Cancelled` | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
 | `Provider(ProviderError::Response(..))`, a reply rig could not use | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
-| `Provider(ProviderError::UnsupportedOption(..))`, a generation option the model does not take, on an agent with `.model_spec(..)` (without one it is a `Report` of kind `Request`) | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
-| `Report` that rig raised itself (`kind` `Request`, `HandlerUnavailable`, `Internal`, or `Other` / `Denied` from a hook or layer that refused the completion) | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
+| `Report` that rig raised itself (`kind` `Request`, such as a generation option the model does not take, `HandlerUnavailable`, `Internal`, or `Other` / `Denied` from a hook or layer that refused the completion) | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
 | provider answered a 4xx other than 408 and 429 (`provider_response_status()`) | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
 | provider answered 429 | `TooManyRequests { retry_after_secs }` | 429 | `"too many requests"` + `Retry-After` |
 | anything else | `Unavailable(error.to_string())` | 503 | `"service unavailable"` |
@@ -261,11 +274,10 @@ fn agent_error(error: PromptError) -> AppError {
         {
             AppError::Unavailable(error.to_string())
         }
-        // Out of turns, a tool the model invented, a run rig cancelled itself, a reply
+        // Out of turns, a tool the model invented, a run rig cancelled itself or a reply
         // rig could not use (a filtered turn, an unknown finish reason, malformed tool
-        // arguments) or an option the model does not take: a bug on this side or a
-        // request that cannot succeed, none of it retryable. `Other` is 500, logged
-        // with its cause chain, answered with a constant.
+        // arguments): a bug on this side or a request that cannot succeed, none of it
+        // retryable. `Other` is 500, logged with its cause chain, answered with a constant.
         PromptError::MaxTurns { .. }
         | PromptError::UnknownToolCall { .. }
         | PromptError::Cancelled { .. }
@@ -273,8 +285,9 @@ fn agent_error(error: PromptError) -> AppError {
             ProviderError::Response(_) | ProviderError::UnsupportedOption(_),
         ) => AppError::Other(anyhow::Error::from(error)),
         // A failure rig raised before any provider replied: a request it could
-        // not build, an unregistered model label, a broken invariant, a hook or
-        // layer that skipped or denied the completion.
+        // not build, such as an option the model does not take, an unregistered
+        // model label, a broken invariant, a hook or layer that skipped or denied
+        // the completion.
         PromptError::Report(ref report)
             if matches!(
                 report.kind,
@@ -680,17 +693,29 @@ the provider call with it. `max_turns` bounds how many model calls one run makes
 - **Cancellation is a drop** — the browser disconnects, axum drops the body, the run ends.
 - **Token text is untrusted model output** — escape it client-side.
 - **A conversation id is scoped to the caller.** The agent above has no `.memory(..)`, so each
-  request stands alone. With memory, `ChatRequest` gains a `conversation_id`, which is untrusted
-  input: key the store by the authenticated user as well, or one user's guessed id reads another
-  user's history. With axum-service's `AuthUser` as a handler argument before the body extractor:
+  request stands alone. With memory, `ChatRequest` gains a `conversation_id: Option<Uuid>`, which
+  is untrusted input: key the log by the authenticated user as well, or one user's guessed id
+  reads another user's history. With axum-service's `AuthUser` as a handler argument before the
+  body extractor:
 
   ```rust
-  let mut request = state.agent.prompt(body.message).max_turns(5);
-  if let Some(id) = body.conversation_id {
-      // The client names the conversation; the token decides whose it is.
-      request = request.conversation(format!("{}/{id}", user.0.sub));
-  }
+  let request = state.agent.prompt(body.message).max_turns(5);
+  let request = match body.conversation_id {
+      // The client names the conversation; the token decides whose it is. A log
+      // name is one path segment, so `/` and `\` in a subject are escaped, `%` first
+      // so that no two subjects map to one name.
+      Some(id) => {
+          let owner = user.0.sub.replace('%', "%25").replace('/', "%2F").replace('\\', "%5C");
+          request.conversation(format!("{owner}-{id}"))
+      }
+      // With no conversation the run would save to the one log named after
+      // the agent, which every caller shares.
+      None => request.without_memory(),
+  };
   ```
+
+  Every `PromptError::Memory`, `SessionError::Changed` included, goes to `agent_error`'s 503
+  catch-all with no arm of its own.
 
 ## Testing with `axum-test` and `MockCompletionModel`
 

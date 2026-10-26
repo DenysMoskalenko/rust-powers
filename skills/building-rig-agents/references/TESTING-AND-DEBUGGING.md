@@ -3,7 +3,7 @@
 Read this file when the user wants deterministic tests without a provider, wants to score
 real model output, or needs to see what an agent is doing in production.
 
-Verified against `rig` 0.44.0.
+Verified against `rig` 0.45.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -31,7 +31,7 @@ Rig models are `Model` values and `AgentBuilder::new` takes any
 
 ```toml
 [dev-dependencies]
-rig = { version = "0.44", features = ["test-utils"] }
+rig = { version = "0.45", features = ["test-utils"] }
 ```
 
 Keep `test-utils` in `[dev-dependencies]` — mocks in a release build are dead weight and a
@@ -131,9 +131,9 @@ async fn preamble_is_sent_to_the_model() {
     let sent = probe.requests();
     assert_eq!(sent.len(), 1);
 
-    // The preamble arrives as a leading system message in `chat_history`.
+    // The preamble arrives as a leading system message in `chat_history`, behind an `Arc`.
     let system = sent[0].chat_history.first().expect("a leading system message");
-    assert!(matches!(system, Message::System { content } if content == "You are a pirate."));
+    assert!(matches!(&**system, Message::System { content } if content == "You are a pirate."));
 }
 ```
 
@@ -155,14 +155,11 @@ nothing can be ranked with it:
 
 ```rust,verify,test
 use rig::embeddings::EmbeddingsBuilder;
-use rig::test_utils::{MockEmbeddings, MockTextDocument};
+use rig::test_utils::MockEmbeddings;
 
 #[tokio::test]
 async fn builds_embeddings_offline() {
-    let docs = [
-        MockTextDocument::new("doc-1", "a green alien"),
-        MockTextDocument::new("doc-2", "an ancient farming tool"),
-    ];
+    let docs = ["a green alien".to_owned(), "an ancient farming tool".to_owned()];
 
     let embeddings = EmbeddingsBuilder::new(MockEmbeddings::model())
         .documents(docs)
@@ -181,8 +178,8 @@ accident. To pin ranking, build the store from `(document, embeddings)` pairs wh
 you choose, relative to the fixed vector the mock gives the query — see RAG and Embeddings
 for the index and search calls.
 
-`rig::test_utils` also ships memory doubles — `CountingMemory`, `AppendFailingMemory` — for
-testing the memory paths, including the failure branch most code forgets.
+Memory needs no double: a clone of a `rig::memory::MemoryStore` shares its contents, so
+`rig::memory::load(&store, log)`, behind the `memory` feature, shows what a run saved.
 
 ### What to test
 
@@ -192,7 +189,7 @@ Mock-based tests are for **your** logic, not the model's judgment:
 - Prompt construction: preamble, context, and retrieved documents land in the request.
 - Turn budgets: your `max_turns` is enough for the tool chains you expect.
 - Error paths: what your code does when a tool fails or a provider errors.
-- Memory: history is loaded, appended, and bypassed exactly when you expect.
+- Memory: history is loaded, saved, and bypassed exactly when you expect.
 
 Test tool implementations directly as ordinary async functions too — a `Tool::call` is
 just a method, and its typed `Error` survives to your assertions.
@@ -202,9 +199,9 @@ just a method, and its typed `Error` survives to your assertions.
 Mocks cannot tell you whether a real model produces *good* answers. For that you score live
 output against expectations.
 
-**There is no `rig::evals` module in 0.44.** An experimental one existed in 0.39 behind an
+**There is no `rig::evals` module in 0.45.** An experimental one existed in 0.39 behind an
 `experimental` feature and was removed by 0.41; the Evals page on rig.rs still documents it.
-`cargo add rig -F experimental` fails — that feature does not exist on `rig` 0.44.
+`cargo add rig -F experimental` fails — that feature does not exist on `rig` 0.45.
 
 Build the same three metrics on top of extractors, which are fully supported. An
 LLM-as-a-judge is an extractor with a verdict schema:

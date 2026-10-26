@@ -3,7 +3,7 @@
 Read this file when the user wants to create a provider client, configure an agent, pick
 between `prompt` / `chat` / `prompt_typed`, set per-request options, or read token usage.
 
-Verified against `rig` 0.44.0.
+Verified against `rig` 0.45.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -70,9 +70,9 @@ let agent = AgentBuilder::new(client.completion("llama3.1")).preamble("You are h
 authenticate. It also targets OpenAI itself, whose `completion(..)` route is the Responses
 API; most compatible servers implement only Chat Completions and answer that route with a 404,
 so `Route::Chat` sends `completion(..)` to `/chat/completions` (`client.chat(m)` does the same
-for one model). Every client also takes `.with_http(..)` when you need your own transport (a
-proxy, custom timeouts, instrumentation). Rig also ships a dedicated `providers::ollama`
-client.
+for one model). Every client config also takes `.connect(http)` in place of `.client()` when
+you need your own transport (a proxy, custom timeouts, instrumentation). Rig also ships a
+dedicated `providers::ollama` client.
 
 ### Swapping models at runtime
 
@@ -125,23 +125,20 @@ different providers share one type.
 | `context(&str)` | Add one static context document, sent on every request |
 | `dynamic_context(samples, index)` | Retrieve `samples` documents from a vector index per model call |
 | `name(&str)` / `description(&str)` | Become the tool name (default `agent_tool`) and description when this agent is handed to another via `into_tool()`, whose description also carries the preamble; also label telemetry spans |
-| `temperature(f64)`, `max_tokens(u64)` | Model parameters. Claude Opus 4.7 and later, Sonnet 5 and Fable reject `temperature` with a 400. On Claude, `max_tokens` covers thinking plus the reply; rig 0.44 defaults it to the published output limit of the Claude ids in its catalog (128K from Opus 4.6 and Sonnet 4.6 on), to 64K for other `claude-opus-4`, `claude-sonnet-4` and `claude-haiku-4-5` ids and, when `max_tokens` is unset, fails every prompt to any other id |
+| `temperature(f64)`, `max_tokens(u64)` | Model parameters. Claude Opus 4.7 and later, Sonnet 5 and Fable reject `temperature` with a 400. On Claude, `max_tokens` covers thinking plus the reply; rig 0.45 defaults it to the published output limit of the Claude ids in its catalog (128K from Opus 4.6 and Sonnet 4.6 on), to 64K for other `claude-opus-4`, `claude-sonnet-4` and `claude-haiku-4-5` ids and, when `max_tokens` is unset, fails every prompt to any other id |
 | `reasoning(..)`, `cache(..)`, `on_unsupported(..)` | Portable generation options; see Reasoning and Caching |
 | `tool(T)` | Add a static tool (see Tools) |
 | `tool_choice(ToolChoice)` | Force, forbid, or restrict tool use |
 | `default_max_turns(usize)` | Default total model-call budget for every request |
 | `additional_params(serde_json::Value)` | Provider-specific fields Rig does not model |
 | `output_schema::<T>()` / `output_mode(OutputMode)` | Constrain responses to a schema |
-| `memory(B)` / `conversation(id)` | Conversation memory backend and default id |
+| `memory(store)` / `conversation(log)` | Conversation memory store and default log, the agent's name when unset |
 | `add_hook(H)` | Default hook applied to every request |
 | `record_content_telemetry(bool)` | Opt into recording prompts/results on spans — off by default |
 
-The tool methods use a typestate: after the first `.tool(..)` the builder becomes
-`AgentBuilder<WithBuilderTools>` and `.tool_server_handle(..)` is no longer offered, and
-vice versa. The two paths dispatch differently — builder tools go into an agent-owned
-`ToolServer`, a handle points at someone else's — so mixing them would leave the agent with
-two registries and no rule for which wins. If you need a shared server *and* a local tool,
-register the local tool on the `ToolServer` before taking the handle.
+`.tool(..)` and `.tool_server_handle(..)` combine: rig 0.45 dropped the builder's tool
+typestate, and builder tools join the shared registry when the agent is built, so every agent
+holding that handle advertises them. Keep a tool local by building its agent without the handle.
 
 ### Reasoning and Caching
 
@@ -162,7 +159,7 @@ fn support_agent(api_key: &str) -> Agent {
 }
 ```
 
-`reasoning`, `cache` and `on_unsupported` set rig 0.44's portable generation options
+`reasoning`, `cache` and `on_unsupported` set rig 0.45's portable generation options
 (`Effort`, `Reasoning`, `CacheRetention` and `OnUnsupported` in `rig::completion`), and each
 provider maps them to its own fields: on Claude an effort becomes `output_config.effort`, with
 adaptive thinking on the models that take it, and `CacheRetention::Long` a one-hour
@@ -171,8 +168,7 @@ adaptive thinking on the models that take it, and `CacheRetention::Long` a one-h
 conversation restarts the prompt cache. Prefer these options to `additional_params`, because
 rig checks them against the provider and, for an id in its catalog, the model. An option the
 model cannot take, such as `Effort::Minimal` on Claude, fails the run before the request is
-sent, as a `PromptError::Report` of kind `Request`, or as
-`ProviderError::UnsupportedOption` when the agent sets `.model_spec(..)`;
+sent, as a `PromptError::Report` of kind `Request`;
 `.on_unsupported(OnUnsupported::Ignore)` drops it with a warning instead.
 
 ## The Agent Loop
@@ -220,7 +216,7 @@ fails fast instead of burning tokens. `MaxTurns` carries the accumulated
 | Full control of one request | the model's `call(..)` directly |
 
 `prompt`, `chat` and `prompt_typed` are inherent methods on `Agent`, and `stream()` is on the
-runner `prompt(..)` returns; rig 0.44 has no `Prompt` or `TypedPrompt` trait to import, and its
+runner `prompt(..)` returns; rig 0.45 has no `Prompt` or `TypedPrompt` trait to import, and its
 one `Chat` trait, `rig::integrations::cli_chatbot::Chat`, only puts something other than an
 agent behind the REPL.
 
@@ -257,7 +253,7 @@ let response = model.call(request).await?;
 |---|---|
 | `max_turns(n)` | Total model-call budget for this request |
 | `history(iter)` | Explicit chat history — **bypasses conversation memory entirely** |
-| `conversation(id)` | Conversation id for loading and saving memory |
+| `conversation(log)` | The memory log for loading and saving this request, one path segment |
 | `preamble(..)` / `without_preamble()` | Override the agent preamble for this request |
 | `document(..)` / `documents(..)` | Append static context for this request |
 | `temperature(..)`, `max_tokens(..)` | Override model parameters |
@@ -385,7 +381,7 @@ the provider to sniff it. Image constructors take a second `Option<ImageDetail>`
 The `_raw` variants take unencoded `Vec<u8>`, the `_base64` ones base64, and `document_text`
 a plain string, sent as is; a base64 PDF goes through `document_base64`.
 
-Support is per-provider. rig 0.44 replaces media a model or provider cannot receive with
+Support is per-provider. rig 0.45 replaces media a model or provider cannot receive with
 placeholder text, such as `(image omitted: model does not support images)`, and sends the
 request anyway, so test the combination you ship.
 Image and audio *generation*, as opposed to input, is a separate surface behind the `image`

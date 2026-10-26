@@ -24,15 +24,15 @@ values. Each comment explains a choice that is not obvious from the key name.
 
 ```toml
 [toolchain]
-channel = "1.99.0"
+channel = "1.99.1"
 components = ["rustfmt", "clippy", "llvm-tools-preview"]
 ```
 
 `llvm-tools-preview` is what cargo-llvm-cov instruments with; without it coverage fails at the first run.
 
 The channel is patch-exact, not `"1.99"`, because the cargo-chef base image is tagged with a full version
-(`latest-rust-1.99.0`) and rustup matches toolchain names literally: a `"1.99"` channel is a different name
-from the `1.99.0` toolchain baked into the image, so both Docker stages download a second toolchain before
+(`latest-rust-1.99.1`) and rustup matches toolchain names literally: a `"1.99"` channel is a different name
+from the `1.99.1` toolchain baked into the image, so both Docker stages download a second toolchain before
 they build anything. Keep the minor version equal to `rust-version` in `Cargo.toml`, which stays `"1.99"`
 because it is the MSRV, not a pin.
 
@@ -192,7 +192,7 @@ and ignores them, so the repo is silently unformatted in exactly the way that wa
 ## .config/nextest.toml
 
 ```toml
-nextest-version = { required = "0.9.120", recommended = "0.9.148" }
+nextest-version = { required = "0.9.120", recommended = "0.9.149" }
 
 [profile.default]
 retries = 0

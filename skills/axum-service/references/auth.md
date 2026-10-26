@@ -100,8 +100,8 @@ Wire it with `impl FromRef<AppState> for Keys` and document the route with
 `security(("bearer" = []))`. Never reveal which half failed: an expired token, a bad signature
 and a missing header are all `AppError::Unauthorized`.
 
-`Validation` also carries `leeway`, `validate_nbf`, `aud`, `iss`, `required_spec_claims` and, new
-in 11, `reject_tokens_expiring_in_less_than`. `validate_aud` defaults to `true` with `aud: None`,
+`Validation` also carries `leeway`, `validate_nbf`, `aud`, `iss`, `required_spec_claims` and
+`reject_tokens_expiring_in_less_than`. `validate_aud` defaults to `true` with `aud: None`,
 so any token carrying an `aud` claim is rejected until you call `set_audience` (or set
 `validate_aud = false`). For an external identity provider, fetch the JWKS, build the key with
 `DecodingKey::from_jwk`, and cache it — refetching per request adds a network round trip to every

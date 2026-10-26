@@ -3,7 +3,7 @@
 Read this file when the user wants tokens as they arrive: a responsive UI, long-form
 output, or live observation of tool activity.
 
-Verified against `rig` 0.44.0.
+Verified against `rig` 0.45.0.
 
 `MODEL` in a snippet is the model-id binding described under Model ids in SKILL.md.
 
@@ -105,13 +105,14 @@ pub enum MultiTurnStreamItem {
 - **`StreamAssistantItem`** — what the model emitted: each part's start, its text,
   reasoning or tool-call arguments, and its end.
 - **`ToolCall`** — the complete tool call, when the model turn commits, for each call Rig
-  routes to execution.
+  routes to execution or invalid-tool-call recovery answers.
 - **`ToolExecutionCommitted`** — confirmation that Rig executed and committed a tool call.
   This is *not* a real-time start notification: it surfaces together with its result only
   after the whole batch settles. For live host-side start/result observation, use tool
   hooks.
-- **`ToolResult`** — the result of an executed or hook-skipped call, in call order once the
-  batch settles; `tool_result.call` is the id of the call it answers.
+- **`ToolResult`** — the result of an executed, hook-skipped, recovered or reprompted call, in call order
+  once the batch settles; `tool_result.call` is the id of the call it answers. It does not
+  prove execution; `ToolExecutionCommitted` does.
 - **`CompletionCall`** — per-model-call detail: usage, finish reason, provider request id.
 - **`ModelTurnRetried`** — a hook rejected the turn for a retry; the text and reasoning
   already streamed for it were provisional, so discard or reset them.
@@ -144,11 +145,12 @@ arrives as `End` with `AssistantContent::ToolCall`.
 `Item::Unknown(UnknownPayload)` exists because providers add event kinds faster than crates
 adopt them. Match it explicitly if you log; do not treat it as an error.
 
-Two *kinds* of tool call never surface as a `MultiTurnStreamItem::ToolCall`: one with an
-unknown or disallowed name, rejected and handled by invalid-tool-call recovery, whose parts
-are held back and dropped too, and a
-structured-output `Tool`-mode output-tool call, whose parts still stream and which
-finalizes the run directly — its result appears in `FinalResponse`.
+A call with an unknown or disallowed name streams none of its parts: they are held back and
+dropped. When invalid-tool-call recovery answers it, it surfaces as a `ToolCall` and a
+`ToolResult` carrying the recovery's answer. A structured-output `Tool`-mode output-tool call
+that finalizes the run never surfaces as a `MultiTurnStreamItem::ToolCall`: its parts still
+stream, and its result appears in `FinalResponse`. One that rig rejects and reprompts
+surfaces as a `ToolCall` and a `ToolResult` carrying the feedback.
 
 ## Low-Level Streaming
 
@@ -173,7 +175,7 @@ Reach for it when you want one request with no agent loop around it.
 
 ## Where the Types Live
 
-0.44 has no streaming *traits*: the old `Prompt` / `StreamingPrompt` and `Chat` /
+0.45 has no streaming *traits*: the old `Prompt` / `StreamingPrompt` and `Chat` /
 `StreamingChat` pairs are gone (the `Chat` in `rig::integrations::cli_chatbot` only feeds the
 REPL), and `stream()` is a method on the runner. `rig::streaming`
 holds the item types — `Item`, `StreamEvent`, `Part`, `CompletionStream` and more — and

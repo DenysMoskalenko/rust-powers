@@ -70,21 +70,21 @@ derive_more = { version = "2", features = ["full"] }
 strum = { version = "0.28", features = ["derive"] }
 # add when needed (all resolved and compiled in the same lock file):
 # axum-extra = { version = "0.12", features = ["typed-header"] }
-# rig = { version = "0.44", features = ["rmcp"] }   # the facade; rig-core has no agents. Add "memory" for history policies (windowing, compaction), "test-utils" as a dev feature
-# rmcp = { version = "2", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }   # rig-rmcp pins ^2
+# rig = { version = "0.45", features = ["rmcp"] }   # the facade; rig-core has no agents. Add "memory" for rig::memory (stores, windows, compaction), "test-utils" as a dev feature
+# rmcp = { version = "3", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }   # rig-rmcp needs ^3.5
 # jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }   |   argon2 = "0.6"   |   nutype = { version = "0.8", features = ["serde"] }   |   sha2 = "0.11"
 # async-nats = "0.50"   # jetstream, kv, object-store, service are defaults
-# redis = { version = "1.7", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager", "script"] }
+# redis = { version = "1.8", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager", "script"] }
 # deadpool-redis = "0.23.1"   # only for blocking commands (BLPOP & co.)
 
 [dev-dependencies]
-rstest = "0.27"
+rstest = "0.28"
 insta = { version = "1.49", features = ["json", "redactions"] }
 similar-asserts = "2"
 testcontainers-modules = { version = "0.15", features = ["postgres", "redis", "nats"] }
 testcontainers = { version = "0.27", features = ["reusable-containers"] }   # modules does not re-export it
 axum-test = "21"
-httpmock = "0.8"
+httpmock = "0.9"
 mockall = "0.15"
 fake = { version = "5", features = ["derive", "chrono", "uuid", "rust_decimal"] }
 rand = "0.10"                                            # the version fake 5 builds on
