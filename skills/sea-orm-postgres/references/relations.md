@@ -221,7 +221,7 @@ use std::sync::{Arc, Mutex};
 
 use app::entities::{post, user};
 use sea_orm::{
-    ActiveModelTrait as _, ActiveValue::Set, ConnectOptions, ConnectionTrait, Database, DbErr,
+    ActiveModelTrait as _, ActiveValue::{NotSet, Set}, ConnectOptions, ConnectionTrait, Database, DbErr,
     EntityTrait, LoaderTrait as _,
 };
 use secrecy::ExposeSecret as _;
@@ -274,7 +274,7 @@ async fn load_many_issues_two_statements_whatever_the_user_count() {
     let app = test_app().await;
     for i in 0..5 {
         let owner = user::ActiveModel {
-            id: Set(Uuid::now_v7()),
+            id: NotSet,
             email: Set(format!("user{i}@example.com")),
             name: Set("User".to_owned()),
             created_at: Set(frozen_now().into()),
@@ -284,7 +284,7 @@ async fn load_many_issues_two_statements_whatever_the_user_count() {
         .unwrap();
         for j in 0..2 {
             post::ActiveModel {
-                id: Set(Uuid::now_v7()),
+                id: NotSet,
                 user_id: Set(owner.id),
                 title: Set(format!("post {j}")),
                 published: Set(true),

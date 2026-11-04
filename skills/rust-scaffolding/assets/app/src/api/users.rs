@@ -3,7 +3,8 @@
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use sea_orm::{ActiveModelTrait as _, ActiveValue::Set, EntityTrait as _, PaginatorTrait as _};
+use sea_orm::ActiveValue::{NotSet, Set};
+use sea_orm::{ActiveModelTrait as _, EntityTrait as _, PaginatorTrait as _};
 use sea_orm::{QueryOrder as _, QuerySelect as _};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -97,7 +98,7 @@ pub async fn create_user(
     Valid(body): Valid<CreateUser>,
 ) -> Result<(StatusCode, Json<UserResponse>), AppError> {
     let created = user::ActiveModel {
-        id: Set(Uuid::now_v7()),
+        id: NotSet,
         email: Set(body.email),
         name: Set(body.name),
         created_at: Set(state.clock.now().into()),

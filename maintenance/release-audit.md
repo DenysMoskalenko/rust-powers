@@ -15,6 +15,8 @@ a skill teaches changes only the version-pin line.
 - Every edit traces to a changelog line or a compiled probe, never to memory of the crate.
 - Smallest diff, in the owning skill; the ownership table in AGENTS.md decides which.
 - Snippets compiling is necessary, not sufficient: `make check` proves the API exists, not the teaching.
+- Postgres, Redis and NATS track the latest stable major: a new major moves at the first audit after
+  its GA, never on a beta or release candidate, and a hold names its reason in STACK.md.
 - A change of philosophy (a major with a different model, a crate replaced by another) is an owner
   decision, never made inside a skill.
 

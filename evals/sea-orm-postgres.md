@@ -109,7 +109,7 @@
 **Prompt**: "Write `create_user` and `rename_user` service functions."
 
 **Must produce**:
-- `create_user` building an `ActiveModel` struct literal with `id: Set(Uuid::now_v7())` and calling `.insert(db)`.
+- `create_user` building an `ActiveModel` struct literal with `id: NotSet` and calling `.insert(db)`.
 - `rename_user` converting the fetched `Model` into an `ActiveModel`, assigning only `name`, and calling `.update(db)`.
 - Both signatures generic over `&C where C: ConnectionTrait`.
 
@@ -145,6 +145,20 @@
 **Must not produce**:
 - A test fixture that begins a transaction and rolls it back as the isolation mechanism.
 - `MockDatabase` or SQLite to make the tests faster.
+
+### Eval 8 - a new table with a uuid key
+
+**Prompt**: "Add an `invoice` table with a uuid primary key, a `user_id` foreign key and an `amount`, plus a `create_invoice` service function."
+
+**Fixture**: scaffold
+
+**Must produce**:
+- A migration giving the key column a `uuidv7()` default, such as `.default(Expr::cust("uuidv7()"))`.
+- `create_invoice` leaving the key out with `id: NotSet` and calling `.insert(db)`.
+
+**Must not produce**:
+- `gen_random_uuid()`, `uuidv4()` or `Uuid::new_v4()`.
+- `id: Set(Uuid::now_v7())` when nothing needs the id before the INSERT.
 
 ### Probe 1 - save on a new row
 
@@ -183,3 +197,13 @@
 **Wrong answer**: `^(?![\s\S]*pg_try_advisory)[\s\S]*"\s*SELECT\s+pg_advisory(?:_xact)?_lock\(`
 
 **Right answer**: `pg_try_advisory_xact_lock`
+
+### Probe 6 - a v4 database default
+
+**Prompt**: "Write a sea-orm migration for an `api_key` table with a uuid primary key that Postgres generates."
+
+**Fixture**: empty
+
+**Wrong answer**: `(?:Expr::cust\(\s*r?#*"|DEFAULT\s+|PgFunc::)(?:gen_random_uuid|uuid_generate_v4|uuidv4)\(\)`
+
+**Right answer**: `uuidv7\(\)`

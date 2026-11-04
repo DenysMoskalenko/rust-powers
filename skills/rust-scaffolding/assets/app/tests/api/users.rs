@@ -24,7 +24,8 @@ async fn create_user_returns_201_and_the_created_row() {
     assert_eq!(body["name"], "Ada Lovelace");
     // Proof the injected clock is the one the handler used.
     assert_eq!(body["created_at"], json!(frozen_now()));
-    assert!(Uuid::parse_str(body["id"].as_str().unwrap()).is_ok());
+    let id = Uuid::parse_str(body["id"].as_str().unwrap()).unwrap();
+    assert_eq!(id.get_version_num(), 7);
 }
 
 #[tokio::test]
