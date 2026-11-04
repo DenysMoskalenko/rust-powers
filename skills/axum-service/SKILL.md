@@ -2,7 +2,7 @@
 name: axum-service
 description: "Use when changing an axum service — routes, extractors, response DTOs, AppError statuses, utoipa OpenAPI, settings, secrets, middleware order, health checks, pagination, SSE, background tasks, shutdown, JWT auth, tracing, JSON logs, OTLP export, traceparent propagation, Prometheus metrics. Also for Handler is not satisfied, Path segments must not start with a colon, no method named tracer, spans never reaching the collector. Not for queries (sea-orm-postgres), a new service (rust-scaffolding), flaky tests (rust-testing), Cargo.toml or CI (rust-tooling)."
 metadata:
-  version: "0.3.1"
+  version: "0.3.2"
 ---
 
 # axum service patterns
@@ -77,7 +77,7 @@ pub async fn create_user(
     Valid(body): Valid<CreateUser>,          // body extractor last
 ) -> Result<(StatusCode, Json<UserResponse>), AppError> {
     let created = user::ActiveModel {
-        id: Set(Uuid::now_v7()),
+        id: NotSet,
         email: Set(body.email),
         name: Set(body.name),
         created_at: Set(state.clock.now().into()),

@@ -195,12 +195,13 @@ joins it; `.into_json()` produces untyped rows.
 
 ## Writes
 
-The house style is a struct literal with every column `Set`, then `.insert()`. It is exhaustive, so
+The house style is a struct literal with the key `NotSet` and every other column `Set`, then
+`.insert()`. It is exhaustive, so
 the compiler names a forgotten column, and a reviewer sees the whole row at once.
 
 ```rust,verify
 use crate::entities::{post, user};
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DbErr, EntityTrait};
+use sea_orm::{ActiveModelTrait, ActiveValue::{NotSet, Set}, ConnectionTrait, DbErr, EntityTrait};
 use uuid::Uuid;
 
 pub async fn create_user<C: ConnectionTrait>(
@@ -209,9 +210,7 @@ pub async fn create_user<C: ConnectionTrait>(
     name: &str,
 ) -> Result<user::Model, DbErr> {
     user::ActiveModel {
-        // uuid v7 in application code: the id exists before the INSERT, so it can be logged,
-        // published on a bus, and used to build child rows without a round trip.
-        id: Set(Uuid::now_v7()),
+        id: NotSet,
         email: Set(email.to_owned()),
         name: Set(name.to_owned()),
         created_at: Set(chrono::Utc::now().into()),
@@ -244,6 +243,13 @@ pub async fn publish_all<C: ConnectionTrait>(db: &C, user_id: Uuid) -> Result<u6
     Ok(res.rows_affected)
 }
 ```
+
+Postgres assigns the key. `DEFAULT uuidv7()` gives every writer, `psql` and backfills included, the
+same time-ordered ids, and `.insert()` reads the row back with `RETURNING`. Assign
+`Set(Uuid::now_v7())` in Rust in two cases only: the id must exist before the INSERT, because a log
+line, an event or a child row built in the same call carries it, or the server predates Postgres 18
+and `uuidv7()` does not exist. v4 scatters inserts across the index; it belongs only to a schema
+that already has it.
 
 Never call `.save()` on a row whose primary key was assigned in application code. `save()` dispatches
 on `is_update()`, which is literally "is every primary-key column `Set`" — with `Uuid::now_v7()` that
@@ -318,7 +324,7 @@ loses every race and the constraint does not:
 ```rust,verify
 use crate::entities::{post, user};
 use crate::error::AppError;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DbErr, SqlErr};
+use sea_orm::{ActiveModelTrait, ActiveValue::{NotSet, Set}, ConnectionTrait, DbErr, SqlErr};
 use uuid::Uuid;
 
 /// Postgres 23505: the unique index fired. Raced inserts land here too.
@@ -338,7 +344,7 @@ pub async fn create_user<C: ConnectionTrait>(
     name: &str,
 ) -> Result<user::Model, AppError> {
     user::ActiveModel {
-        id: Set(Uuid::now_v7()),
+        id: NotSet,
         email: Set(email.to_owned()),
         name: Set(name.to_owned()),
         created_at: Set(chrono::Utc::now().into()),
@@ -363,7 +369,7 @@ pub async fn create_post<C: ConnectionTrait>(
     title: &str,
 ) -> Result<post::Model, AppError> {
     post::ActiveModel {
-        id: Set(Uuid::now_v7()),
+        id: NotSet,
         user_id: Set(user_id),
         title: Set(title.to_owned()),
         published: Set(false),
@@ -648,7 +654,7 @@ new row's own key, a uuid the producer minted, is already the idempotency key an
 ```rust,verify
 use crate::entities::post;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DbErr, TransactionSession,
+    ActiveModelTrait, ActiveValue::{NotSet, Set}, ConnectionTrait, DbErr, TransactionSession,
     TransactionTrait, raw_sql,
 };
 use uuid::Uuid;
@@ -683,7 +689,7 @@ pub async fn handle_draft_requested<C: TransactionTrait>(
         return txn.rollback().await;
     }
     post::ActiveModel {
-        id: Set(Uuid::now_v7()),
+        id: NotSet,
         user_id: Set(user_id),
         title: Set(title.to_owned()),
         published: Set(false),

@@ -1,6 +1,6 @@
 # Rust web stack
 
-One pick per concern. Decided 13 September 2026.
+One pick per concern. Decided 4 November 2026.
 
 Toolchain: Rust 1.99, edition 2024, resolver 3. python-powers is the sibling project this
 repository mirrors for Python services.
@@ -20,6 +20,7 @@ Re-validated on rustc 1.99.1 / clippy 0.1.99, 26 October 2026: `cargo update` (5
 | request and response schemas | serde + validator + utoipa | |
 | body validation | validator 0.21 + own `Valid<T>` extractor | 15 lines, see below |
 | settings | `config` crate + dotenvy | env vars into a `Settings` struct, `.env` loaded in dev |
+| database | Postgres 18 | latest stable major, see Server versions below |
 | ORM | sea-orm 2.0 | sqlx 0.9 + sea-query 1.0 underneath |
 | migrations | sea-orm-migration + sea-orm-cli | |
 | HTTP client | reqwest 0.13 | |
@@ -78,13 +79,15 @@ Re-validated on rustc 1.99.1 / clippy 0.1.99, 26 October 2026: `cargo update` (5
 - **sea-orm 2.0** on Postgres, features `sqlx-postgres`, `runtime-tokio-rustls`, `macros`, `with-chrono`, `with-uuid`, `with-rust_decimal`, `with-json`. `macros` is a default, but the dense entity format and `raw_sql!` depend on it, so list it.
 - Use it as engine + query builder, not as an ActiveRecord: `Entity::find().filter(user::COLUMN.email.eq(..)).paginate()`. Filters take the typed `user::COLUMN.field`; `.column()` and `.cursor_by()` still take the `Column` enum; `OnConflict::column()` accepts either. sea-query for anything complex (subqueries, CTEs, dynamic filters), with `use sea_orm::ExprTrait;` in scope or the `Expr` methods are not found.
 - **Relations**: lead with `Entity::load().with(..)` — one query per level, a join for 1-1 and a batched `IN (…)` for 1-N, nested paths in a single call. `LoaderTrait::load_many` / `load_one` when you want plain `Model`s, `find_with_related` for a single parent (never combine it with `paginate`), `has_related` for `WHERE EXISTS` parent filters, `eq_any` for `= ANY($1)`. `HasMany`/`BelongsTo` have an `Unloaded` state, so "did I forget to load this" is a value, not an exception.
-- **Writes**: the house style is a struct literal, `ActiveModel { id: Set(Uuid::now_v7()), .. }.insert(db)`. Never `.save()` a new row whose primary key is set in application code — `save()` sees a `Set` PK, issues an `UPDATE`, matches zero rows and fails with `DbErr::RecordNotUpdated`. The nested `ActiveModel::builder()` is worth it only for inserting a whole object graph atomically.
+- **Writes**: the house style is a struct literal, `ActiveModel { id: NotSet, .. }.insert(db)`. Never `.save()` a new row whose primary key is set in application code — `save()` sees a `Set` PK, issues an `UPDATE`, matches zero rows and fails with `DbErr::RecordNotUpdated`. The nested `ActiveModel::builder()` is worth it only for inserting a whole object graph atomically.
 - Pagination: `Entity::find().paginate(&db, page_size)` gives `fetch_page`, `num_pages`, `num_items`.
 - Raw SQL: `raw_sql!` macro + `FromQueryResult`; a bare `Statement` goes through `execute_raw` / `query_all_raw`. `sqlx::query_as!` is possible on the same pool but needs `DATABASE_URL` at build time; avoid it.
 - Service functions take `&C where C: ConnectionTrait`, so they work with a pool and a transaction alike. `DatabaseConnection` is cheap to clone — put it in axum state, never `Arc<_>`. Map unique violations with `DbErr::sql_err()` → `SqlErr::UniqueConstraintViolation`. Set `ConnectOptions::statement_timeout`.
 - **Migrations**: `sea-orm-cli migrate init` creates the `migration/` workspace crate. Migrations are Rust (`SeaQuery` DSL or raw SQL in `up`). Run on startup with `Migrator::up(&db, None)` or `make migrate`. Add an index for every FK column.
 - **Entities**: generated from the migrated database, `make entity` (`sea-orm-cli generate entity -o src/entities --with-serde both --entity-format dense`). Without `--entity-format dense` you get 1.x compact entities and none of the 2.0 relation story. **Migration first, always**: sea-orm-cli 2.0.4 has no autogenerate — no `--from-entity`, no `diff`, codegen only points database → entities. The 2.0 Schema Registry `sync` adds missing tables and columns, renames `renamed_from` columns and tries to drop any unique key the entity does not declare, never alters a column type or drops a column or table, leaves no reviewable artifact and is semver-exempt: prototyping and test harnesses only.
 - **Types**: chrono 0.4 (`DateTime<Utc>`), uuid v7 primary keys, rust_decimal for money.
+- **UUID keys**: v7, assigned by the database with `DEFAULT uuidv7()`, so every writer shares one generator. `Uuid::now_v7()` in Rust only when the id must exist before the INSERT or the server predates Postgres 18. v4 never on a new table: its random order scatters inserts across the index.
+- **Server versions**: new services run the latest stable major of Postgres, Redis and NATS. The pins move at the first release audit after a GA, never on a beta or release candidate, and a hold names its reason here. Postgres 18 is the floor, for `uuidv7()`. NATS holds at 2.14: async-nats 0.50 has no `server_2_15`.
 - **Cache / Redis**: not baseline; see Cache below.
 
 sea-orm 1.x → 2.0 — the renames that break nearly every pre-2026 snippet:

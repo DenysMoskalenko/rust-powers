@@ -256,9 +256,8 @@ A `tokio::time::sleep` before the assertion is a bet on the CI box. Keep the `Jo
 ```rust,verify,test
 use app::entities::user;
 use sea_orm::ActiveModelTrait as _;
-use sea_orm::ActiveValue::Set;
+use sea_orm::ActiveValue::{NotSet, Set};
 use serde_json::json;
-use uuid::Uuid;
 
 use crate::common;
 
@@ -269,7 +268,7 @@ async fn a_row_written_by_a_background_task_is_listed() {
     let now = app.state.clock.now();
     let job = tokio::spawn(async move {
         user::ActiveModel {
-            id: Set(Uuid::now_v7()),
+            id: NotSet,
             email: Set("job@example.com".to_owned()),
             name: Set("job".to_owned()),
             created_at: Set(now.into()),

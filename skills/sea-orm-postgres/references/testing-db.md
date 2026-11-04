@@ -273,8 +273,7 @@ fresh database as `app.state.db`, next to the frozen clock and the mock upstream
 
 ```rust,verify,test
 use app::entities::user;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, PaginatorTrait};
-use uuid::Uuid;
+use sea_orm::{ActiveModelTrait, ActiveValue::{NotSet, Set}, EntityTrait, PaginatorTrait};
 
 use crate::common;
 
@@ -284,7 +283,7 @@ async fn rejects_a_duplicate_email() {
     let db = &app.state.db;
 
     let row = || user::ActiveModel {
-        id: Set(Uuid::now_v7()),
+        id: NotSet,
         email: Set("alice@example.com".to_owned()),
         name: Set("Alice".to_owned()),
         // Generated entities type timestamptz as `DateTimeWithTimeZone`

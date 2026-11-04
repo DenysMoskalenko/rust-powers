@@ -2,7 +2,7 @@
 name: sea-orm-postgres
 description: "Use when working with Postgres through sea-orm — entities, pagination queries, eager loading, load().with and LoaderTrait, N+1, transactions, advisory locks, foreign key and unique violations, idempotency rows, outbox, migrations with sea-orm-migration, sea-orm-cli migrate generate and generate entity, pool sizing, per-test databases, upgrading from sea-orm 1.x. Also for RecordNotUpdated, no method named like found for enum Expr, duplicate key value violates unique constraint. Not for a new service (rust-scaffolding), nor test structure, test_app or factories (rust-testing)."
 metadata:
-  version: "0.3.1"
+  version: "0.4.0"
 ---
 
 # Postgres with sea-orm
@@ -18,6 +18,9 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
   or hand-edited. There is no autogenerate.
 - On dense entities, filters use the typed `Entity::COLUMN.field` rather than `Column::Field`;
   `use sea_orm::ExprTrait;`.
+- Run the latest stable Postgres major, 18 at least. UUID keys are v7:
+  `DEFAULT uuidv7()` in the migration, `id: NotSet` on insert. `Set(Uuid::now_v7())` only when the
+  id must exist before the INSERT or Postgres predates 18; never v4 on a new table.
 - Never `.save()` a new row with an app-assigned key; `.insert()`.
 - Service functions take `&C where C: ConnectionTrait` and return `AppError` outcomes by
   classifying `err.sql_err()`; the HTTP status of each variant is `axum-service`'s.
@@ -39,7 +42,7 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
 
 ## sea-orm 2.0 is not 1.x
 
-Most sea-orm material predates 2.0, and these renames break nearly all of it:
+These renames break most pre-2.0 sea-orm material:
 
 | 1.x | 2.0 |
 |---|---|
@@ -110,8 +113,8 @@ releases, since a rolling deploy runs both versions of the code at once.
 
 ## Queries
 
-sea-orm is an engine and query builder, not an ActiveRecord framework. Service functions own their
-queries directly — there is no repository layer and no per-request session object. Routes and DTOs
+Service functions own their queries directly — there is no repository layer and no per-request
+session object. Routes and DTOs
 are `axum-service`'s.
 
 Filters take the typed `COLUMN` struct, so a type mismatch is a compile error. Optional filters go
@@ -155,7 +158,7 @@ column:
 
 ```rust
 user::ActiveModel {
-    id: Set(Uuid::now_v7()),
+    id: NotSet,
     email: Set(email.to_owned()),
     name: Set(name.to_owned()),
     created_at: Set(chrono::Utc::now().into()), // Utc -> DateTimeWithTimeZone
@@ -165,7 +168,7 @@ user::ActiveModel {
 ```
 
 Never `.save()` a new row whose key was assigned in application code. `save()` dispatches on "is the
-primary key `Set`", which uuid v7 always makes true, so it issues an `UPDATE` that matches nothing
+primary key `Set`", so it issues an `UPDATE` that matches nothing
 and fails with `DbErr::RecordNotUpdated`. Update by converting the model back into an `ActiveModel`
 and assigning only what changed; untouched columns stay `Unchanged` and never reach the SET clause.
 
