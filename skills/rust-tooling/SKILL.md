@@ -1,8 +1,8 @@
 ---
 name: rust-tooling
-description: "Use when changing or debugging the tooling of an existing Rust service — rust-toolchain.toml, cargo add, upgrading one dependency, the lockfile, the workspace lints table or a member clippy skips, clippy.toml, rustfmt.toml, nextest, llvm-cov and the coverage gate, cargo-deny, cargo-machete, bacon, prek or pre-commit hooks, the Makefile, a Dockerfile rebuilding every dependency, docker-compose, CI recompiling, target/ size, unknown lint warnings. Not for a new repository (rust-scaffolding), one clippy finding (rust-code-style), or what coverage measures (rust-testing)."
+description: "Use when changing or debugging an existing Rust service's tooling — rust-toolchain.toml, cargo add, upgrading one dependency, lockfile, min-publish-age or a version too new, workspace lints table or a member clippy skips, clippy.toml, rustfmt.toml, nextest, llvm-cov, the coverage gate, cargo-deny, cargo-machete, bacon, prek or pre-commit hooks, Makefile, a Dockerfile rebuilding every dependency, docker-compose, CI recompiling, target/ size, unknown lint warnings. Not for a new repository (rust-scaffolding), one clippy finding (rust-code-style), or what coverage measures (rust-testing)."
 metadata:
-  version: "0.4.1"
+  version: "0.5.0"
 ---
 
 # Rust Tooling
@@ -26,7 +26,7 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
 
 - `references/configs.md` — every configuration file verbatim, identical to the template's, with the
   reasoning inline, and why `target/` grows. Open it when `target/` is large, and before creating or
-  editing `rust-toolchain.toml`, the `[workspace.lints]` table,
+  editing `rust-toolchain.toml`, `.cargo/config.toml`, the `[workspace.lints]` table,
   `clippy.toml`, `rustfmt.toml`, `.config/nextest.toml`, `deny.toml`, `bacon.toml`,
   `.pre-commit-config.yaml` or the Makefile.
 - `references/ci.md` — the GitHub Actions workflow, the toolchain step, the RUSTFLAGS and cache-key trap, the
@@ -85,6 +85,11 @@ To bump one crate safely:
 `cargo update` with no argument moves everything within semver — do that deliberately, never inside another
 change. `--precise <version>` pins one crate exactly, the escape hatch when a release is broken.
 
+The template's `.cargo/config.toml` rejects versions under five days old (cargo 1.100+; 1.99 warns and ignores
+it): `--precise` fails on one, and a plain `cargo update` downgrades one already locked. Take a younger advisory
+fix with `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <crate> --precise <fixed>`, after
+`--dry-run` shows nothing else new.
+
 ## Lints
 
 `#![deny(...)]` in source cannot be relaxed for one invocation, which makes an editor's background check
@@ -139,9 +144,8 @@ allow-list, so its own output fails immediately; it also writes `wildcards = "al
 `[licenses.private] ignore = false`, so an init-derived file never checks path dependencies and flags your
 own crates as `unlicensed` — use the template in `references/configs.md`.
 
-Both `[package]` tables need `publish = false`. Without it `[licenses.private] ignore = true` does nothing,
-your own crates fail as unlicensed, and `allow-wildcard-paths` refuses to cover the `migration` path
-dependency because published crates may not have one.
+Both `[package]` tables also need `publish = false`; without it neither `[licenses.private] ignore` nor
+`allow-wildcard-paths` applies.
 
 `cargo machete` finds unused dependencies and exits 1 on a finding, which makes it a gate: it runs in the
 hook, in the `check` target and in CI. It reads source files, so a crate reachable only through another

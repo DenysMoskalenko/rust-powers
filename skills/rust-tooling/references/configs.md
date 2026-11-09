@@ -7,6 +7,7 @@ values. Each comment explains a choice that is not obvious from the key name.
 ## Contents
 
 - [rust-toolchain.toml](#rust-toolchaintoml)
+- [.cargo/config.toml](#cargoconfigtoml)
 - [Cargo.toml — the lints table](#cargotoml--the-lints-table)
 - [Cargo.toml — cargo-machete exemptions](#cargotoml--cargo-machete-exemptions)
 - [Cargo.toml — the dev profile](#cargotoml--the-dev-profile)
@@ -35,6 +36,30 @@ The channel is patch-exact, not `"1.99"`, because the cargo-chef base image is t
 from the `1.99.1` toolchain baked into the image, so both Docker stages download a second toolchain before
 they build anything. Keep the minor version equal to `rust-version` in `Cargo.toml`, which stays `"1.99"`
 because it is the MSRV, not a pin.
+
+## .cargo/config.toml
+
+```toml
+# Leave five days to catch and yank a hijacked release; cargo honours this from 1.100.
+[registry]
+global-min-publish-age = "5 days"
+```
+
+Whenever cargo resolves — `cargo update`, `cargo add`, a missing or stale `Cargo.lock` — it skips every
+version published less than five days ago, leaving time for a hijacked release to be caught and yanked
+before it reaches your lock file. A younger version the lock file already holds survives `cargo add`,
+`cargo update -p <other>` and edits to `Cargo.toml`; a plain `cargo update` re-resolves everything and
+downgrades it. Nothing else is covered: `--locked` builds resolve nothing, and `cargo install` and
+cargo-binstall ignore the setting. Cargo before 1.100 resolves as if the key were absent; 1.99 says so with
+`ignoring registry.global-min-publish-age without -Zmin-publish-age`.
+
+To take a release that is younger, an advisory fix for example, preview it first with
+`CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <crate> --precise <fixed> --dry-run`. The
+variable lifts the check for the whole resolve, so any crate the fix newly pulls in also arrives at its newest
+version; run it without `--dry-run` only when the list holds nothing else new. `--precise` without the
+variable fails with `version X is too new (published ..., minimum age 5 days)`. The next plain
+`cargo update` downgrades the fix until it is five days old, so run that one with the same variable or wait.
+An alternate registry takes its own value as `[registries.<name>] min-publish-age`.
 
 ## Cargo.toml — the lints table
 
