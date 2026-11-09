@@ -2,7 +2,7 @@
 name: axum-service
 description: "Use when changing an axum service — routes, extractors, response DTOs, AppError statuses, utoipa OpenAPI, settings, secrets, middleware order, health checks, pagination, SSE, background tasks, shutdown, JWT auth, tracing, JSON logs, OTLP export, traceparent propagation, Prometheus metrics. Also for Handler is not satisfied, Path segments must not start with a colon, no method named tracer, spans never reaching the collector. Not for queries (sea-orm-postgres), a new service (rust-scaffolding), flaky tests (rust-testing), Cargo.toml or CI (rust-tooling)."
 metadata:
-  version: "0.3.2"
+  version: "0.4.0"
 ---
 
 # axum service patterns
@@ -16,6 +16,7 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
 - Handlers return `Result<_, AppError>`; `error.rs` is the only file that chooses a status code, and a 5xx body is a constant. Never `panic!` to signal failure.
 - Every validator rule a client needs is repeated as `#[schema(...)]` or `#[param(...)]`; utoipa never reads `validate`.
 - `#[tracing::instrument(skip_all, fields(..))]` on the function that does the work; `err` only where an error never reaches `into_response`, which already logs each 5xx once.
+- Serve `app.into_make_service_with_connect_info::<SocketAddr>()` or `into_make_service()`, never a bare `Router`: axum 0.8.9 deep-copies it, handler captures included, per open connection.
 
 ## References
 
@@ -24,7 +25,7 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
 - `references/settings.md` — nested env keys, lists, secrecy, `.env` precedence, `from_map`. When adding a configuration value.
 - `references/auth.md` — `Keys`, `Claims`, `AuthUser`, jsonwebtoken's crypto feature, argon2 0.6 hashing. When adding authentication.
 - `references/middleware.md` — `build_router`: the stack in order, the panic catcher, fallbacks, the timeout's empty 408, CORS, `route_layer`, `from_fn`, the rate-limit slot. When adding or reordering a layer.
-- `references/operations.md` — health and the readiness body, request id, `main.rs`, timeout budget, pagination, background work, idempotency, outbound HTTP. When wiring `main.rs` or a production concern.
+- `references/operations.md` — health and the readiness body, request id, `main.rs`, timeout budget, pagination, background work, idempotency, outbound HTTP, memory after load. When wiring `main.rs` or a production concern.
 - `references/streaming.md` — SSE and streaming bodies. When a response is unbounded or long-lived.
 - `references/telemetry.md` — subscriber, `EnvFilter`, OTLP export, propagation, shutdown flush, missing spans. When wiring or fixing observability.
 - `references/metrics.md` — `/metrics`, custom instruments, cardinality. When adding a metric.
@@ -47,8 +48,6 @@ src/
   api/         mod.rs (router(), request_id), health.rs, users.rs (DTOs, handlers, router())
   services/    multi-statement or shared logic; the scaffold has none yet
 ```
-
-`build_router(state)` is public so integration tests hit the real stack.
 
 ## State
 
@@ -134,15 +133,15 @@ House style: snake_case JSON (serde's default), `ToSchema` on every DTO, and `de
 
 ## OpenAPI, settings, middleware
 
-OpenAPI: `OpenApiRouter::with_openapi(ApiDoc::openapi())`, `.routes(routes!(..))` per path, `.merge(api::router())`, `split_for_parts()`, `SwaggerUi::new("/docs").url("/openapi.json", api)`. Nesting and the bearer scheme: `references/openapi.md`.
+OpenAPI: `OpenApiRouter::with_openapi(ApiDoc::openapi())`, `.routes(routes!(..))` per path, `.merge(api::router())`, `split_for_parts()`, `SwaggerUi::new("/docs").url("/openapi.json", api)`.
 
-Settings come from the environment only (`APP__SERVER__PORT`, `__` between every level); `dotenvy::dotenv().ok()` is the first statement of `main`; secrets are `SecretString`; tests use `Settings::from_map` because `std::env::set_var` is `unsafe` in edition 2024. Details: `references/settings.md`.
+Settings come from the environment only (`APP__SERVER__PORT`, `__` between every level); `dotenvy::dotenv().ok()` is the first statement of `main`; secrets are `SecretString`; tests use `Settings::from_map` because `std::env::set_var` is `unsafe` in edition 2024.
 
 Layer order has two opposite rules: inside one `ServiceBuilder` the **first** `.layer()` is outermost; chaining `.layer()` on a `Router` the **last** call is. The stack, outermost first: `api::request_id`, `error::catch_panic_layer()`, `OtelInResponseLayer`, `OtelAxumLayer`, Prometheus, CORS from `server.cors_origins` (empty means no layer; never `permissive()`), compression, `DefaultBodyLimit`, `TimeoutLayer` innermost. Everything — `/metrics`, probes, fallbacks, streaming routes — sits inside it.
 
 ## Telemetry
 
-`#[tracing::instrument(skip_all, fields(user_id = %id))]` on the function that does the work: `skip_all` then opt fields back in, because with `skip(state)` an argument added later silently becomes a field. `err` only where an error never reaches `into_response`, such as a background task or a worker: `into_response` already logs each 5xx once, so `err` on a handler or on a function returning `AppError` logs it twice and records a 404 as an error. `%` is `Display`, `?` is `Debug`. `SecretString` has no `Display` and redacts `Debug`, so the leak is `%secret.expose_secret()`; never log a whole body.
+`#[tracing::instrument(skip_all, fields(user_id = %id))]` on the function that does the work: `skip_all` then opt fields back in, because with `skip(state)` an argument added later silently becomes a field. `err` only where an error never reaches `into_response`, such as a background task: `into_response` already logs each 5xx once, so `err` on a handler or on a function returning `AppError` logs it twice and records a 404 as an error. `SecretString` has no `Display` and redacts `Debug`, so the leak is `%secret.expose_secret()`; never log a whole body.
 
 One middleware, `api::request_id`, trusts or mints `x-request-id`, opens a `request` span carrying it, scopes the `REQUEST_ID` task-local that `ErrorBody::new` reads, and echoes the header.
 
@@ -152,7 +151,7 @@ Metrics are `metrics::counter!` and `histogram!` against the recorder `build_rou
 
 ## Operations
 
-Liveness `/health/live` is 200 with no dependencies. Readiness `/health/ready` returns `{ "status", "checks": { "<name>": ... } }` where every value is `"ok"`, `"degraded"` or `"unavailable"` and `status` is the worst check: a required dependency (the database, pinged under `READINESS_TIMEOUT`) failing is `"unavailable"` and 503; an optional one (cache, messaging) failing is `"degraded"` and still 200. Add-on skills add one entry to `checks`, nothing else. `/version` returns the crate name and `CARGO_PKG_VERSION`. All three unauthenticated.
+Liveness `/health/live` is 200 with no dependencies. Readiness `/health/ready` returns `{ "status", "checks": { "<name>": ... } }` where every value is `"ok"`, `"degraded"` or `"unavailable"` and `status` is the worst check: a required dependency (the database, pinged under `READINESS_TIMEOUT`) failing is `"unavailable"` and 503; an optional one (cache, messaging) failing is `"degraded"` and still 200. Add-on skills add one entry to `checks`, nothing else. `/version`: build info; all unauthenticated.
 
 Timeout budget, four constants in `config.rs`, shortest first: `READINESS_TIMEOUT` 2 s, `DB_STATEMENT_TIMEOUT` 10 s (`ConnectOptions`), `HTTP_CLIENT_TIMEOUT` 10 s, `REQUEST_TIMEOUT` 30 s (`TimeoutLayer`), then the caller's timeout. Inverted, the client gives up while the query still runs.
 
@@ -172,7 +171,6 @@ Work that outlives the response is `tokio::spawn` with the error logged inside t
 | handlers required `Send` | handlers and services also require `Sync` |
 | a 405 was an empty response you could not customise | `Router::method_not_allowed_fallback` |
 | `Serve::tcp_nodelay` | `serve::ListenerExt` |
-| `Query` / `Form` reported "failed to deserialize" | `serde_path_to_error` names the field |
 
 ## Red Flags — STOP
 
@@ -188,5 +186,6 @@ Work that outlives the response is `tokio::spawn` with the error logged inside t
 | Add a second HTTP-span layer next to `OtelAxumLayer`, or `CorsLayer::permissive()` | Middleware — one HTTP span; origins come from settings |
 | Export OTLP without `set_text_map_propagator` | Telemetry — the default propagator is a silent no-op |
 | Put an id or a raw path in a metric label | Telemetry — labels are constants; ids go in span fields |
+| Pass `axum::serve` a bare `Router`, or let a handler own a large value | `references/operations.md` — the make-service form; `Bytes` or `Arc` in state, as handlers clone per request |
 
 Do not flag: `Arc<Settings>` in state, `.clone()` on `DatabaseConnection` or `Client` (handles), or a handler taking `State` by value.

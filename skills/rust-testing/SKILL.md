@@ -2,12 +2,12 @@
 name: rust-testing
 description: "Use when writing or fixing tests for an axum service or a new endpoint, or stabilizing a flaky test — API tests through axum-test and TestServer, test_app and its dependency overrides, rstest fixtures, fake and bon factories, httpmock, insta snapshots, injected Clock, nextest filters, coverage exclusions. Also for PoolTimedOut, or tests that leak state under nextest. Not for nextest.toml, llvm-cov flags or CI (rust-tooling), the Postgres container and per-test database (sea-orm-postgres), or rig mocks (building-rig-agents)."
 metadata:
-  version: "0.4.2"
+  version: "0.5.0"
 ---
 
 # Testing an axum service
 
-Assumes Rust 1.99, edition 2024, axum 0.8, axum-test 21, rstest 0.28, sea-orm 2, tokio 1.53, fake 5, bon 3, httpmock 0.9, mockall 0.15, insta 1.49, cargo-nextest 0.9.
+Assumes Rust 1.99, edition 2024, axum 0.8, axum-test 21, rstest 0.28, sea-orm 2, tokio 1.53, fake 5, bon 3, httpmock 0.9, mockall 0.15, insta 1.49, stats_alloc 0.1, cargo-nextest 0.9.
 
 Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come from the rust-scaffolding template. In a project built differently, use its own types, helpers and tooling, map outcomes onto its nearest existing error variant, and say so when none fits instead of adding one. Apply these rules to new code; when editing existing code, keep its public contract and tuned configuration and report differences instead of rewriting, unless asked. If `Cargo.lock` pins another major or minor version than the line above, follow the project and say which rules may not apply.
 
@@ -23,6 +23,7 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
 - `references/factories.md` — fake `Dummy` derives, bon factories, `ActiveModel` inserts, seeded RNG, parametrized cases. Read before the second test that needs a valid entity.
 - `references/mocking.md` — httpmock, mockall versus a hand-written fake, the `Clock` trait, awaiting background work, paused tokio time, test-log. Read when a test touches the network, the clock or a trait.
 - `references/snapshots.md` — insta redactions, `cargo insta review`, similar-asserts. Read when asserting on a whole response body: a snapshot is right when the shape matters more than any one field, wrong when one field is the point.
+- `references/connection-memory.md` — a `stats_alloc` test that holds real keep-alive connections open and bounds what they cost. Read when memory grows with connections, or to pin a fix for it.
 
 ## Philosophy
 

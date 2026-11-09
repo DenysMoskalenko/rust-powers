@@ -218,9 +218,11 @@ Where it sits is fixed here, so the two skills agree:
   and the `Retry-After` header. No new variant.
 - Which address identifies an unauthenticated caller is `rust-redis`'s trusted-proxy rule; its
   last resort, the `ConnectInfo` peer, only exists when `main.rs` serves with
-  `app.into_make_service_with_connect_info::<SocketAddr>()` — the scaffold does. Plain
-  `axum::serve(listener, app)` has no `ConnectInfo`, and the limiter fails every anonymous
-  request with a 500 rather than quietly sharing one bucket.
+  `app.into_make_service_with_connect_info::<SocketAddr>()` — the scaffold does. A bare
+  `Router` handed to `axum::serve` has no `ConnectInfo`, so the limiter fails every anonymous
+  request with a 500 rather than quietly sharing one bucket. It is wrong for a second reason
+  that has nothing to do with the limiter: axum 0.8.9 deep-copies a bare router for every
+  connection, so `into_make_service()` is the minimum even where no peer address is needed.
 
 ```rust
 // main.rs

@@ -55,7 +55,8 @@ exercise, because an integration test in `tests/` can use the library but never 
 ## A request through the tree
 
 1. `main.rs` binds the listener and serves `build_router(state)` with
-   `into_make_service_with_connect_info`, so every request carries the peer address.
+   `into_make_service_with_connect_info`, so every request carries the peer address and
+   the router is shared, not copied, between connections.
 2. `lib.rs::build_router` runs the middleware stack, `request_id` (in `api/mod.rs`) first
    and the timeout last, then matches the route. Both fallbacks answer in `ErrorBody`.
 3. `api/<resource>.rs` extracts `State<AppState>`, `Path<T>` and, last, `Valid<T>` from

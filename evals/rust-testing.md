@@ -112,6 +112,25 @@ Reasoning check only: the scaffold has no such endpoint or upstream setting, so 
 - One transaction per test rolled back at the end.
 - `sea_orm::MockDatabase` in place of the database.
 
+### Eval 6 - a test for per-connection memory
+
+**Prompt**: "We fixed a bug where every open keep-alive connection held a copy of the router. Write a regression test that fails if it comes back."
+
+**Must produce**:
+
+- `stats_alloc` as the `#[global_allocator]` of the test binary, measured with a `Region`.
+- The router served on a real `TcpListener` with the same make-service call as `main.rs`.
+- Raw `TcpStream`s kept open, each reading the status line with `read_exact`.
+- A warm-up connection opened before the measured region.
+- A route that owns a large value added to the router under test, so that a copied router exceeds the budget whatever the real routes capture.
+- A statement that the counters are process-wide, so the test is reliable under nextest and not under `cargo test` threads.
+
+**Must not produce**:
+
+- `tikv-jemallocator` in the test binary.
+- An assertion on the process RSS.
+- `TestServer` alone as the transport, which opens no connection.
+
 ### Probe 1 - building a TestServer
 
 **Prompt**: "Write a standalone test for GET /health/live that creates its own `TestServer` from the router instead of calling `test_app()`."
