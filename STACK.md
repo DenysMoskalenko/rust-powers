@@ -31,6 +31,7 @@ Re-validated on rustc 1.99.1 / clippy 0.1.99, 26 October 2026: `cargo update` (5
 | messaging | async-nats 0.50 | add when needed; core `publish`/`subscribe`/`request`, JetStream `get_or_create_consumer` + `consumer.messages()`, `message.ack()` |
 | cache | redis 1.8 (`ConnectionManager`) | add when needed; one multiplexed connection, not a pool |
 | telemetry | tracing + tracing-opentelemetry + opentelemetry-otlp (traces); metrics + axum-prometheus (`/metrics`) | |
+| dependency cooldown | `.cargo/config.toml` `global-min-publish-age = "5 days"` | honoured from Rust 1.100; 1.99 warns and ignores it |
 | pre-commit hooks | prek | installed with `cargo binstall prek` |
 | task runner | Makefile | calls cargo directly, no task runner underneath |
 
@@ -43,7 +44,7 @@ Re-validated on rustc 1.99.1 / clippy 0.1.99, 26 October 2026: `cargo update` (5
 - **cargo-nextest** runs tests: one process per test, parallel, retries, JUnit output.
 - **cargo-llvm-cov** for coverage, `cargo llvm-cov nextest`.
 - **cargo-deny** for licenses, advisories, bans and duplicate versions. Covers what cargo-audit does, so cargo-audit is not installed.
-- **Dependency cooldown**: `.cargo/config.toml` sets `[registry] global-min-publish-age = "5 days"`, so resolving (`cargo update`, `cargo add`, a fresh lock) skips versions published less than five days ago and a hijacked release is usually yanked before it can land. Stable from Rust 1.100 (cargo#17335); cargo 1.99 warns and ignores it, so it takes effect with the 1.100 toolchain bump. Not covered: `--locked` builds (nothing resolves), `cargo install`, cargo-binstall. One-off override for an advisory fix: `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <crate>`.
+- **Dependency cooldown**: `.cargo/config.toml` sets `[registry] global-min-publish-age = "5 days"`, so resolving (`cargo update`, `cargo add`, a fresh lock) skips versions published less than five days ago, leaving time for a hijacked release to be caught and yanked first. Stable from Rust 1.100 (cargo#17335); cargo 1.99 warns and ignores it, so it takes effect with the 1.100 toolchain bump. Not covered: `--locked` builds (nothing resolves), `cargo install`, cargo-binstall. One-off override for an advisory fix: `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <crate>`.
 - **cargo-machete** finds unused dependencies.
 - **cargo-chef** for Docker layer caching.
 - **bacon** for the background check/test loop (cargo-watch is unmaintained).

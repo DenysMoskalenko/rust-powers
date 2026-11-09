@@ -85,6 +85,11 @@ To bump one crate safely:
 `cargo update` with no argument moves everything within semver — do that deliberately, never inside another
 change. `--precise <version>` pins one crate exactly, the escape hatch when a release is broken.
 
+The template's `.cargo/config.toml` rejects versions under five days old (cargo 1.100+; 1.99 warns and ignores
+it): `--precise` fails on one, and a plain `cargo update` downgrades one already locked. Take a younger advisory
+fix with `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <crate> --precise <fixed>`, after
+`--dry-run` shows nothing else new.
+
 ## Lints
 
 `#![deny(...)]` in source cannot be relaxed for one invocation, which makes an editor's background check
@@ -139,13 +144,8 @@ allow-list, so its own output fails immediately; it also writes `wildcards = "al
 `[licenses.private] ignore = false`, so an init-derived file never checks path dependencies and flags your
 own crates as `unlicensed` — use the template in `references/configs.md`.
 
-Both `[package]` tables need `publish = false`: without it `[licenses.private] ignore = true` does nothing
-and `allow-wildcard-paths` will not cover the `migration` path dependency.
-
-`.cargo/config.toml` holds back versions published under five days ago (cargo 1.100+; older cargo ignores
-it). An advisory fix that is younger needs
-`CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <crate>`: `--precise` alone fails, and a
-later plain `cargo update` downgrades it until it ages.
+Both `[package]` tables also need `publish = false`; without it neither `[licenses.private] ignore` nor
+`allow-wildcard-paths` applies.
 
 `cargo machete` finds unused dependencies and exits 1 on a finding, which makes it a gate: it runs in the
 hook, in the `check` target and in CI. It reads source files, so a crate reachable only through another

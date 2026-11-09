@@ -1,4 +1,3 @@
-# Malicious and broken releases are mostly caught and yanked within days, so the
-# resolver takes no version younger than this. Cargo honours it from 1.100.
+# Leave five days to catch and yank a hijacked release; cargo honours this from 1.100.
 [registry]
 global-min-publish-age = "5 days"

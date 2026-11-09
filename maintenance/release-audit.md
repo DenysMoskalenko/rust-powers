@@ -108,10 +108,11 @@ The bump itself is AGENTS.md `## Versions`; the order across a release:
 2. The scaffold `Cargo.toml` mirror, then `cargo update` there with `CARGO_TARGET_DIR` exported to a
    scratch directory and `CARGO_INCREMENTAL=0`; stage `Cargo.lock`. Every cargo run inside the scaffold
    (`make check`, `make test`, `make cov`, the root `prek run --all-files` through the nested config)
-   writes `assets/app/target` unless `CARGO_TARGET_DIR` is exported; delete it afterwards. From Rust
-   1.100 the scaffold's `.cargo/config.toml`, which `make snippets` copies into `verify/`, holds back
-   versions under five days old: such a release waits for the next audit unless it fixes an advisory,
-   which takes `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow` on that one `cargo update -p`.
+   writes `assets/app/target` unless `CARGO_TARGET_DIR` is exported; delete it afterwards. Once the
+   toolchain is 1.100 or later, the scaffold's `.cargo/config.toml`, which `make snippets` copies into
+   `verify/`, rejects versions under five days old, and a requirement naming one fails the resolve: step 1
+   never raises a requirement to a release that young, which waits for the next audit, unless it fixes an
+   advisory, which takes `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow` on that one `cargo update -p`.
 3. `rust-tooling` references re-mirrored byte-for-byte; `diff` each block against the scaffold file.
 4. Skill pin lines, correction-table rows, snippets.
 5. `evals/<skill>.md` in the same commit whenever what a good answer looks like changed.

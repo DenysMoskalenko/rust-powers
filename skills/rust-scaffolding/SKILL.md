@@ -61,6 +61,10 @@ comments of `.env.example` and `docker-compose.yml`; those stay.
 Then `grep -rn 'app::' src tests` must print nothing, and run `cargo fmt --all`: renaming
 reorders imports, and step 7 starts with `cargo fmt --all -- --check`.
 
+On Rust 1.99, `cargo update --workspace` also prints `warning: ignoring
+registry.global-min-publish-age without -Zmin-publish-age`. That is expected: keep
+`.cargo/config.toml`, which holds back crate versions under five days old from cargo 1.100.
+
 ## 3. Set the environment
 
 ```bash
