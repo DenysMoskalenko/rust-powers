@@ -1,6 +1,6 @@
 # Rust web stack
 
-One pick per concern. Decided 4 November 2026.
+One pick per concern. Decided 9 November 2026.
 
 Toolchain: Rust 1.99, edition 2024, resolver 3. python-powers is the sibling project this
 repository mirrors for Python services.
@@ -43,6 +43,7 @@ Re-validated on rustc 1.99.1 / clippy 0.1.99, 26 October 2026: `cargo update` (5
 - **cargo-nextest** runs tests: one process per test, parallel, retries, JUnit output.
 - **cargo-llvm-cov** for coverage, `cargo llvm-cov nextest`.
 - **cargo-deny** for licenses, advisories, bans and duplicate versions. Covers what cargo-audit does, so cargo-audit is not installed.
+- **Dependency cooldown**: `.cargo/config.toml` sets `[registry] global-min-publish-age = "5 days"`, so resolving (`cargo update`, `cargo add`, a fresh lock) skips versions published less than five days ago and a hijacked release is usually yanked before it can land. Stable from Rust 1.100 (cargo#17335); cargo 1.99 warns and ignores it, so it takes effect with the 1.100 toolchain bump. Not covered: `--locked` builds (nothing resolves), `cargo install`, cargo-binstall. One-off override for an advisory fix: `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <crate>`.
 - **cargo-machete** finds unused dependencies.
 - **cargo-chef** for Docker layer caching.
 - **bacon** for the background check/test loop (cargo-watch is unmaintained).

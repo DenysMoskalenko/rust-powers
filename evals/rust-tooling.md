@@ -11,6 +11,7 @@
 5. I want to raise our coverage gate from 80 to 85 percent. Where does that number live so local runs and CI agree?
 6. How do I upgrade one dependency without `cargo update` moving everything else in the lock file?
 7. `target/` is 30 GB again two weeks after I last cleaned it. Why does it keep growing, and how do I stop it?
+8. `cargo update -p hyper --precise 1.9.2` fails with `version 1.9.2 is too new (published 2 hours ago, minimum age 5 days)`. Why, and how do I get it?
 
 **Should not load**
 
@@ -190,3 +191,11 @@
 **Wrong answer**: `(?:^|\n)[ \t]*(?:unlicensed|copyleft|allow-osi-fsf-free|default)\s*=|(?:^|\n)[ \t]*(?:\$\s*)?cargo deny init\b`
 
 **Right answer**: `publish\s*=\s*false`
+
+### Probe 6 - an advisory fix that is too new
+
+**Prompt**: `cargo update -p hyper --precise 1.9.2` fails with `version 1.9.2 is too new (published 2 hours ago, minimum age 5 days)`. 1.9.2 fixes an advisory we are exposed to. Get it into the lock file.
+
+**Wrong answer**: `(?:^|\n)[ \t]*(?:global-min-publish-age\s*=\s*"0"|incompatible-publish-age\s*=\s*"allow")`
+
+**Right answer**: `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow`
