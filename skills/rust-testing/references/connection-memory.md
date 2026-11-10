@@ -9,15 +9,14 @@ Checked against axum 0.8.9, stats_alloc 0.1.10, tokio 1.53 and cargo-nextest 0.9
 ## Why the API tests miss it
 
 A server that copies something for every accepted connection passes every API test: `TestServer`
-opens no socket, so no connection is ever held open. The cost only shows when real keep-alive
-connections stay open, which is what this test does. The bug it exists for is a bare `Router`
-handed to `axum::serve`, which axum 0.8.9 deep-copies per connection (`axum-service` owns that
-rule and the diagnosis).
+opens no socket. This test holds keep-alive connections open on raw `TcpStream`s, since a pooled
+client would reuse one. The bug it exists for is a bare `Router` handed to `axum::serve`
+(`axum-service` owns that rule).
 
 ## The test
 
-Add `stats_alloc = "0.1"` to `[dev-dependencies]`. Use it, not `tikv-jemallocator`, in the test
-binary: the build script of tikv-jemalloc-sys 0.7.1 runs `make`, which slim CI images lack.
+Add `stats_alloc = "0.1"` to `[dev-dependencies]`. tikv-jemalloc-sys needs `make`, which slim CI
+images lack.
 
 ```rust,verify,test
 //! `tests/api/connection_memory.rs`, declared with `mod connection_memory;` in `main.rs`.
@@ -127,21 +126,12 @@ async fn open_connections_do_not_copy_the_router() {
 
 ## What each part is for
 
-- **Raw `TcpStream`s, not a client.** A pooled HTTP client reuses one connection and the test
-  measures nothing. Each stream stays in `open` until after `region.change()`.
-- **Net growth, not allocations.** `bytes_allocated - bytes_deallocated` is what is still held.
-  Do not add `bytes_reallocated`: in stats_alloc 0.1.10 `realloc` already adds each size change
-  to one of those two counters, so adding it counts every grown buffer twice.
-- **The ballast route decides the result.** Measured on the scaffold, 50 connections hold
-  1.4 MB served through `into_make_service_with_connect_info`. Its own routes capture little,
-  so a bare `Router` only doubles that to 2.9 MB, which a budget loose enough to survive a
-  hyper release still passes. With one megabyte owned by a handler the bare form holds 55.3 MB.
-  The 4 MiB budget sits between 1.4 and 55.3.
-- **nextest only.** The counters are process-wide. nextest runs one test per process, so the
-  region sees this test alone; under `cargo test` the other tests of the binary run on sibling
-  threads and their allocations land in the same region. If the project runs `cargo test`, give
-  this test a binary of its own.
-- **The allocator instruments the whole test binary.** Two atomic additions per allocation, in
-  every test of `tests/api/`. A crate graph links one `#[global_allocator]`: if the library
-  crate already declares one, the test binary does not compile until that declaration moves to
+- **Net growth** is `bytes_allocated - bytes_deallocated`. Do not add `bytes_reallocated`:
+  `realloc` already feeds both counters, so that counts every grown buffer twice.
+- **The ballast route decides the result.** On the scaffold, 50 connections hold 1.4 MB served
+  through the make-service and only 2.9 MB bare, because its routes capture little. With the
+  megabyte route the bare form holds 55.3 MB.
+- **nextest only.** The counters are process-wide, and nextest runs one test per process. Under
+  `cargo test`, give this test a binary of its own.
+- **One `#[global_allocator]` per crate graph.** If the library crate declares one, move it to
   `main.rs`.

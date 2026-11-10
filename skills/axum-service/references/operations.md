@@ -474,90 +474,25 @@ Checked against axum 0.8.9, governor 0.10.4, moka 0.12.16 and tikv-jemallocator 
 memory that rises under load and never comes back is live heap until a profile says otherwise.
 Look in this order.
 
-**1. The serve call.** In axum 0.8.9 `impl Service<serve::IncomingStream> for Router<()>`
-(`src/routing/mod.rs`) answers every accepted connection with `self.clone().with_state(())`.
-The server still holds its own handle, so the `Arc::try_unwrap` inside `with_state` fails and
-`RouterInner` is cloned: every route's boxed service and everything its handler captured, held
-until the connection closes. `into_make_service()` and `into_make_service_with_connect_info()`
-call `with_state(())` once, and their per-connection call is an `Arc` clone. A gateway that keeps
-upstream keep-alive connections open (Envoy) turns the bare form into memory that follows the
-peak connection count and stays there. One recorded case: a docs route owned a 4 MB OpenAPI
-document, 50 keep-alive connections held about 200 MB, and 1.87 MB once the router was served
-through `into_make_service()`.
+1. **The serve call.** Given a bare `Router`, `axum::serve` calls `self.clone().with_state(())`
+   for every accepted connection: a copy of every route and everything its handler captured,
+   held until the connection closes. `into_make_service()` and
+   `into_make_service_with_connect_info()` build the service once and hand out an `Arc` clone.
+   Behind a gateway that keeps connections open, the bare form's memory follows the peak
+   connection count and stays there.
+2. **What handlers own.** A route clones its handler for every request, so a closure that owns
+   a `Vec<u8>` or `String` copies it each time. Serialize a large static body once into `Bytes`,
+   or keep it in `State` behind an `Arc`. `SwaggerUi::url(path, api)` already shares its
+   document through an `Arc` (utoipa-swagger-ui 10).
+3. **Per-key maps.** A governor keyed limiter never drops a key by itself: call
+   `retain_recent()`, then `shrink_to_fit()`. moka evicts only inside reads and writes, so an
+   idle cache keeps its entries: set `time_to_idle` or `time_to_live` and call
+   `run_pending_tasks().await`. Run both from one `tokio::time::interval` task that stops on
+   the shutdown signal, after `serve` returns and before telemetry is flushed.
+4. **The allocator, last.** Swapping it does not free live heap. Profile first: build with
+   tikv-jemallocator's `profiling` feature, run with
+   `_RJEM_MALLOC_CONF=prof:true,prof_final:true` (`prof:true` alone writes nothing) and read
+   the dump with `jeprof`. Keep the system allocator unless a profile justifies another.
 
-**2. What handlers own.** A route clones its handler for every request
-(`HandlerService::call`, axum 0.8.9), so a closure that owns a large value copies it per request
-even when the serve call is right. Build the body once and hand out a reference count:
-
-```rust,verify
-//! A large static body: serialized once at startup, shared by reference count.
-use axum::Router;
-use axum::body::Bytes;
-use axum::http::header;
-use axum::routing::get;
-
-pub fn docs_router(api: &utoipa::openapi::OpenApi) -> anyhow::Result<Router> {
-    let openapi = Bytes::from(serde_json::to_vec(api)?);
-    Ok(Router::new().route(
-        "/openapi.json",
-        get(move || {
-            let body = openapi.clone(); // a reference count, not a copy
-            async move { ([(header::CONTENT_TYPE, "application/json")], body) }
-        }),
-    ))
-}
-```
-
-`SwaggerUi::url(path, api)` already keeps the document in an `Arc` (utoipa-swagger-ui 10).
-
-**3. Per-key maps that only grow.** The template keeps no per-caller state in the process, and
-the limiter and cache these skills teach live in Redis (`rust-redis`). A service that does keep
-such a map owns its pruning, because neither of the usual crates does it unprompted:
-
-- A governor keyed limiter never drops a key by itself. `retain_recent()` drops every key whose
-  quota is full again, and `shrink_to_fit()` returns the freed capacity.
-- moka runs eviction and expiry lazily, inside the calls that read and write the cache, so a
-  cache that goes idle keeps its entries. Set `time_to_idle` or `time_to_live` on the builder,
-  and call `run_pending_tasks().await` on a timer.
-
-```rust
-async fn prune(
-    limiter: Arc<DefaultKeyedRateLimiter<IpAddr>>,
-    cache: moka::future::Cache<String, Profile>,
-    mut stopping: watch::Receiver<bool>,
-) {
-    let mut ticker = tokio::time::interval(Duration::from_secs(60));
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            _ = stopping.changed() => break,
-            _ = ticker.tick() => {
-                limiter.retain_recent();
-                limiter.shrink_to_fit();
-                cache.run_pending_tasks().await;
-            }
-        }
-    }
-}
-```
-
-In `main.rs` the task is spawned before `axum::serve` and its `JoinHandle` kept. After `serve`
-returns, send on the `watch` channel and await the handle, then flush telemetry and close the
-pool: the order is drain, stop workers, flush, close. The worker-set shape for more than one
-such task is `rust-code-style`'s.
-
-**4. The allocator, last.** Swapping the allocator does not free live heap. In the case above
-jemalloc held 364 MB where glibc held 334 MB; with the serve call fixed, glibc settled at 65 MB
-and jemalloc with `thp:never` at 87 MB. Find the heap first: a diagnostic build with
-tikv-jemallocator's `profiling` feature, run with `_RJEM_MALLOC_CONF=prof:true,prof_final:true`.
-`prof:true` alone writes nothing: `prof_final` dumps `jeprof.<pid>.<seq>.f.heap` when the
-process exits, and `lg_prof_interval:30` adds a dump for every GiB allocated while it runs
-(jemalloc 5.3.1, bundled by tikv-jemalloc-sys 0.7.1). Read the dump with `jeprof`. Keep the
-system allocator unless a profile justifies another. Local numbers
-can mislead: Docker Desktop's VM runs transparent huge pages in `always` mode, which cluster
-nodes may not.
-
-**Autoscaling.** A Rust service's memory does not follow load: the allocator keeps freed pages,
-caches fill, pooled connections stay. Scale on CPU. The memory request and limit protect the
-node; they are not a scaling signal, and a memory-based autoscaler sits at its maximum after
-the first peak. Upstream connections from a gateway follow requests in flight, not users.
+Autoscale on CPU. Memory does not follow load: the allocator keeps freed pages, and caches and
+pools stay full, so a memory-based autoscaler sits at its maximum after the first peak.
