@@ -10,7 +10,7 @@ Verified against `rig` 0.45.0.
 - [Compile Errors First](#compile-errors-first)
 - [`PromptError`](#prompterror)
 - [`ProviderError`](#providererror)
-- [Rig Does Not Retry](#rig-does-not-retry)
+- [Retries](#retries)
 - [Runtime Failures That Compile Fine](#runtime-failures-that-compile-fine)
 - [Production Checklist](#production-checklist)
 
@@ -51,9 +51,9 @@ only), `rmcp` (MCP tools), `memory` (`rig::memory`: stores, windows, compaction)
 
 ### `Agent<M>` does not compile
 
-`Agent` has no type parameter since 0.43 — `AgentBuilder::new` takes the model as a
-`DynModel`. Write `Agent`. Same for hooks: `impl AgentHook for MyHook`, not
-`impl<M: CompletionModel> AgentHook<M> for MyHook`. See
+`Agent` has no type parameter since 0.42 — `AgentBuilder::new` erases the model, into a
+`DynModel` since 0.43. Write `Agent`. Same for hooks, since 0.41: `impl AgentHook for MyHook`,
+not `impl<M: CompletionModel> AgentHook<M> for MyHook`. See
 Version Drift.
 
 ## `PromptError`
@@ -173,8 +173,8 @@ Rough triage:
 
 `ProviderResponse` is not a synonym for "transient". Rig puts every non-2xx reply into it,
 so a 401 (bad key), a 403, and a 400 (malformed request) land in the same variant as a 429
-or a 503. Branch on `provider_response_status()` before retrying — retry 408, 429, and
-5xx; surface 4xx immediately. A blind retry on `ProviderResponse` turns a wrong API key into
+or a 503. Ask `is_retryable()` before retrying: it is true for 408, 425, 429 and 5xx and false
+for every other status. A blind retry on `ProviderResponse` turns a wrong API key into
 three wrong API keys.
 
 ### Inspecting a provider failure
@@ -202,63 +202,197 @@ and `PromptError` forwards the same accessors, from its `Report` as well.
 
 Do not log the raw body indiscriminately — it can echo your prompt back.
 
-## Rig Does Not Retry
+## Retries
 
-There is no built-in backoff; that keeps the core predictable. Wrap calls yourself:
+rig never retries a provider failure in an agent run: `prompt`, `chat` and a stream fail on the
+first one. Its one built-in retry is `.retries(n)` on `extract` and `prompt_typed`, and it is not
+a policy for provider failures: it runs the whole attempt again, at once, after any failure.
+That suits a reply that did not parse or an extraction with no submit call, and an extractor
+from `ExtractorBuilder::new` has no tools of its own to repeat. It is wrong for everything else:
+a 401 or a request rig refused is sent `n` more times, a 429 is answered with an immediate
+second request, a spent turn budget is spent again, and a `prompt_typed` run on a tool-using
+agent executes its tools again on every attempt. Give `.retries(n)` to an extractor, with `n`
+of 1 or 2, and leave it off a typed run whose agent has tools.
 
-```rust,verify
-use rig::agent::Agent;
+For provider failures wrap the run yourself. The wrapper needs `rand` as a dependency, which the
+scaffold has only as a dev-dependency:
+
+```rust,verify,test
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime};
+
+use rig::agent::{Agent, AgentHook, DispatchAction, DispatchEvent, HookContext, PromptResponse};
 use rig::completion::PromptError;
-use std::time::Duration;
+use rig::error::ErrorReport;
 
-/// Boxed: `PromptError` carries the run's history unboxed, which clippy's
-/// `result_large_err` rejects in a return type.
-async fn prompt_with_retry(
-    agent: &Agent,
-    input: &str,
-    max_attempts: u32,
-) -> Result<String, Box<PromptError>> {
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        match agent.prompt(input).max_turns(5).await {
-            Ok(reply) => return Ok(reply.output()),
+const MAX_ATTEMPTS: u32 = 3;
+const BASE_BACKOFF: Duration = Duration::from_millis(250);
+/// The longest single wait, the provider's `Retry-After` included. A caller asked
+/// to wait longer gets the error instead of a held connection.
+const MAX_WAIT: Duration = Duration::from_secs(10);
 
-            Err(e) if attempt < max_attempts && is_retryable(&e) => {
-                let backoff = Duration::from_millis(200 * 2u64.pow(attempt - 1));
-                tracing::warn!(attempt, ?backoff, error = %e, "retrying");
-                tokio::time::sleep(backoff).await;
-            }
-            Err(e) => return Err(e.into()),
+/// Set once the run dispatches a tool call. A second run starts from the prompt,
+/// so it would execute that tool again.
+#[derive(Clone, Default)]
+struct ToolDispatched(Arc<AtomicBool>);
+
+impl AgentHook for ToolDispatched {
+    async fn on_dispatch(&self, _ctx: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
+        if event.tool_name().is_some() {
+            self.0.store(true, Ordering::Relaxed);
         }
+        DispatchAction::proceed()
     }
 }
 
-/// rig's own classification: a transport failure, a truncated reply, a
-/// provider 408, 425, 429 or 5xx, or an in-band error envelope with a
-/// transient code. Anything else, a 401 or `MaxTurns` included, fails the
+/// Boxed: `PromptError` carries the run's history unboxed, which clippy's
+/// `result_large_err` rejects in a return type.
+async fn prompt_with_retry(agent: &Agent, input: &str) -> Result<PromptResponse, Box<PromptError>> {
+    let mut attempt = 1;
+    loop {
+        let tools = ToolDispatched::default();
+        let run = agent.prompt(input).max_turns(5).add_hook(tools.clone());
+        let error = match run.await {
+            Ok(response) => return Ok(response),
+            Err(error) => error,
+        };
+        let wait = match retryable(&error) {
+            Some(report) if attempt < MAX_ATTEMPTS && !tools.0.load(Ordering::Relaxed) => report
+                .retry_after(SystemTime::now())
+                .unwrap_or_else(|| backoff(attempt)),
+            _ => return Err(error.into()),
+        };
+        if wait > MAX_WAIT {
+            return Err(error.into());
+        }
+        tracing::warn!(attempt, ?wait, %error, "retrying the run");
+        tokio::time::sleep(wait).await;
+        attempt += 1;
+    }
+}
+
+/// The failure's report when rig marks it retryable: a transport failure, a
+/// truncated reply, a provider 408, 425, 429 or 5xx, or an in-band error envelope
+/// with a transient code. Anything else, a 401 or `MaxTurns` included, fails the
 /// same way again.
-fn is_retryable(error: &PromptError) -> bool {
-    match error {
-        PromptError::Report(report) => report.is_retryable(),
-        PromptError::Provider(error) => error.is_retryable(),
-        _ => false,
+fn retryable(error: &PromptError) -> Option<ErrorReport> {
+    let report = match error {
+        PromptError::Report(report) => report.clone(),
+        PromptError::Provider(provider) => provider.report(),
+        _ => return None,
+    };
+    report.is_retryable().then_some(report)
+}
+
+/// Full jitter: anywhere up to a ceiling that doubles with each attempt, so
+/// callers that failed together do not retry together.
+fn backoff(attempt: u32) -> Duration {
+    let ceiling = BASE_BACKOFF.saturating_mul(2u32.saturating_pow(attempt - 1));
+    rand::random_range(Duration::ZERO..=ceiling.min(MAX_WAIT))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use rig::agent::AgentBuilder;
+    use rig::test_utils::{MockCompletionModel, MockTurn};
+    use rig::tool::ToolExecutionError;
+    use serde_json::json;
+
+    use super::*;
+
+    #[rig::rig_tool(description = "Refund an order")]
+    async fn refund(id: String) -> Result<String, ToolExecutionError> {
+        Ok(format!("refunded {id}"))
+    }
+
+    fn failure(status: StatusCode, body: &str) -> MockTurn {
+        MockTurn::provider_response_error(status, body, "req-1")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_outage_before_any_tool_is_retried() {
+        let model = MockCompletionModel::from_turns([
+            failure(StatusCode::SERVICE_UNAVAILABLE, "overloaded"),
+            MockTurn::text("done"),
+        ]);
+        let agent = AgentBuilder::new(model.clone()).build();
+
+        let response = prompt_with_retry(&agent, "hi").await.unwrap();
+
+        assert_eq!(response.output(), "done");
+        assert_eq!(model.request_count(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_run_that_called_a_tool_is_not_run_again() {
+        let model = MockCompletionModel::from_turns([
+            MockTurn::tool_call("call_1", "refund", json!({ "id": "42" })),
+            failure(StatusCode::SERVICE_UNAVAILABLE, "overloaded"),
+            MockTurn::text("never asked for"),
+        ]);
+        let agent = AgentBuilder::new(model.clone()).tool(Refund).build();
+
+        assert!(prompt_with_retry(&agent, "refund order 42").await.is_err());
+        assert_eq!(model.request_count(), 2, "the refund is not issued twice");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_key_is_not_retried() {
+        let model = MockCompletionModel::from_turns([
+            failure(StatusCode::UNAUTHORIZED, "invalid api key"),
+            MockTurn::text("never asked for"),
+        ]);
+        let agent = AgentBuilder::new(model.clone()).build();
+
+        assert!(prompt_with_retry(&agent, "hi").await.is_err());
+        assert_eq!(model.request_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_the_provider_asked_for_is_honoured() {
+        let limited = |wait: &str| {
+            MockCompletionModel::from_turns([
+                failure(StatusCode::TOO_MANY_REQUESTS, wait),
+                MockTurn::text("done"),
+            ])
+        };
+
+        let agent = AgentBuilder::new(limited("Please try again in 7s.")).build();
+        let started = tokio::time::Instant::now();
+        assert!(prompt_with_retry(&agent, "hi").await.is_ok());
+        assert!(started.elapsed() >= Duration::from_secs(7));
+
+        // Longer than `MAX_WAIT`: the caller gets the 429, not a held connection.
+        let model = limited("Please try again in 90s.");
+        let agent = AgentBuilder::new(model.clone()).build();
+        assert!(prompt_with_retry(&agent, "hi").await.is_err());
+        assert_eq!(model.request_count(), 1);
     }
 }
 ```
 
-Three things this gets right and hand-rolled loops often do not:
+Four things this gets right and hand-rolled loops often do not:
 
-- **Retry only what can succeed.** `MaxTurns`, `UnknownToolCall` and a provider 4xx
-  other than 408 and 429 are deterministic given the same inputs; retrying them just spends
+- **Retry only what can succeed.** `is_retryable()` is rig's own classification, so the
+  wrapper keeps no list of statuses. `MaxTurns`, `UnknownToolCall` and a provider 4xx other
+  than 408, 425 and 429 are deterministic given the same inputs; retrying them just spends
   money.
-- **Exponential backoff, bounded.** A fixed 100 ms retry against a rate limit is a
-  self-inflicted denial of service.
-- **Retry the smallest unit.** Inside a workflow, retry the failing step, not the whole
-  chain — otherwise a retry re-runs steps that already succeeded and had side effects.
+- **Never run a tool twice.** A retry is a new run from the prompt, so every tool the failed
+  run called would be called again. The hook records the first tool dispatch and the wrapper
+  gives up after it. Inside a workflow, retry the failing step, not the whole chain, for the
+  same reason.
+- **Wait as long as the provider asked.** `retry_after` reads `retry-after-ms`, `Retry-After`
+  in seconds or as an HTTP date, and the hint in the body. When that is more than the caller
+  can wait, return the error: behind axum the 429 then reaches the client with its
+  `Retry-After`.
+- **Back off with full jitter, bounded.** A fixed 100 ms retry against a rate limit is a
+  self-inflicted denial of service, and clients that back off by the same amounts hammer the
+  provider in lockstep.
 
-Add jitter — `backoff + Duration::from_millis(rand::random::<u64>() % 100)` — when many
-clients retry at once, or they will synchronize and hammer the provider in lockstep.
+Behind an axum handler the waits come out of the request's own time budget, so size
+`MAX_ATTEMPTS` and `MAX_WAIT` under it.
 
 ### Rate limits
 
@@ -304,10 +438,12 @@ override it.
 
 ## Production Checklist
 
-- Set `max_turns` deliberately on every tool-using prompt; do not rely on the default.
+- Set `max_turns` deliberately on every prompt; do not rely on the default.
 - Bound every autonomous or evaluator loop with a retry budget.
-- Set `max_tokens` on every Claude agent, sized for thinking plus the reply: thinking is
-  always on for Claude Opus 5.5 and Fable 5.1 and counts toward the limit, so a cap sized
+- Leave `max_tokens` unset on a Claude id rig's catalog lists: rig sends the model's published
+  output limit. Set it only for an id the catalog does not list, where rig fails every prompt
+  without it, and size it for thinking plus the reply: thinking counts toward the limit, and
+  rig's catalog records that Claude Opus 5.5 and Fable 5.1 cannot turn it off, so a cap sized
   for the answer truncates it. Bound cost with `max_turns`, not a small `max_tokens`.
 - Put a concurrency limiter in front of the provider.
 - Time out external calls inside tools.

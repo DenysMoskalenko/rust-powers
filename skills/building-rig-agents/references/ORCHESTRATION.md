@@ -224,30 +224,80 @@ An agent can be converted into a tool and handed to another agent. Note the conv
 name is runtime state). Use `Agent::into_tool()?`, which yields a `DynamicTool`, and attach
 it with `.dynamic_tool(..)` rather than `.tool(..)`.
 
-```rust
-use rig::prelude::*;
-use rig::providers::openai::OpenAI;
+```rust,verify,test
+use rig::DynModel;
+use rig::agent::{Agent, AgentBuilder};
+use rig::message::EmptyToolName;
+use rig::operation::Completion;
+use rig::tool::ToolExecutionError;
 
-let client = OpenAI::from_env()?;
+#[rig::rig_tool(description = "Look up an order's status by its id")]
+async fn order_status(id: String) -> Result<String, ToolExecutionError> {
+    Ok(format!("order {id} has shipped"))
+}
 
-let bob = AgentBuilder::new(client.completion(MODEL))
-    .name("Bob")
-    .description("An employee who handles admin tasks at FooBar Inc.")
-    .preamble("You are Bob, an admin employee. Your manager Alice may ask you to do things.")
-    .build();
+/// A manager that hands order questions to a worker agent.
+fn support_team(
+    manager: impl Into<DynModel<Completion>>,
+    worker: impl Into<DynModel<Completion>>,
+) -> Result<Agent, EmptyToolName> {
+    let orders = AgentBuilder::new(worker)
+        .name("orders")
+        .description("Answers a question about one order, given its id.")
+        .preamble("Look the order up with `order_status` and report what it says.")
+        .tool(OrderStatus)
+        // The manager's `.max_turns(..)` does not reach the worker: `into_tool` runs
+        // it on its own default, and one call cannot fit a tool call plus an answer.
+        .default_max_turns(3)
+        .build();
 
-let alice = AgentBuilder::new(client.completion(MODEL))
-    .name("Alice")
-    .description("A manager at FooBar Inc.")
-    .preamble("You are Alice, a manager in the admin department. You manage Bob.")
-    .dynamic_tool(bob.into_tool()?)
-    .build();
+    Ok(AgentBuilder::new(manager)
+        .name("support")
+        .preamble("You answer support questions. Ask `orders` about any order.")
+        .dynamic_tool(orders.into_tool()?)
+        .build())
+}
 
-let res = alice
-    .prompt("Ask Bob to draft a welcome email and tell me what he wrote.")
-    .max_turns(5)
-    .await?;
+#[cfg(test)]
+mod tests {
+    use rig::test_utils::{MockCompletionModel, MockTurn};
+    use serde_json::json;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn the_worker_runs_on_its_own_turn_budget() {
+        let worker = MockCompletionModel::from_turns([
+            MockTurn::tool_call("call_1", "order_status", json!({ "id": "42" })),
+            MockTurn::text("Order 42 has shipped."),
+        ]);
+        let manager = MockCompletionModel::from_turns([
+            MockTurn::tool_call("call_2", "orders", json!({ "prompt": "Where is order 42?" })),
+            MockTurn::text("It has shipped."),
+        ]);
+        let (worker_probe, manager_probe) = (worker.clone(), manager.clone());
+        let team = support_team(manager, worker).unwrap();
+
+        team.prompt("Where is order 42?").max_turns(3).await.unwrap();
+
+        assert_eq!(worker_probe.request_count(), 2, "a tool call, then the answer");
+        // The worker's answer is the tool result the manager's second call reads.
+        let delegated = format!("{:?}", manager_probe.requests()[1].chat_history.last());
+        assert!(delegated.contains("Order 42 has shipped."), "{delegated}");
+    }
+}
 ```
+
+**Give a tool-using worker `.default_max_turns(n)`.** `into_tool()` runs the worker as a bare
+`agent.prompt(prompt)` with the caller's tool context, so nothing set on the manager's run
+reaches it: its turn budget is its own default, one model call unless its builder says
+otherwise. Without the line above the worker fails every delegation with `MaxTurns`, the
+manager reads only a tool result saying `the tool failed`, and it answers anyway. Budget the
+manager as well: each delegation costs it a model call on top of the worker's whole run.
+
+**Leave `.memory(..)` off a worker.** The same bare prompt names no conversation, so a worker
+with memory loads and saves the one log named after it on every delegation, whichever user the
+manager is serving. Keep the conversation on the manager, scoped per request.
 
 **Always set `name` and `description` on an agent used as a tool.** `into_tool()` uses the
 agent's name as the tool name and its description as the tool description. An unnamed
@@ -259,9 +309,6 @@ The generated tool description is a template built from the worker's name, descr
 manager's advertised tool list — which the model sees, and which anything reading that list
 sees too. Keep a worker's preamble free of anything you would not put in front of the
 manager's caller.
-
-Budget turns generously: each delegation costs the manager a model call plus the worker's
-own run.
 
 ### Swarms
 
@@ -327,7 +374,7 @@ locally without writing an input loop.
 use rig::integrations::cli_chatbot::ChatBotBuilder;
 use rig::prelude::*;
 use rig::providers::openai::{self, OpenAI};
-const MODEL: &str = openai::GPT_5_5;
+const MODEL: &str = openai::GPT_6_SOL;
 
 
 #[tokio::main]

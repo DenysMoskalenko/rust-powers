@@ -6,6 +6,7 @@
 - [Writing a migration](#writing-a-migration)
 - [Schema helpers](#schema-helpers)
 - [Altering a live table: expand, migrate, contract](#altering-a-live-table-expand-migrate-contract)
+- [Lock-safe DDL on a live table](#lock-safe-ddl-on-a-live-table)
 - [Regenerating entities](#regenerating-entities)
 - [Running migrations](#running-migrations)
 - [Schema Registry sync](#schema-registry-sync)
@@ -93,8 +94,14 @@ enum Post {
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
-    // Note `&self`: in 2.0 the migration methods take a receiver.
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // The foreign key below locks `user`, a table with traffic, for a moment. Give up
+        // after 5 s instead of queueing every write to it behind this migration.
+        manager
+            .get_connection()
+            .execute_unprepared("SET LOCAL lock_timeout = '5s'")
+            .await?;
+
         manager
             .create_table(
                 Table::create()
@@ -144,6 +151,11 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Dropping a referencing table takes the strongest lock on `user` too.
+        manager
+            .get_connection()
+            .execute_unprepared("SET LOCAL lock_timeout = '5s'")
+            .await?;
         manager
             .drop_table(Table::drop().table(Post::Table).to_owned())
             .await
@@ -186,13 +198,18 @@ A deployment runs the migration and the new code at different moments, and durin
 both versions of the code are live at once. Any change that removes or narrows something must
 therefore be split across releases:
 
-1. **Expand.** Add the new nullable column, the new table, or the new index. Old code ignores it.
-2. **Migrate.** Deploy code that writes both the old and the new shape, then backfill existing rows
-   in batches.
-3. **Contract.** Once no running process reads the old shape, drop it in a later migration.
+1. **Expand.** One release adds the new nullable column, the new table, or the new index, and
+   ships code that writes both the old and the new shape. Old code ignores the addition.
+2. **Migrate.** Once that release is the only one running, backfill the existing rows. Not
+   earlier: a replica still on the old code keeps inserting rows without the new value, behind
+   the backfill.
+3. **Contract.** Once every row has the new shape and no running process reads the old one, a
+   later release narrows or drops: `NOT NULL`, the old column.
 
 Renaming a column is the same three steps: add, dual-write plus backfill, drop. A single
 `ALTER TABLE ... RENAME COLUMN` breaks every process still running the previous release.
+
+The expand migration adds the column and nothing else:
 
 ```rust,verify
 use sea_orm_migration::prelude::*;
@@ -204,14 +221,18 @@ pub struct Migration;
 #[derive(DeriveIden)]
 enum User {
     Table,
-    Name,
     DisplayName,
 }
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
-    // Expand phase: the column is nullable, so old code inserting without it still works.
+    // Expand: the column is nullable, so old code inserting without it still works.
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Before any statement that locks a table with traffic; the next section says why.
+        manager
+            .get_connection()
+            .execute_unprepared("SET LOCAL lock_timeout = '5s'")
+            .await?;
         manager
             .alter_table(
                 Table::alter()
@@ -219,22 +240,14 @@ impl MigrationTrait for Migration {
                     .add_column(string_null(User::DisplayName))
                     .to_owned(),
             )
-            .await?;
-
-        // Fine for a small table. A single UPDATE over a large one holds row locks for the
-        // whole migration transaction: batch it outside the migration instead, in a loop of
-        // `UPDATE .. WHERE ctid IN (SELECT ctid FROM "user" WHERE "display_name" IS NULL LIMIT 10000)`.
-        manager
-            .get_connection()
-            .execute_unprepared(
-                r#"UPDATE "user" SET "display_name" = "name" WHERE "display_name" IS NULL"#,
-            )
-            .await?;
-
-        Ok(())
+            .await
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared("SET LOCAL lock_timeout = '5s'")
+            .await?;
         manager
             .alter_table(
                 Table::alter()
@@ -247,8 +260,78 @@ impl MigrationTrait for Migration {
 }
 ```
 
-A foreign key onto an existing table is the same expand step: a nullable column, the
-constraint, and the index Postgres does not create for it.
+The backfill is a migration of its own, in the release after the one that started writing the
+column:
+
+```rust,verify
+use sea_orm_migration::prelude::*;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Fine for a small table. A single UPDATE over a large one holds row locks for the
+        // whole migration transaction: batch it outside the migration instead, in a loop of
+        // `UPDATE .. WHERE ctid IN (SELECT ctid FROM "user" WHERE "display_name" IS NULL LIMIT 10000)`.
+        manager
+            .get_connection()
+            .execute_unprepared(
+                r#"UPDATE "user" SET "display_name" = "name" WHERE "display_name" IS NULL"#,
+            )
+            .await?;
+        Ok(())
+    }
+
+    // Nothing to undo: the expand migration's `down` drops the column. Without this the
+    // default `down` returns an error and `migrate refresh` stops here.
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Ok(())
+    }
+}
+```
+
+## Lock-safe DDL on a live table
+
+Postgres queues lock requests. Most `ALTER TABLE` forms take the strongest lock, so the statement
+waits for every open transaction that has touched the table, and while it waits, every later
+query on that table waits behind it: one forgotten transaction plus one migration is an outage.
+Two rules follow.
+
+**Never wait long for a lock.** A migration that locks a table with traffic runs
+`SET LOCAL lock_timeout = '5s'` first. That is any `ALTER TABLE`, and also a new table's foreign
+key, which locks the table it references, and the drop of a referencing table or column, which
+takes the strongest lock on the referenced table too. A statement that cannot get its lock in
+time fails with `canceling statement due to lock timeout` (55P03), the migration rolls back, and
+the deploy is retried. `SET LOCAL` ends with the transaction, so it never leaks into a pooled
+connection; outside a transaction it does nothing but warn.
+
+**Never scan or build under a lock that blocks writes.** Three changes do exactly that when
+written the short way, and the schema builder has no lock-safe form for the first two, so they
+are raw SQL:
+
+| Change | Short form, and what it blocks | Lock-safe form |
+|---|---|---|
+| foreign key | `create_foreign_key` checks every existing row with writes to both tables blocked | `ADD CONSTRAINT .. FOREIGN KEY .. NOT VALID` checks new writes and scans nothing; `VALIDATE CONSTRAINT`, in a later transaction, scans with reads and writes going on |
+| `NOT NULL` | `ALTER COLUMN .. SET NOT NULL` scans the table with reads and writes blocked | `ADD CONSTRAINT .. NOT NULL "col" NOT VALID`, then `VALIDATE CONSTRAINT` |
+| index | `create_index` blocks writes for the whole build | `Index::create().concurrently()`, `CREATE INDEX CONCURRENTLY` |
+
+A new table needs neither `NOT VALID` nor `CONCURRENTLY`: nothing reads or writes it yet, so
+`create_table` with its foreign keys and indexes stays as in
+[Writing a migration](#writing-a-migration).
+
+Adding an index to a table that is being written to needs `CREATE INDEX CONCURRENTLY`, which
+Postgres refuses to run inside a transaction, and a constraint validated in the transaction that
+added it holds that statement's lock for the whole scan. Opt the migration out with
+`use_transaction`. `None` means the backend default, which on Postgres wraps each migration in a
+transaction. With `Some(false)`, `up` runs statement by statement on the pool: nothing rolls
+back, a failure leaves the finished steps in place and the migration unrecorded, and the next run
+starts `up` from the top. So every step must be safe to run again, and the steps that have to
+commit together, or that need `SET LOCAL`, go through `manager.begin()`, which returns a
+`SchemaManager` over a transaction of its own.
+
+A foreign key onto an existing table, complete:
 
 ```rust,verify
 use sea_orm_migration::prelude::*;
@@ -258,12 +341,6 @@ use sea_orm_migration::schema::uuid_null;
 pub struct Migration;
 
 #[derive(DeriveIden)]
-enum Organisation {
-    Table,
-    Id,
-}
-
-#[derive(DeriveIden)]
 enum Post {
     Table,
     OrganisationId,
@@ -271,30 +348,59 @@ enum Post {
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
-    // Expand: nullable, so old code that never writes the column keeps inserting.
+    fn use_transaction(&self) -> Option<bool> {
+        Some(false)
+    }
+
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .alter_table(
+        // 1. Expand: a nullable column, so old code that never writes it keeps inserting.
+        //    Column and constraint commit together, so the column's presence answers for
+        //    both when this runs a second time.
+        if !manager.has_column("post", "organisation_id").await? {
+            let txn = manager.begin().await?;
+            let db = txn.get_connection();
+            db.execute_unprepared("SET LOCAL lock_timeout = '5s'")
+                .await?;
+            txn.alter_table(
                 Table::alter()
                     .table(Post::Table)
                     .add_column(uuid_null(Post::OrganisationId))
                     .to_owned(),
             )
             .await?;
+            db.execute_unprepared(
+                r#"ALTER TABLE "post" ADD CONSTRAINT "fk_post_organisation_id"
+                   FOREIGN KEY ("organisation_id") REFERENCES "organisation" ("id")
+                   ON DELETE SET NULL NOT VALID"#,
+            )
+            .await?;
+            txn.commit().await?;
+        }
+
+        // 2. The scan, in a transaction of its own. A no-op on a constraint already valid.
         manager
-            .create_foreign_key(
-                ForeignKey::create()
-                    .name("fk_post_organisation_id")
-                    .from(Post::Table, Post::OrganisationId)
-                    .to(Organisation::Table, Organisation::Id)
-                    .on_delete(ForeignKeyAction::SetNull)
+            .get_connection()
+            .execute_unprepared(
+                r#"ALTER TABLE "post" VALIDATE CONSTRAINT "fk_post_organisation_id""#,
+            )
+            .await?;
+
+        // 3. The index Postgres does not create for a referencing column. An interrupted
+        //    concurrent build leaves an INVALID index under this name, and `if_not_exists`
+        //    would keep it: drop, then build.
+        manager
+            .drop_index(
+                Index::drop()
+                    .concurrently()
+                    .if_exists()
+                    .name("idx_post_organisation_id")
                     .to_owned(),
             )
             .await?;
-        // Postgres indexes the referenced key only; the referencing column is ours.
         manager
             .create_index(
                 Index::create()
+                    .concurrently()
                     .name("idx_post_organisation_id")
                     .table(Post::Table)
                     .col(Post::OrganisationId)
@@ -305,34 +411,102 @@ impl MigrationTrait for Migration {
 
     // Dropping the column drops its constraint and index with it.
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .alter_table(
-                Table::alter()
-                    .table(Post::Table)
-                    .drop_column(Post::OrganisationId)
-                    .to_owned(),
-            )
-            .await
+        let txn = manager.begin().await?;
+        txn.get_connection()
+            .execute_unprepared("SET LOCAL lock_timeout = '5s'")
+            .await?;
+        txn.alter_table(
+            Table::alter()
+                .table(Post::Table)
+                .drop_column(Post::OrganisationId)
+                .to_owned(),
+        )
+        .await?;
+        txn.commit().await
     }
 }
 ```
 
-Regenerated, the entity gains `organisation: BelongsTo<Option<organisation::Entity>>` — the
-nullable-FK shape, `Loaded(None)` for a post without one (`relations.md`). Migrate: new code sets
-it, a batched backfill fills old rows. Contract, once every row has one and no old code runs:
-`ALTER COLUMN .. SET NOT NULL` in a later migration, and the regenerated field becomes
-`BelongsTo<organisation::Entity>`.
+Regenerated, the entity gains `organisation: BelongsTo<Option<organisation::Entity>>`, the
+nullable-FK shape: `Loaded(None)` for a post without one. Migrate: new code sets it, a batched
+backfill fills old rows.
 
-Adding an index to a table that is being written to needs `CREATE INDEX CONCURRENTLY`, which
-Postgres refuses to run inside a transaction. Opt the migration out:
+Validation and a concurrent build take as long as the table is big, so the connection that runs
+migrations carries no `statement_timeout`; see [Running migrations](#running-migrations).
 
-```rust,ignore
-fn use_transaction(&self) -> Option<bool> {
-    Some(false)
+### Recovering an INVALID index
+
+A concurrent build that is cancelled or fails (a `statement_timeout`, a deadlock, a duplicate
+under a unique index) leaves the index behind, marked INVALID: no query uses it, every
+write still maintains it, and `CREATE INDEX CONCURRENTLY IF NOT EXISTS` sees the name and skips
+it. `\d post` in `psql` shows the mark, and this lists every one in the database:
+
+```sql
+SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;
+```
+
+Recover with `DROP INDEX CONCURRENTLY "idx_post_organisation_id"` and build again, or rebuild in
+place with `REINDEX INDEX CONCURRENTLY "idx_post_organisation_id"`. The migration above does the
+first on every run. A concurrent build also waits for older transactions that wrote to the table,
+and for every query or snapshot older than itself, to finish: one long-running report stalls it
+for as long as the report runs, and that wait is not a failure.
+
+### Contract: NOT NULL
+
+Once every row has an organisation and no running code inserts without one, a later release
+makes the column required. Same shape as above, and both statements are safe to run again:
+
+```rust,verify
+use sea_orm_migration::prelude::*;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    fn use_transaction(&self) -> Option<bool> {
+        Some(false)
+    }
+
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // From here on an insert without the column fails with 23502; nothing is scanned yet.
+        let txn = manager.begin().await?;
+        let db = txn.get_connection();
+        db.execute_unprepared("SET LOCAL lock_timeout = '5s'")
+            .await?;
+        db.execute_unprepared(
+            r#"ALTER TABLE "post" ADD CONSTRAINT "post_organisation_id_not_null"
+               NOT NULL "organisation_id" NOT VALID"#,
+        )
+        .await?;
+        txn.commit().await?;
+
+        // Fails with 23502 while a NULL is left; backfill, then run the migration again.
+        manager
+            .get_connection()
+            .execute_unprepared(
+                r#"ALTER TABLE "post" VALIDATE CONSTRAINT "post_organisation_id_not_null""#,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let txn = manager.begin().await?;
+        let db = txn.get_connection();
+        db.execute_unprepared("SET LOCAL lock_timeout = '5s'")
+            .await?;
+        db.execute_unprepared(r#"ALTER TABLE "post" ALTER COLUMN "organisation_id" DROP NOT NULL"#)
+            .await?;
+        txn.commit().await
+    }
 }
 ```
 
-`None` means the backend default, which on Postgres wraps each migration in a transaction.
+The regenerated field becomes `BelongsTo<organisation::Entity>`. `NOT VALID` on a `NOT NULL`
+constraint is new in Postgres 18. On an older server add
+`CHECK ("organisation_id" IS NOT NULL) NOT VALID`, validate it, then run `SET NOT NULL`, which
+skips its scan when a valid check already proves the column, and drop the check.
 
 ## Regenerating entities
 
@@ -360,7 +534,8 @@ file is generated, so suppress it where the module is declared, in `lib.rs`:
 ```rust
 #[allow(
     clippy::unused_async_trait_impl,
-    reason = "#[sea_orm::model] on an entity without relations expands to an async fn with no .await"
+    reason = "#[sea_orm::model] on an entity with no relations expands to an async fn with no .await; \
+              allow, not expect: it fires only while such an entity exists, as after posts is removed"
 )]
 pub mod entities;
 ```
@@ -369,10 +544,99 @@ pub mod entities;
 
 ## Running migrations
 
-`Migrator::up(&db, None).await?` at startup is fine for a single process. It is racy for several
-replicas rolling at once, because the applied-migrations table is the only thing serialising them.
-Run migrations as a separate job or init container and gate the startup call behind a setting, so
-local development keeps the convenience and production does not inherit the race.
+`Migrator::up` applies each pending migration in a transaction of its own and takes no lock, so
+two replicas that start together both find a migration pending and both run it. On the service
+pool it also inherits that pool's `statement_timeout`, which cancels a backfill or an index build
+half-way. A startup call therefore gets connections and a lock of its own. This is `migrate()`
+from the scaffold's `main.rs`, called before the service pool exists:
+
+```rust,verify
+use std::time::Duration;
+
+use anyhow::Context as _;
+use migration::{Migrator, MigratorTrait as _};
+use sea_orm::{ConnectionTrait as _, TransactionTrait as _};
+
+/// Any fixed number. Advisory locks are scoped to the database, so it only has
+/// to differ from the keys the service's own jobs take.
+const MIGRATION_LOCK_KEY: i64 = 4_815_162_342;
+
+/// Migrations get connections of their own, with no `statement_timeout`: the
+/// service's ten seconds would cancel a backfill or an index build half-way.
+/// An advisory lock, held by an open transaction until the migrations finish,
+/// makes replicas that start together migrate one at a time; the ones that
+/// waited find nothing left to apply. With rolling deploys the old code still
+/// runs against the new schema, so sequence breaking changes as expand,
+/// migrate, contract, or run migrations as a separate job (`make migrate`).
+async fn migrate(database_url: &str) -> anyhow::Result<()> {
+    let mut options = sea_orm::ConnectOptions::new(database_url);
+    options
+        // One for the transaction that holds the lock, one for the migrations.
+        .max_connections(2)
+        .connect_timeout(Duration::from_secs(5))
+        .sqlx_logging(false);
+    let db = sea_orm::Database::connect(options)
+        .await
+        .context("connecting to Postgres for migrations")?;
+
+    let lock = db.begin().await.context("opening the migration lock")?;
+    // This session idles in its transaction while the migrations run on the
+    // other connection. A role or server timeout for that would end it, and
+    // the lock with it. `transaction_timeout` exists from Postgres 17: drop
+    // that statement on an older server.
+    lock.execute_unprepared(
+        "SET LOCAL idle_in_transaction_session_timeout = 0; SET LOCAL transaction_timeout = 0",
+    )
+    .await
+    .context("lifting the idle timeouts from the migration lock")?;
+    lock.execute_unprepared(&format!(
+        "SELECT pg_advisory_xact_lock({MIGRATION_LOCK_KEY})"
+    ))
+    .await
+    .context("waiting for the migration lock")?;
+
+    let migrated = Migrator::up(&db, None).await.context("running migrations");
+
+    // Committing releases the lock; so does a crash, with the session.
+    lock.commit()
+        .await
+        .context("releasing the migration lock")?;
+    db.close()
+        .await
+        .context("closing the migration connections")?;
+    migrated
+}
+```
+
+- **A pool of its own.** sea-orm sets `statement_timeout` on every pooled connection, as a startup
+  option. A migration could lift it with `SET LOCAL statement_timeout = 0`, but every migration
+  would have to remember to, and one that runs outside a transaction has no transaction to scope
+  it to; a `CREATE INDEX CONCURRENTLY` the timeout cancels leaves an INVALID index behind. The
+  migration pool sets none, and no `lock_timeout` either: a replica waiting for the migration
+  lock is waiting for a lock.
+- **The lock is transaction-level, in a transaction that stays open.** The open transaction pins
+  one connection for as long as the lock is needed, and Postgres releases the lock when that
+  transaction or its session ends. A session-level `pg_advisory_lock` taken through a pool
+  belongs to whichever connection ran it and goes back into the pool still held.
+- **The lock session idles while the migrations run.** A role or server that sets
+  `idle_in_transaction_session_timeout` or `transaction_timeout` would terminate it, lock
+  included, under a migration longer than that, so the lock transaction lifts both for itself
+  with `SET LOCAL` before it takes the lock. `transaction_timeout` exists from Postgres 17; on
+  an older server drop that statement.
+
+The lock orders the replicas of one release. It does nothing about the previous release, which
+keeps serving on the migrated schema until the rollout ends. So a startup migration fits what
+old code can live with, an expand step, and a job is right for the rest:
+
+- a change the previous release cannot run against, unless it is sequenced as expand, migrate,
+  contract;
+- a migration that outlasts the orchestrator's startup deadline (a large backfill, validating
+  or indexing a large table): the pod is killed mid-migration and its replacement starts over;
+- a service role that may not run DDL.
+
+The job is `sea-orm-cli migrate up` (`make migrate`), run once per deploy. It takes no lock, so
+it is a pipeline step or a one-off job, never an init container, which runs once per pod and
+races like an unlocked startup call. A project that migrates from a job drops the startup call.
 
 ## Schema Registry sync
 

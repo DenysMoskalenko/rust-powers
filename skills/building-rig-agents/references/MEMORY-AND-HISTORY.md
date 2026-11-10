@@ -13,7 +13,7 @@ Verified against `rig` 0.45.0.
 - [Memory Rules](#memory-rules)
 - [Durable Backends](#durable-backends)
 - [Bounding History Growth](#bounding-history-growth)
-- [Rolling Your Own Compaction](#rolling-your-own-compaction)
+- [Compaction](#compaction)
 - [Long-Term Memory](#long-term-memory)
 
 ## An Agent Is Stateless
@@ -62,7 +62,7 @@ use rig::memory::MemoryStore;
 use rig::prelude::*;
 use rig::providers::openai::{self, OpenAI};
 
-const MODEL: &str = openai::GPT_5_5;
+const MODEL: &str = openai::GPT_6_SOL;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -203,55 +203,129 @@ The save keeps the rules above: one path-segment log, `SessionError::Changed` wh
 request saved first. Bounding by estimated tokens tracks what you actually pay for; bounding
 by message count is simpler and more predictable.
 
-No window suits Claude Fable 5.1, Opus 5.5, Sonnet 5.5 or
-Haiku 5.5. Each thinking block those models return is bound to every message before it, and
-rig stores the blocks in memory and replays them. Dropping the oldest turns, or splicing a summary in their place,
-changes that prefix under every block that stays, so the next request is a 400 wherever the
-API enforces the check, which includes every account created from 31 August 2026. On
-Anthropic's own API in adaptive thinking, rig 0.45 asks for those blocks to be dropped
-instead, which loses their reasoning; not on Haiku 5.5, which is missing from rig's model
-catalog (see Request Patches in Hooks and Runner). On those
-models, bound history with the summarize-and-restart shape in Rolling Your Own Compaction,
-which replays nothing from before the summary.
+A window is not free on Claude Fable 5.1, Opus 5.5, Sonnet 5.5 or Haiku 5.5. The API binds each
+thinking block those models return to the system prompt, the tools and every message before
+it, and rig stores the blocks and replays them. Dropping the oldest turns changes that prefix
+under every block that stays. On Anthropic's own API in adaptive thinking, the default, rig
+0.45 asks for such a block to be dropped rather than the request rejected: the request goes
+through and the kept turns lose their reasoning. On every other route (another thinking mode,
+a Claude id rig's catalog does not list, such as Haiku 5.5, another provider's
+Messages-compatible endpoint) rig replays the blocks as stored, and the request is a 400
+wherever the API enforces the check, which includes every account created from 31 August 2026.
+Request Patches in Hooks and Runner lists the routes. On those, send the whole log, or restart
+from a summary as Compaction describes.
 
 ### Keeping what you truncate
 
 The shape above loses nothing: the log keeps every turn and only the request is cut. The
-messages before the window are there to archive into a vector store for semantic recall, or
-to summarize as below.
+messages before the window are there to archive into a vector store for semantic recall.
 
-## Rolling Your Own Compaction
+## Compaction
 
-The same idea applies to a hand-managed history: once it passes a threshold, summarize and
-restart from the summary.
+When the gist of the older turns matters, replace them with a summary instead of cutting them.
+`rig::memory` has the pieces, so do not hand-roll them: a `CompactionPolicy` says when a
+conversation is too close to the model's context window and where to cut, never between a tool
+call and its result, and builds the summary request; `Summarizer::summary_text` reads the
+answer and refuses a truncated or empty one; `apply_summary` puts the summary in place of the
+older messages. It works on the stored log, so an agent built with `.memory(..)` loads the
+shorter conversation on its next run with no change of its own.
 
-```rust
-use rig::completion::Message;
+```rust,verify,test
+use rig::DynModel;
+use rig::catalog::ModelSpec;
+use rig::memory::{
+    AsyncStore, CompactReason, CompactionPolicy, Summarizer, apply_summary, estimate_tokens,
+    load_async, save_async, summary_state,
+};
+use rig::operation::Completion;
 
-async fn compact_history(
-    agent: &rig::agent::Agent,
-    history: &[Message],
-) -> Result<Vec<Message>, Box<dyn std::error::Error>> {
-    let transcript = render_transcript(history); // your own plain-text rendering
+/// Replaces the older messages of the conversation in `log` with a summary once it
+/// leaves less than the policy's reserve of the model's context window free, and
+/// says whether it did. `spec` is the model's catalog entry, from `model.spec()` or
+/// `Catalog::builtin().resolve("vendor/model")?.spec`: without a known window the
+/// policy never compacts.
+pub async fn compact(
+    store: &(impl AsyncStore + Sync),
+    log: &str,
+    model: &DynModel<Completion>,
+    spec: &ModelSpec,
+) -> anyhow::Result<bool> {
+    let policy = CompactionPolicy::default();
+    let mut conversation = load_async(store, log).await?;
+    if !policy.over_threshold(estimate_tokens(conversation.messages()), spec) {
+        return Ok(false);
+    }
+    let state = summary_state(&conversation);
+    let reason = CompactReason::Threshold;
+    let Some(mut plan) = policy.plan_summary(&conversation, &state, &reason, spec)? else {
+        return Ok(false);
+    };
+    let response = model.call(plan.request).await?;
+    plan.state.summary = Summarizer::summary_text(&response)?;
+    apply_summary(&mut conversation, plan.keep_from, &plan.state);
+    save_async(store, log, &mut conversation).await?;
+    Ok(true)
+}
 
-    let summary = agent
-        .prompt(format!(
-            "Summarize this conversation, capturing key points, decisions, and open \
-             questions:\n\n{transcript}"
-        ))
-        .await?
-        .output();
+#[cfg(test)]
+mod tests {
+    use rig::agent::AgentBuilder;
+    use rig::completion::Message;
+    use rig::memory::{MemoryStore, load, save};
+    use rig::providers::registry::ProviderId;
+    use rig::test_utils::MockCompletionModel;
 
-    Ok(vec![Message::user(format!(
-        "Context from the previous conversation:\n{summary}"
-    ))])
+    use super::*;
+
+    #[tokio::test]
+    async fn a_long_conversation_is_summarized_in_the_stored_log() {
+        let store = MemoryStore::default();
+        let mut conversation = load(&store, "u-1").unwrap();
+        for turn in 0..40 {
+            let filler = "word ".repeat(1000);
+            conversation.push(Message::user(format!("question {turn} {filler}")));
+            conversation.push(Message::assistant(format!("answer {turn} {filler}")));
+        }
+        save(&store, "u-1", &mut conversation).unwrap();
+        let spec = ModelSpec::new(ProviderId::catalog("openai").unwrap(), "a-small-model")
+            .with_context_window(64_000);
+
+        let summarizer = MockCompletionModel::text("The user asked forty questions.").into();
+        assert!(compact(&store, "u-1", &summarizer, &spec).await.unwrap());
+
+        let compacted = load(&store, "u-1").unwrap();
+        assert!(compacted.messages().len() < 80);
+        let summary = format!("{:?}", compacted.messages().first());
+        assert!(summary.contains("The user asked forty questions."), "{summary}");
+        // Under the threshold now, so a second pass makes no model call.
+        let unused = MockCompletionModel::from_turns([]).into();
+        assert!(!compact(&store, "u-1", &unused, &spec).await.unwrap());
+
+        // The agent needs no change: its next run loads the compacted log.
+        let model = MockCompletionModel::text("ok");
+        let probe = model.clone();
+        let agent = AgentBuilder::new(model).memory(store).build();
+        agent.prompt("next").conversation("u-1").max_turns(1).await.unwrap();
+        assert_eq!(probe.requests()[0].chat_history.len(), compacted.messages().len() + 1);
+    }
 }
 ```
 
-Trigger on an estimated-token threshold — say 70% of the context window — rather than per
-turn: compaction costs a model call, and paying it on every request is worse than the
-problem. Fold the summary into either the message list or the system prompt, but only one
-of them, so the model does not see it twice.
+Run it between requests, not inside one: it costs a model call, and its save can lose to a run
+of the same conversation with `SessionError::Changed`, which writes nothing, so the next pass
+tries again. `CompactionPolicy::default()` keeps the newest 20,000 estimated tokens, a quarter
+of the window at most, and reserves 16,384; both are public fields. `CompactReason::Asked`
+compacts on request with a focus, and `Overflow` after a provider refused a request as too long,
+which `ErrorReport::is_context_overflow()` recognizes. `undo_summary` puts the newest
+compaction back from the log.
+
+Compaction keeps the newest turns as they are, so on the Claude models named under Bounding
+History Growth it is the same history edit as a window: the kept turns' thinking blocks were
+made with the full history before them. On Anthropic's own API in adaptive thinking rig has
+those blocks dropped and the compacted conversation goes through. On the other routes it is a
+400 where the check is enforced, so do not compact in place there: summarize the old log with a
+plain prompt and start a new log whose first user message is that summary, which replays
+nothing.
 
 ## Long-Term Memory
 

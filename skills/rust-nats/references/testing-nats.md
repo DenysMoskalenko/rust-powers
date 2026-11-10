@@ -76,8 +76,9 @@ use std::time::Duration;
 
 use async_nats::RequestErrorKind;
 use async_nats::jetstream::{
-    AckKind, Message,
+    self, AckKind, ErrorCode, Message,
     consumer::{AckPolicy, DeliverPolicy, PullConsumer, pull, pull::MessagesErrorKind},
+    context::PublishErrorKind,
     message::PublishMessage,
     stream,
 };
@@ -211,6 +212,14 @@ fn pull_config(durable: &str, filter: String) -> pull::Config {
     }
 }
 
+/// The server's own error code of a refused publish: the client reports the
+/// kind `Other` and keeps the cause as the source.
+fn server_code(err: &jetstream::context::PublishError) -> Option<ErrorCode> {
+    std::error::Error::source(err)?
+        .downcast_ref::<jetstream::Error>()
+        .map(jetstream::Error::error_code)
+}
+
 async fn fetch_one(consumer: &PullConsumer) -> Option<Message> {
     consumer
         .fetch()
@@ -222,19 +231,6 @@ async fn fetch_one(consumer: &PullConsumer) -> Option<Message> {
         .next()
         .await
         .map(|message| message.expect("no stream error"))
-}
-
-/// The worker's poison path: copy to `dlq.<subject>`, then `Term`.
-async fn dead_letter(message: &Message, reason: &str) -> Result<(), async_nats::Error> {
-    let mut headers = message.headers.clone().unwrap_or_default();
-    headers.insert("Dlq-Reason", reason);
-    let copy = PublishMessage::build().payload(message.payload.clone()).headers(headers);
-    message
-        .context
-        .send_publish(format!("dlq.{}", message.subject), copy)
-        .await?
-        .await?;
-    message.ack_with(AckKind::Term).await
 }
 
 #[tokio::test]
@@ -324,12 +320,20 @@ async fn poison_is_copied_to_the_dlq_and_max_deliver_writes_the_advisory() {
     let first = fetch_one(&consumer).await.unwrap();
     assert_eq!(first.payload, "poison");
     assert_eq!(first.info().unwrap().delivered, 1);
-    dead_letter(&first, "undecodable").await.unwrap();
+    // What the worker's `dead_letter` does to the server, spelled out: a
+    // durable copy on `dlq.<subject>`, then `Term`. A real suite calls the
+    // helper itself here.
+    t.jetstream
+        .publish(format!("dlq.{}", first.subject), first.payload.clone())
+        .await
+        .unwrap()
+        .await
+        .unwrap();
+    first.ack_with(AckKind::Term).await.unwrap();
     // The copy is durable before the Term, so it is already there.
     let copy = dlq.get_raw_message(1).await.unwrap();
     assert_eq!(copy.subject.as_str(), format!("dlq.{root}.poison"));
     assert_eq!(copy.payload, "poison");
-    assert_eq!(copy.headers.get("Dlq-Reason").unwrap().as_str(), "undecodable");
     let second = fetch_one(&consumer).await.unwrap();
     assert_eq!(second.payload, "fixable");
     second.ack_with(AckKind::Nak(None)).await.unwrap();
@@ -363,6 +367,100 @@ async fn poison_is_copied_to_the_dlq_and_max_deliver_writes_the_advisory() {
     assert_eq!(body["deliveries"], 2);
 
     t.jetstream.delete_stream(&dlq_name).await.unwrap();
+    t.cleanup().await;
+}
+
+/// Why the dead-letter copy drops the original's `Nats-*` headers: they act
+/// again on the stream the copy is published to.
+#[tokio::test]
+async fn a_forwarded_expected_stream_header_gets_the_copy_refused() {
+    let t = test_nats().await;
+    let root = t.subject("strict");
+    let stream = t.stream(&root).await;
+    let dlq_name = format!("{}_DLQ", t.stream_name());
+    t.jetstream
+        .get_or_create_stream(stream::Config {
+            name: dlq_name.clone(),
+            subjects: vec![format!("dlq.{}.>", t.prefix)],
+            storage: stream::StorageType::Memory,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    t.jetstream
+        .send_publish(
+            format!("{root}.a"),
+            PublishMessage::build()
+                .payload("poison".into())
+                .expected_stream(t.stream_name()),
+        )
+        .await
+        .unwrap()
+        .await
+        .unwrap();
+    let consumer = stream
+        .get_or_create_consumer("strict", pull_config("strict", format!("{root}.>")))
+        .await
+        .unwrap();
+    let message = fetch_one(&consumer).await.unwrap();
+
+    let forwarded = PublishMessage::build()
+        .payload(message.payload.clone())
+        .headers(message.headers.clone().unwrap_or_default());
+    let err = t
+        .jetstream
+        .send_publish(format!("dlq.{}", message.subject), forwarded)
+        .await
+        .unwrap()
+        .await
+        .expect_err("the dead-letter stream is not the expected stream");
+    assert_eq!(server_code(&err), Some(ErrorCode::STREAM_NOT_MATCH));
+
+    message.ack().await.unwrap();
+    t.jetstream.delete_stream(&dlq_name).await.unwrap();
+    t.cleanup().await;
+}
+
+/// Backpressure, not a bug: the kind is `Other`, the server's code is in the
+/// source, and `messaging_error` maps it to a 503.
+#[tokio::test]
+async fn a_full_work_queue_refuses_the_publish_until_an_ack_frees_room() {
+    let t = test_nats().await;
+    let root = t.subject("jobs");
+    let stream = t
+        .jetstream
+        .get_or_create_stream(stream::Config {
+            name: t.stream_name(),
+            subjects: vec![format!("{root}.>")],
+            storage: stream::StorageType::Memory,
+            retention: stream::RetentionPolicy::WorkQueue,
+            discard: stream::DiscardPolicy::New,
+            max_messages: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let publish = async |payload: &'static str| {
+        t.jetstream
+            .publish(format!("{root}.send"), payload.into())
+            .await
+            .expect("sent")
+            .await
+    };
+    publish("first").await.expect("room for one");
+
+    let err = publish("second").await.expect_err("the queue is full");
+    assert_eq!(err.kind(), PublishErrorKind::Other);
+    assert_eq!(server_code(&err), Some(ErrorCode::STREAM_STORE_FAILED));
+
+    let consumer = stream
+        .get_or_create_consumer("jobs", pull_config("jobs", format!("{root}.>")))
+        .await
+        .unwrap();
+    // Confirmed, so the server has removed the message before the next publish.
+    fetch_one(&consumer).await.unwrap().double_ack().await.unwrap();
+    publish("third").await.expect("the ack freed the slot");
+
     t.cleanup().await;
 }
 
@@ -560,6 +658,9 @@ async fn kv_put_get_update_and_watch() {
 - a duplicate `Nats-Msg-Id` returns the original sequence and is never delivered;
 - a nak redelivers with `delivered` incremented, a poison message's copy lands on
   `dlq.<subject>` before the term, and `max_deliver` puts the advisory in the dead-letter stream;
+- the dead-letter copy of a message published with `Nats-Expected-Stream` is accepted, because
+  the helper dropped the header (the test above shows what happens when it does not);
+- a full work queue refuses the publish with `STREAM_STORE_FAILED`, and an ack makes room;
 - `messages()` yields an error item when the consumer is deleted, and the worker survives it;
 - `no responders` is immediate and `TimedOut` respects the per-request timeout;
 - a queue group hands each message to exactly one member;

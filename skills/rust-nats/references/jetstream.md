@@ -31,9 +31,11 @@ once; the context is `Clone` and costs nothing to clone into a task.
 
 `jetstream::with_domain(client, "hub")` is the leaf-node form; `ContextBuilder` sets `timeout`
 (5 s), `max_ack_inflight` (5000) and `backpressure_on_inflight` (already `true`: a publish waits
-instead of failing when the in-flight limit is hit) for the publish side. Every JetStream API call
-— stream and consumer info, create, delete, `fetch` — is a `client.request` underneath and is
-bounded by the client's `request_timeout`, not by the context's `timeout`.
+instead of failing when the in-flight limit is hit) for the publish side. Every JetStream
+management call — stream and consumer info, create, update, delete — is a `client.request`
+underneath and is bounded by the client's `request_timeout`, not by the context's `timeout`, which
+bounds the publish ack and `double_ack`. A `fetch` is neither: it publishes a pull request and is
+bounded by its own `expires`.
 
 ## Declaring a stream
 
@@ -85,15 +87,36 @@ pub async fn ensure_stream(ctx: &Context) -> anyhow::Result<stream::Stream> {
             storage: StorageType::File,
             max_age: Duration::from_hours(24 * 7),
             max_messages: 1_000_000,
-            // The default, `Old`, silently drops the oldest message when a
-            // limit is hit. `New` refuses the publish instead, which is the
-            // only honest answer for a stream of orders.
-            discard: DiscardPolicy::New,
+            // The default: at a limit the oldest message is dropped. Right
+            // for `Limits`, as long as the limits are sized so that message
+            // is one every consumer finished long ago; alert on consumer lag.
+            // `New` here would refuse every publish from the moment the
+            // stream fills until `max_age` frees room: an ack removes nothing
+            // from a `Limits` stream.
+            discard: DiscardPolicy::Old,
             // Any republish of the same `Nats-Msg-Id` inside this window is
             // dropped by the server. Two minutes is the NATS default.
             duplicate_window: Duration::from_secs(120),
             // 3 in a cluster, 1 on a single server; a mismatch fails the create.
             num_replicas: 1,
+            ..Default::default()
+        })
+        .await?)
+}
+
+/// A work queue: an ack deletes the message, so `max_messages` bounds the
+/// backlog and `New` is backpressure. A full queue refuses the publish with
+/// `ErrorCode::STREAM_STORE_FAILED`, a 503 for the caller, until the workers
+/// catch up. One consumer per subject: filters may not overlap.
+pub async fn ensure_work_queue(ctx: &Context) -> anyhow::Result<stream::Stream> {
+    Ok(ctx
+        .get_or_create_stream(stream::Config {
+            name: "EMAILS".to_owned(),
+            subjects: vec!["emails.>".to_owned()],
+            retention: RetentionPolicy::WorkQueue,
+            storage: StorageType::File,
+            max_messages: 100_000,
+            discard: DiscardPolicy::New,
             ..Default::default()
         })
         .await?)
@@ -175,6 +198,20 @@ fast, it waits the whole timeout. `WrongLastSequence` and `WrongLastMessageId` a
 concurrency checks `PublishMessage::expected_last_sequence` / `expected_last_message_id`
 failing. A payload larger than the server's `max_payload` (1 MiB default) fails client-side with
 `MaxPayloadExceeded` before anything is sent, on core `publish` and `request` too.
+
+`Other` is every failure the client has no kind for, and `std::error::Error::source` says which.
+A server refusal carries the server's `jetstream::Error`, whose `error_code()` is the JetStream
+error code: a stream at its limit under `DiscardPolicy::New` answers
+`ErrorCode::STREAM_STORE_FAILED` (`code 503, err 10077: maximum messages exceeded`), which is
+backpressure and not a bug. An empty subject or one with whitespace carries a `SubjectError`;
+there is no JetStream `InvalidSubject` kind.
+
+Which discard policy a stream wants follows from its retention. Under `Limits` an ack removes
+nothing, so a full stream with `DiscardPolicy::New` refuses every publish until `max_age` or a
+purge frees room (measured: still refused after the only message was acked); keep the default
+`Old` and size the limits past the slowest consumer's lag. Under `WorkQueue` the same ack frees
+the slot (measured: the next publish succeeds), so `New` turns a backlog into a 503 the producer
+can see instead of a silently dropped job.
 
 Core `publish` behaves differently during an outage: it returns `Ok` at once, because the message
 went into the connection's 2048-slot command buffer, and only blocks once that fills; `flush()`

@@ -54,7 +54,7 @@ use std::time::Duration;
 
 use async_nats::{
     HeaderMap, RequestErrorKind,
-    jetstream::{Context, message::PublishMessage},
+    jetstream::{self, Context, ErrorCode, message::PublishMessage},
 };
 use tokio_stream::StreamExt as _;
 
@@ -95,10 +95,12 @@ pub fn messaging_error(err: MessagingError) -> AppError {
             e.kind() == P::Send,
         ),
         MessagingError::Subscribe(e) => (false, e.kind() == S::Other),
-        MessagingError::JetStream(e) => (
-            e.kind() == J::MaxPayloadExceeded,
-            matches!(e.kind(), J::StreamNotFound | J::TimedOut | J::BrokenPipe | J::MaxAckPending),
-        ),
+        MessagingError::JetStream(e) => match e.kind() {
+            J::MaxPayloadExceeded => (true, false),
+            J::StreamNotFound | J::TimedOut | J::BrokenPipe | J::MaxAckPending => (false, true),
+            J::WrongLastSequence | J::WrongLastMessageId => (false, false),
+            J::Other => jetstream_other(e),
+        },
     };
     if bad_input {
         // 400: rendered to the client, so a constant, not the error's display.
@@ -108,9 +110,34 @@ pub fn messaging_error(err: MessagingError) -> AppError {
         // deadline has elapsed` reaches the log only.
         AppError::Unavailable(format!("nats: {err}"))
     } else {
-        // 500: `WrongLastSequence`, an invalid queue name, `Other`.
+        // 500: `WrongLastSequence`, an invalid queue name, any other `Other`.
         AppError::Other(err.into())
     }
+}
+
+/// `Other` is every `JetStream` publish failure the client has no kind for, and
+/// the cause is its source. `(bad_input, unavailable)`, as above.
+fn jetstream_other(err: &jetstream::context::PublishError) -> (bool, bool) {
+    let Some(source) = std::error::Error::source(err) else {
+        return (false, false);
+    };
+    // Refused before sending: an empty subject, or one with whitespace.
+    if source.is::<async_nats::SubjectError>() {
+        return (true, false);
+    }
+    // Refused by the server because it cannot store the message now. The first
+    // is a stream at its limit under `DiscardPolicy::New` (`err 10077: maximum
+    // messages exceeded`); the caller may retry, so it is a 503, not a 500.
+    let refused = source.downcast_ref::<jetstream::Error>().is_some_and(|server| {
+        matches!(
+            server.error_code(),
+            ErrorCode::STREAM_STORE_FAILED
+                | ErrorCode::INSUFFICIENT_RESOURCES
+                | ErrorCode::ACCOUNT_RESOURCES_EXCEEDED
+                | ErrorCode::STREAM_TOO_MANY_REQUESTS
+        )
+    });
+    (false, refused)
 }
 
 /// Core NATS, fire and forget. Success means "queued locally".
@@ -189,9 +216,15 @@ visible decision at the call site, and the mapping lands only on canonical varia
 
 | Kind | `AppError` | Why |
 |---|---|---|
-| `RequestErrorKind::NoResponders`, `TimedOut`; `PublishErrorKind::Send`; JetStream `StreamNotFound`, `TimedOut`, `BrokenPipe`, `MaxAckPending`; `SubscribeErrorKind::Other` | `Unavailable(String)` — 503, body `service unavailable`, the string logged | nothing is subscribed, no stream captures the subject, or the socket is gone; the client may retry later |
-| `MaxPayloadExceeded`, `InvalidSubject` (core or JetStream) | `BadRequest(String)` — 400 | refused client-side before anything was sent |
-| `WrongLastSequence`, `WrongLastMessageId`, subscribe-side `InvalidSubject`/`InvalidQueueName`, `Other` | `Other(anyhow::Error)` — 500 | a failed optimistic-concurrency expectation or a wiring error: subscribe subjects are never client input |
+| `RequestErrorKind::NoResponders`, `TimedOut`; `PublishErrorKind::Send`; JetStream `StreamNotFound`, `TimedOut`, `BrokenPipe`, `MaxAckPending`; JetStream `Other` whose source is a server refusal for capacity (`ErrorCode::STREAM_STORE_FAILED`, `INSUFFICIENT_RESOURCES`, `ACCOUNT_RESOURCES_EXCEEDED`, `STREAM_TOO_MANY_REQUESTS`); `SubscribeErrorKind::Other` | `Unavailable(String)` — 503, body `service unavailable`, the string logged | nothing is subscribed, no stream captures the subject, the stream is full or the server out of resources, or the socket is gone; the client may retry later |
+| `MaxPayloadExceeded` (core or JetStream); core `InvalidSubject`; JetStream `Other` whose source is a `SubjectError` | `BadRequest(String)` — 400 | refused client-side before anything was sent |
+| `WrongLastSequence`, `WrongLastMessageId`, subscribe-side `InvalidSubject`/`InvalidQueueName`, any other `Other` | `Other(anyhow::Error)` — 500 | a failed optimistic-concurrency expectation or a wiring error: subscribe subjects are never client input |
+
+JetStream's `PublishErrorKind` has no `InvalidSubject` and no kind for a server refusal: both
+arrive as `Other`, and `std::error::Error::source` is what tells them apart — a `SubjectError`, or
+the server's `jetstream::Error` with its `error_code()`. A stream at its limit under
+`DiscardPolicy::New` answers `ErrorCode::STREAM_STORE_FAILED` (10077), and without the source
+check that backpressure reaches the client as a 500.
 
 `TimedOut` is deliberately not 504: a disconnected client returns it too, so it does not mean "a
 responder exists and is slow". Nothing maps to 502; that status is the `Http` variant for outbound
@@ -210,19 +243,44 @@ The consumer runs as one tokio task per durable consumer, owned by `main`, stopp
 `tokio::sync::watch` channel. Handlers are plain functions from a typed event to an `Outcome`;
 the loop does the acking, so a handler is unit-tested with a struct literal and no broker.
 
-```rust,verify
+Three decisions in the block are the ones a worker gets wrong. `open` sizes the pull batch
+against `ACK_WAIT` instead of taking the 200 of bare `messages()`. `Outcome::Unavailable` is not
+`Retry`: when a dependency every message needs is down the loop stops pulling and holds one
+message, where a `Nak` per message would burn `max_deliver` on the whole backlog. And
+`dead_letter` is the single poison path, with the copy's headers built by `dlq_headers`.
+
+```rust,verify,test
 //! The consumer task: typed envelope, handler per subject, shutdown by watch.
 use std::time::Duration;
 
-use async_nats::jetstream::{
-    AckKind, Message,
-    consumer::{AckPolicy, PullConsumer, pull},
-    message::PublishMessage,
-    stream,
+use async_nats::{
+    HeaderMap,
+    jetstream::{
+        AckKind, Message,
+        consumer::{AckPolicy, PullConsumer, pull},
+        message::PublishMessage,
+        stream,
+    },
 };
-use tokio::{sync::watch, time::timeout};
+use tokio::{
+    sync::watch,
+    time::{Instant, timeout},
+};
 use tokio_stream::StreamExt as _;
 use uuid::Uuid;
+
+const ACK_WAIT: Duration = Duration::from_secs(30);
+/// One pull request. The server starts a message's `ack_wait` when it hands
+/// the message over, and the stream asks for the next batch when half of this
+/// one is left, so up to 1.5 batches wait behind a serial handler: keep
+/// `1.5 × PULL_BATCH × slowest handler` under `ACK_WAIT` (24 × 1 s here).
+/// Bare `consumer.messages()` pulls 200.
+const PULL_BATCH: usize = 16;
+const FIRST_PAUSE: Duration = Duration::from_secs(1);
+/// A stream that stayed open this long had recovered, so the failure that
+/// ends it is a new one: the pause starts again from `FIRST_PAUSE` instead of
+/// staying at the cap for the life of the process.
+const HEALTHY: Duration = Duration::from_secs(60);
 
 /// One envelope type per subject family. `event_id` is the `Nats-Msg-Id` on
 /// publish and the unique key on the consumer side.
@@ -246,8 +304,13 @@ impl OrderPlaced {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
     Done,
-    /// Transient: redeliver after this delay.
+    /// This message cannot be handled yet and the next one can: redeliver it
+    /// after this delay. Every redelivery counts toward `max_deliver`.
     Retry(Duration),
+    /// A dependency every message needs is down (Postgres, a provider). The
+    /// loop stops pulling and holds this message until it goes through; a
+    /// `Retry` here would burn `max_deliver` on the whole backlog.
+    Unavailable,
     /// Permanent: stop redelivery, the message is poison.
     Poison(String),
 }
@@ -277,8 +340,9 @@ pub fn dispatch(message: &Message) -> Outcome {
 /// after a pause and the loop continues, or the process would keep serving
 /// HTTP with a dead worker.
 pub async fn run(stream: stream::Stream, durable: String, mut stop: watch::Receiver<bool>) {
-    let mut backoff = Duration::from_secs(1);
+    let mut backoff = FIRST_PAUSE;
     while !*stop.borrow() {
+        let opened = Instant::now();
         let result = match ensure_consumer(&stream, &durable).await {
             Ok(consumer) => consume(consumer, &mut stop).await,
             Err(err) => Err(err),
@@ -286,13 +350,15 @@ pub async fn run(stream: stream::Stream, durable: String, mut stop: watch::Recei
         // `Ok` only on shutdown: the watch changed or its sender was dropped,
         // and a dropped sender never flips the flag the `while` reads.
         let Err(err) = result else { break };
+        if opened.elapsed() > HEALTHY {
+            backoff = FIRST_PAUSE;
+        }
         tracing::error!(%err, ?backoff, "consumer stopped; reopening");
         // The pause ends early on shutdown: a plain `sleep` would hold the
         // join for up to 30 s. `Ok` means the watch changed or was dropped.
         if timeout(backoff, stop.changed()).await.is_ok() {
             break;
         }
-        // ponytail: never resets; 30 s is an acceptable worst case.
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
     warn_if_orphaned(&stop);
@@ -306,8 +372,20 @@ fn warn_if_orphaned(stop: &watch::Receiver<bool>) {
     }
 }
 
+/// Bare `consumer.messages()` is this builder with a batch of 200 and the
+/// heartbeat on. The builder itself starts with the heartbeat off, and without
+/// one a silent server never becomes a `MissingHeartbeat` item.
+async fn open(consumer: &PullConsumer) -> anyhow::Result<pull::Stream> {
+    Ok(consumer
+        .stream()
+        .max_messages_per_batch(PULL_BATCH)
+        .heartbeat(Duration::from_secs(15))
+        .messages()
+        .await?)
+}
+
 async fn consume(consumer: PullConsumer, stop: &mut watch::Receiver<bool>) -> anyhow::Result<()> {
-    let mut messages = consumer.messages().await?;
+    let mut messages = open(&consumer).await?;
     loop {
         let next = tokio::select! {
             biased;
@@ -322,18 +400,58 @@ async fn consume(consumer: PullConsumer, stop: &mut watch::Receiver<bool>) -> an
             Some(Err(err)) => return Err(err.into()),
             None => anyhow::bail!("message stream ended"),
         };
-        if let Err(err) = settle(&message, dispatch(&message)).await {
-            tracing::error!(%err, "ack failed; the message will be redelivered");
+        let outcome = dispatch(&message);
+        if outcome != Outcome::Unavailable {
+            settle_or_log(&message, outcome).await;
+            continue;
+        }
+        // Dropping the stream is what stops the pulls: one that is merely
+        // not polled keeps asking the server for more.
+        drop(messages);
+        let Some(settled) = wait_out(&message, stop).await else {
+            return Ok(());
+        };
+        // Before the stream is reopened: a reopen that fails must not leave
+        // finished work unacked.
+        settle_or_log(&message, settled).await;
+        messages = open(&consumer).await?;
+    }
+}
+
+async fn settle_or_log(message: &Message, outcome: Outcome) {
+    if let Err(err) = settle(message, outcome).await {
+        tracing::error!(%err, "ack failed; the message will be redelivered");
+    }
+}
+
+/// A dependency is down: run the handler on this one message again after each
+/// pause until it stops answering `Unavailable`. `Progress` resets the
+/// message's `ack_wait` without counting a delivery, so the pause stays below
+/// `ACK_WAIT`. `None` on shutdown: the message stays unacked and comes back.
+async fn wait_out(message: &Message, stop: &mut watch::Receiver<bool>) -> Option<Outcome> {
+    let mut pause = FIRST_PAUSE;
+    loop {
+        let lease = message.ack_with(AckKind::Progress).await;
+        tracing::warn!(?pause, lease_extended = lease.is_ok(), "dependency down; not pulling");
+        if timeout(pause, stop.changed()).await.is_ok() {
+            return None;
+        }
+        match dispatch(message) {
+            Outcome::Unavailable => pause = (pause * 2).min(ACK_WAIT / 2),
+            outcome => return Some(outcome),
         }
     }
 }
 
-/// The only place that acks. `double_ack` waits for the server, so a lost ack
-/// cannot cause a redelivery the handler cannot absorb.
+/// The only place that acks, after the handler's work is committed. `ack()`
+/// returns once the ack is queued on the connection; if it is lost the message
+/// comes back after `ACK_WAIT` and the idempotent handler absorbs it.
 async fn settle(message: &Message, outcome: Outcome) -> Result<(), async_nats::Error> {
     match outcome {
-        Outcome::Done => message.double_ack().await,
+        Outcome::Done => message.ack().await,
         Outcome::Retry(delay) => message.ack_with(AckKind::Nak(Some(delay))).await,
+        // `consume` holds the message through the outage; nothing to ack.
+        Outcome::Unavailable => Ok(()),
         Outcome::Poison(reason) => {
             tracing::warn!(%reason, subject = %message.subject, "dead-lettering message");
             dead_letter(message, &reason).await
@@ -341,18 +459,54 @@ async fn settle(message: &Message, outcome: Outcome) -> Result<(), async_nats::E
     }
 }
 
-/// Copy to `dlq.<subject>` first, then `Term`. `Term` alone fires only a
-/// `MSG_TERMINATED` advisory, which the dead-letter stream does not capture.
+/// The one poison path: a durable copy on `dlq.<subject>` first, then `Term`.
+/// A crash in between redelivers the message, and the second copy carries the
+/// same `Nats-Msg-Id`, so the dead-letter stream stores one; the reverse order
+/// loses the message. `Term` alone fires only a `MSG_TERMINATED` advisory,
+/// which the dead-letter stream does not capture.
 async fn dead_letter(message: &Message, reason: &str) -> Result<(), async_nats::Error> {
-    let mut headers = message.headers.clone().unwrap_or_default();
-    headers.insert("Dlq-Reason", reason);
-    let copy = PublishMessage::build().payload(message.payload.clone()).headers(headers);
+    let origin = message.info()?;
+    let mut headers = dlq_headers(message.headers.as_ref(), reason);
+    headers.insert("Dlq-Stream", origin.stream);
+    headers.insert("Dlq-Consumer", origin.consumer);
+    headers.insert("Dlq-Sequence", origin.stream_sequence.to_string());
+    let id = format!(
+        "dlq.{}.{}.{}",
+        origin.stream, origin.consumer, origin.stream_sequence
+    );
+    // `headers` first: it replaces the map `message_id` writes into.
+    let copy = PublishMessage::build()
+        .payload(message.payload.clone())
+        .headers(headers)
+        .message_id(id);
     message
         .context
         .send_publish(format!("dlq.{}", message.subject), copy)
         .await?
         .await?;
     message.ack_with(AckKind::Term).await
+}
+
+/// The copy's headers: the original's, minus `Nats-*`, plus the reason. A
+/// `Nats-*` header is an instruction to the stream that stored the original
+/// and acts again on the copy: `Nats-Expected-Stream` makes the dead-letter
+/// stream refuse it, and the original's `Nats-Msg-Id` makes a second
+/// consumer's copy of the same event a silent duplicate.
+fn dlq_headers(original: Option<&HeaderMap>, reason: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for (name, values) in original.into_iter().flat_map(HeaderMap::iter) {
+        let text: &str = name.as_ref();
+        if text.starts_with("Nats-") {
+            continue;
+        }
+        for value in values {
+            headers.append(name.clone(), value.clone());
+        }
+    }
+    // `HeaderValue::from(&str)` panics on a line break, and an error message
+    // may carry one.
+    headers.insert("Dlq-Reason", reason.replace(['\r', '\n'], " "));
+    headers
 }
 
 async fn ensure_consumer(stream: &stream::Stream, durable: &str) -> anyhow::Result<PullConsumer> {
@@ -362,7 +516,7 @@ async fn ensure_consumer(stream: &stream::Stream, durable: &str) -> anyhow::Resu
             pull::Config {
                 durable_name: Some(durable.to_owned()),
                 ack_policy: AckPolicy::Explicit,
-                ack_wait: Duration::from_secs(30),
+                ack_wait: ACK_WAIT,
                 max_deliver: 5,
                 filter_subject: "orders.placed.*".to_owned(),
                 max_ack_pending: 256,
@@ -372,6 +526,30 @@ async fn ensure_consumer(stream: &stream::Stream, durable: &str) -> anyhow::Resu
         .await?)
 }
 
+#[cfg(test)]
+mod tests {
+    use async_nats::{HeaderMap, HeaderValue};
+
+    use super::dlq_headers;
+
+    #[test]
+    fn the_copy_keeps_trace_headers_and_drops_stream_instructions() {
+        let mut original = HeaderMap::new();
+        original.insert("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
+        original.insert("Nats-Msg-Id", "event-1");
+        original.insert("Nats-Expected-Stream", "ORDERS");
+
+        let copy = dlq_headers(Some(&original), "bad json\nat line 2");
+
+        assert!(copy.get("traceparent").is_some());
+        assert!(copy.get("Nats-Msg-Id").is_none());
+        assert!(copy.get("Nats-Expected-Stream").is_none());
+        assert_eq!(
+            copy.get("Dlq-Reason").map(HeaderValue::as_str),
+            Some("bad json at line 2")
+        );
+    }
+}
 ```
 
 Per-message concurrency is `tokio::spawn` behind a `Semaphore` with the `Message` moved into
@@ -381,7 +559,8 @@ where order matters.
 ## Idempotent handlers
 
 `Nats-Msg-Id` deduplicates the *publish* inside `duplicate_window`. A consumer that did the work
-and crashed before the ack sees the message again, and so does one whose `double_ack` was lost.
+and crashed before the ack sees the message again, and so does one whose ack never reached the
+server, `double_ack` included.
 The handler is therefore idempotent by construction: the event id is a unique column in the
 table the handler writes, the insert runs in the same transaction as the work, and a
 `SqlErr::UniqueConstraintViolation` on it is treated as `Outcome::Done`. Ack after the commit.
@@ -407,7 +586,10 @@ use async_nats::{
         stream,
     },
 };
-use tokio::{sync::watch, time::timeout};
+use tokio::{
+    sync::watch,
+    time::{Instant, timeout},
+};
 use tokio_stream::StreamExt as _;
 
 use crate::api::health::Health;
@@ -432,7 +614,7 @@ pub async fn connect(url: &str) -> Result<async_nats::Client, async_nats::Connec
         // Shows in `nats server report connections`; unset is "unnamed".
         .name("orders-api")
         // The default 10 s is the whole outbound-HTTP budget. This also bounds
-        // every JetStream API call: stream info, consumer create, `fetch`.
+        // every JetStream management call: stream info, consumer create.
         .request_timeout(Some(Duration::from_secs(2)))
         // Off by default: without it a NATS that boots second crash-loops the
         // pod. With it `connect()` returns `Ok` while still `Pending` and the
@@ -505,8 +687,13 @@ pub async fn start(nats_url: &str) -> anyhow::Result<Messaging> {
 async fn worker(stream: stream::Stream, mut stop: watch::Receiver<bool>) {
     let mut backoff = Duration::from_secs(1);
     while !*stop.borrow() {
+        let opened = Instant::now();
         // `Ok` only on shutdown, a dropped sender included; looping on it would spin.
         let Err(err) = consume(&stream, &mut stop).await else { break };
+        // A stream that ran for a minute had recovered: this failure is a new one.
+        if opened.elapsed() > Duration::from_secs(60) {
+            backoff = Duration::from_secs(1);
+        }
         tracing::error!(%err, ?backoff, "consumer stopped; reopening");
         // Not a bare `sleep`: the pause ends as soon as the stop signal flips.
         if timeout(backoff, stop.changed()).await.is_ok() {
@@ -540,7 +727,13 @@ async fn consume(stream: &stream::Stream, stop: &mut watch::Receiver<bool>) -> a
             },
         )
         .await?;
-    let mut messages = consumer.messages().await?;
+    // Not bare `messages()`: it pulls 200, and what waits here ages against `ack_wait`.
+    let mut messages = consumer
+        .stream()
+        .max_messages_per_batch(16)
+        .heartbeat(Duration::from_secs(15))
+        .messages()
+        .await?;
     loop {
         let next = tokio::select! {
             biased;
@@ -587,9 +780,11 @@ async fn bounded<E: std::fmt::Display>(
 ```
 
 The service's real order is: HTTP drained → worker stopped → `flush` → `drain` → exporter
-flushed → pool dropped. The last two are `axum-service`'s. A worker that returns early skips
-nothing: `flush` and `drain` still run, each under its own timeout. Up to 200 pre-pulled
-messages the worker had not reached are redelivered after `ack_wait`.
+flushed → pool closed. The last two are `axum-service`'s, and so is the deadline on the first
+(`SHUTDOWN_TIMEOUT`, 35 s in the scaffold); the three waits here add up to 14 s after it, and the
+orchestrator's grace period has to cover the sum. A worker that returns early skips
+nothing: `flush` and `drain` still run, each under its own timeout. The messages the worker had
+pulled and not reached, up to 1.5 batches, are redelivered after `ack_wait`.
 
 ## Readiness
 
@@ -757,6 +952,8 @@ Only the calls whose name does not give them away; the rest reads as it is spell
 | retry the first connect | `.retry_on_initial_connect()` — off by default |
 | reply to a request | `client.publish(msg.reply.unwrap(), data)` — there is no `respond` |
 | publish with a dedup id | `js.send_publish(subj, PublishMessage::build().message_id(id)).await?.await?` |
-| ack synchronously, or nak with a delay | `double_ack()`, `ack_with(AckKind::Nak(Some(5s)))` |
+| size the pull batch | `consumer.stream().max_messages_per_batch(n).heartbeat(d).messages()` — bare `messages()` pulls 200, and this builder starts with the heartbeat off |
+| ack and wait for the server's confirmation, or nak with a delay | `double_ack()`, `ack_with(AckKind::Nak(Some(5s)))` |
+| read the server's code from a refused publish | `std::error::Error::source(&err)` downcast to `jetstream::Error`, then `error_code()` — the kind is `Other` |
 | extend the ack deadline | `ack_with(AckKind::Progress)` — there is no `in_progress()` |
 | expose a micro service | `client.service_builder()` with `ServiceExt` imported |

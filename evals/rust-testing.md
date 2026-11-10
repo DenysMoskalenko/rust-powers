@@ -28,8 +28,6 @@
 
 **Prompt**: "Add integration tests for POST /users: success, duplicate email, and an invalid email address."
 
-The fixture's `tests/api/users.rs` already has the 201 and duplicate-409 tests, so a good answer adds only the third.
-
 **Must produce**:
 - says the success and duplicate cases already exist in `tests/api/users.rs` and adds only the invalid-email case there
 - the new test starting from `test_app().await`
@@ -78,12 +76,11 @@ The fixture's `tests/api/users.rs` already has the 201 and duplicate-409 tests, 
 - a `#[derive(Factory)]` attribute, which does not exist in this stack
 - a `static`/`LazyLock` shared instance reused across tests
 - `rand = "0.9"` alongside fake 5
+- `id: Set(Uuid::now_v7())` in the factory's `ActiveModel` when no test needs the id before the insert
 
 ### Eval 4 - stubbing an outbound call
 
 **Prompt**: "The `/users/{id}/profile` endpoint calls our billing API. Write a test for the happy path and for a 503 from billing."
-
-Reasoning check only: the scaffold has no such endpoint or upstream setting, so this eval is judged on the shape of the answer, not run under the snippet harness.
 
 **Must produce**:
 - `app.mock` from `test_app()` used as the upstream, with `when`/`then` matchers

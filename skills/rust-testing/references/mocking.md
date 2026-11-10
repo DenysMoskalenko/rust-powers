@@ -27,8 +27,11 @@ The rule behind the table: a double is justified when the real implementation ha
 ```rust,ignore
 // Eval shape for an endpoint that calls a billing API. Nothing here talks to
 // the mock server directly: the handler does, through the settings it read.
-// The 503 assumes the handler maps an upstream 5xx onto `AppError::Unavailable`;
-// a bare `?` on the reqwest error is `AppError::Http`, which renders 502.
+// `send()` succeeds on a 503 response, so the handler decides what it means: this
+// one checks the status and returns `AppError::Unavailable`. A bare `?` converts
+// only what `send()` fails with, `reqwest_middleware::Error`, into `AppError::Http`
+// (502); the `reqwest::Error` of `error_for_status()` or `.json()` has no conversion
+// and needs `.map_err(reqwest_middleware::Error::from)` first.
 #[tokio::test]
 async fn profile_maps_a_billing_outage_to_503() {
     let app = common::test_app().await;
@@ -295,7 +298,7 @@ Nothing can intercept `Utc::now()` from the outside: it is a direct call with no
 
 `Clock` is the stated exception to the ban on one-implementor traits, because the real implementation reads wall-clock time and a test cannot.
 
-`#[tokio::test(start_paused = true)]` is **not** the fix for a test that touches Postgres, httpmock or any socket: paused time auto-advances whenever every task is idle, which includes "waiting on a socket", so every timeout on the way to the database (testcontainers' Docker request, sqlx's connect and acquire — all tokio timers) fires instantly and `test_app()` panics at once with `RequestTimeoutError` or `PoolTimedOut`. Paused time is for pure timer logic, no real I/O in the test:
+`#[tokio::test(start_paused = true)]` is **not** the fix for a test that touches Postgres, httpmock or any socket: paused time auto-advances whenever every task is idle, which includes "waiting on a socket", so every timeout on the way to the database (testcontainers' Docker request, sqlx's connect and acquire — all tokio timers) fires instantly and `test_app()` panics at once with `RequestTimeoutError` or `PoolTimedOut`. Paused time is for pure timer logic, no real I/O in the test. That includes a router with no database behind it: the scaffold tests its request timeout by wrapping one slow handler in the real `request_timeout` layer, served by `TestServer::new`, under `start_paused`.
 
 ```rust,verify,test
 use std::sync::{Arc, Mutex};
@@ -347,4 +350,6 @@ async fn emits_a_span_for_the_request() {
 }
 ```
 
-`#[test_log::test]` installs a subscriber per test driven by `RUST_LOG`, and wraps the inner attribute, so `tokio::test` goes inside the parentheses. Output is still captured unless the run uses `--no-capture`; `RUST_LOG_SPAN_EVENTS=new,close` adds span lifecycle events. Use it to read logs while debugging a test, not to assert on them: asserting on log text couples the test to wording that is free to change.
+`#[test_log::test]` installs a subscriber driven by `RUST_LOG`, and wraps the inner attribute, so `tokio::test` goes inside the parentheses. Output is still captured unless the run uses `--no-capture`; `RUST_LOG_SPAN_EVENTS=new,close` adds span lifecycle events. Use it to read logs while debugging a test, not to assert on them: asserting on log text couples the test to wording that is free to change.
+
+That subscriber is the process-global one, set with `try_init`: the first caller in a process wins and a later one is ignored. Under nextest a process is one test, so each test gets its own. Under `cargo test` a binary's tests share it, which sets the rule for a test that asserts on spans, as the scaffold's `tests/api/stack.rs` does on the server span: build one subscriber per binary in a `LazyLock`, offer it as the global default with `tracing::dispatcher::set_global_default`, ignoring a refusal, and also make it the test thread's default with `tracing::dispatcher::set_default`. The thread default alone looks like the tidier choice, but `tracing` caches whether a call site is enabled, and while that subscriber is the only one registered, a test thread without it can disable the call site for the thread that has it. The global slot closes that race; the thread default covers the run where a `#[test_log::test]` took the slot first. A `#[test_log::test]` that runs after the slot is taken prints no logs under `cargo test`.

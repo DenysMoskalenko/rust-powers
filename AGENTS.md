@@ -161,7 +161,10 @@ add-when-needed crates to `verify/Cargo.toml`, then runs `cargo check --workspac
 --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings`, and
 `cargo nextest run --workspace`. When cargo fails it prints which `skill/file.md:line` the
 failing bin came from. `--dry-run` extracts and summarizes without writing or compiling;
-`--skip-tests` stops after clippy.
+`--skip-tests` stops after clippy. `--only <skill>...` checks only those skills' snippets, and
+`--verify-dir <dir>` generates the crate somewhere other than `verify/`, so agents working on
+different skills can check side by side: give each its own directory outside the repository and
+the same `CARGO_TARGET_DIR`. The script deletes a directory only if it generated it.
 
 The database-backed tests need either a running Docker daemon - testcontainers starts
 Postgres 18-alpine - or `TEST_DATABASE_URL` pointing at a Postgres where the test user may

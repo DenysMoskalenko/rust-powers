@@ -117,7 +117,7 @@ async fn refresh(state: &State, key: String) -> std::io::Result<()> {
 |---|---|
 | `unwrap_used` | In the service a panic becomes a logged 500 via `CatchPanicLayer`; still never panic on purpose in a request path — the layer is a net for bugs, not an error path. |
 | `expect_used` | Every `expect` outside tests needs an item-level `#[expect(clippy::expect_used, reason = "...")]` saying why it cannot fail; tests are exempt. |
-| `allow_attributes_without_reason` | Forces `#[expect(..., reason)]`, so a suppression justifies itself and goes stale loudly. |
+| `allow_attributes_without_reason` | Requires `reason = "..."` on every `#[allow]` and `#[expect]`, so a suppression justifies itself. It does not require `#[expect]`: choosing it, because it warns once the lint stops firing, is a house rule no lint here enforces. |
 | `redundant_clone` | Catches the mechanical half of cloning past the borrow checker. |
 | `cognitive_complexity` | An alarm that a function wants splitting, not a measurement. |
 | `cast_possible_truncation` | `as` truncates silently; ids and money stop matching. |

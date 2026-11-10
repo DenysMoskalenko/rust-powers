@@ -46,6 +46,10 @@ therefore initialises once per *test*, not once per binary — that is one Postg
 test, minutes of startup, and containers left running afterwards. `tokio::sync::OnceCell` does not
 help; the boundary is the process, not the task.
 
+Plain `cargo test` runs the same suite with the same harness. There a test binary is one process
+and its tests are threads, so the `OnceCell` below is filled once per binary; everything said here
+per process holds per binary.
+
 Two arrangements survive that, and the harness below supports both:
 
 1. **An external server — the default.** `TEST_DATABASE_URL` points at the compose `postgres`
@@ -56,9 +60,10 @@ Two arrangements survive that, and the harness below supports both:
    `rust-powers-test-postgres` plus `ReuseDirective::Always` means every process attaches to the
    same container. On a cold machine the processes race to *create* it: one wins and Docker answers
    the others with `409 Conflict … name is already in use`, so `start()` is retried on that error
-   only; a second `start()` takes the reuse branch and attaches. Reuse never re-runs the wait
-   strategy, so a process that attaches while Postgres is still booting retries its first
-   connection, and a container whose Postgres has died is attached to anyway — see
+   only; a second `start()` takes the reuse branch and attaches. Reuse starts a container it
+   finds stopped, after a Docker or host restart, but never re-runs the wait strategy, so a
+   process that attaches while Postgres is still booting retries its first connection. A
+   container whose Postgres cannot start is attached to all the same — see
    [Cleanup and recovery](#cleanup-and-recovery).
 
 ## Dev-dependencies
@@ -288,7 +293,7 @@ async fn rejects_a_duplicate_email() {
         name: Set("Alice".to_owned()),
         // Generated entities type timestamptz as `DateTimeWithTimeZone`
         // (`DateTime<FixedOffset>`), so a `Utc` value converts with `.into()`.
-        created_at: Set(chrono::Utc::now().into()),
+        created_at: Set(app.state.clock.now().into()),
     };
 
     row().insert(db).await.expect("first insert");
@@ -350,7 +355,7 @@ A test database is about 8 MB, `template1` plus the schema, so a suite of a thou
 
 - before the run, they drop every `test_` database older than an hour, by the age of its
   directory (`pg_stat_file('base/<oid>/PG_VERSION')`, superuser only, which the container's
-  `postgres` is): leftovers of failed runs, of bacon and of direct nextest runs;
+  `postgres` is): leftovers of failed runs, of bacon, of direct nextest runs and of `cargo test`;
 - after a passing run, they drop the run's own databases, its template included, by the
   `test_<TEST_RUN>_` prefix. A failing run keeps them for an hour, so the database a test failed
   on (`TestApp::db_name`) can still be opened.
@@ -362,9 +367,12 @@ the job, and a long-lived server takes the same query by hand. Teardown inside e
 wrong place: it would run before an assertion failure has been read. `docker rm -f
 rust-powers-test-postgres` resets everything.
 
-If every database test suddenly fails to connect, the reused container is wedged — its Postgres has
-exited or its data directory is corrupt — and reuse attaches to it without checking. A reused
-container is never health-checked again. `docker rm -f rust-powers-test-postgres` and re-run.
+A Docker restart alone needs nothing: testcontainers 0.27 starts a stopped container again when
+it reuses it. If every database test then hangs at startup or fails to connect, the reused
+container is wedged: it starts, but its Postgres does not (a data directory damaged by an unclean
+stop, a full Docker disk). Reuse runs no health check and no wait strategy, so every run attaches
+to it again. `docker logs rust-powers-test-postgres` shows which;
+`docker rm -f rust-powers-test-postgres` and re-run.
 
 ## MockDatabase
 

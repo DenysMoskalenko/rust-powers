@@ -304,8 +304,9 @@ impl AgentHook for MyHook {
 }
 ```
 
-Since 0.43 there are per-event methods, each returning its own action type. All methods are
-provided, so you implement only what you need. `RequestOverride` is `RequestPatch`;
+Since 0.41 there are per-event methods, each returning its own action type; 0.43 renamed the
+tool pair to `on_dispatch` and `on_outcome`. All methods are provided, so you implement only
+what you need. `RequestOverride` is `RequestPatch`;
 `Flow::override_request` is `CompletionCallAction::patch`. `StepEventKind` still exists,
 for `observes`.
 

@@ -18,6 +18,7 @@ type itself, SSE transport rules and OpenAPI see `axum-service`.
 - [The Chat Module](#the-chat-module)
 - [Router Wiring](#router-wiring)
 - [Notes on the Handlers](#notes-on-the-handlers)
+- [With Conversation Memory](#with-conversation-memory)
 - [Testing with `axum-test` and `MockCompletionModel`](#testing-with-axum-test-and-mockcompletionmodel)
 - [OpenTelemetry](#opentelemetry)
 
@@ -67,9 +68,10 @@ pub enum Provider {
     Gemini,
 }
 
-/// rig 0.45 fails every prompt to a Claude id it does not know unless this is set,
-/// and thinking counts toward the limit.
-const MAX_TOKENS: u64 = 16_000;
+/// For a Claude id rig's catalog does not list: rig 0.45 fails every prompt to one
+/// until `max_tokens` is set, and thinking counts toward it. A listed id keeps rig's
+/// default, the model's published output limit; a lower cap cuts replies short.
+const UNLISTED_MAX_TOKENS: u64 = 32_000;
 
 /// Built once in `main`, held as `Arc<Agent>` in `AppState`. The catalog connects
 /// any `vendor/model` reference, listed or not, to a `DynModel`, so one call
@@ -79,11 +81,14 @@ pub fn build_agent(settings: &AgentSettings) -> anyhow::Result<Agent> {
     let reference = format!("{vendor}/{}", settings.model);
     let options = ConnectOptions::new().api_key(settings.api_key.expose_secret());
     let model = Catalog::builtin().connect_with(reference.as_str(), options)?;
-    Ok(AgentBuilder::new(model)
-        .name("chat")
-        .preamble("You are terse.")
-        .max_tokens(MAX_TOKENS)
-        .build())
+    let unlisted_claude = settings.provider == Provider::Anthropic && model.spec().is_none();
+    let builder = AgentBuilder::new(model).name("chat").preamble("You are terse.");
+    Ok(if unlisted_claude {
+        builder.max_tokens(UNLISTED_MAX_TOKENS)
+    } else {
+        builder
+    }
+    .build())
 }
 
 #[test]
@@ -99,8 +104,7 @@ fn agent_settings_parse_like_every_other_sub_struct() {
             config::Environment::with_prefix("APP")
                 .source(Some(map))
                 .prefix_separator("__")
-                .separator("__")
-                .try_parsing(true),
+                .separator("__"),
         )
         .build()
         .unwrap()
@@ -111,7 +115,7 @@ fn agent_settings_parse_like_every_other_sub_struct() {
     // Connecting a model is offline; only a prompt talks to the provider.
     assert!(build_agent(&settings.agent).is_ok());
     // The vendor ids are strings now, so check each, with a model the catalog does not list.
-    for provider in [Provider::OpenAi, Provider::Gemini] {
+    for provider in [Provider::OpenAi, Provider::Anthropic, Provider::Gemini] {
         let unlisted = AgentSettings {
             provider,
             model: "a-model-rig-does-not-list".to_owned(),
@@ -124,8 +128,8 @@ fn agent_settings_parse_like_every_other_sub_struct() {
 
 ## Holding the Agent in `AppState`
 
-`Agent` is **not generic** since 0.43 — `AgentBuilder::new` takes the model as a `DynModel`,
-so one concrete `Agent` type covers every provider and `AppState` needs no type parameter.
+`Agent` is **not generic** since 0.42 — `AgentBuilder::new` erases the model, into a `DynModel`
+since 0.43, so one concrete `Agent` type covers every provider and `AppState` needs no type parameter.
 It is `Clone` and `Send + Sync + 'static`, but cloning copies the whole config (preamble,
 static context, hook stack), so `Arc` the agent rather than let axum clone it per request.
 
@@ -150,42 +154,53 @@ Build one agent per role in `main`, beside the database pool, from `settings.age
 The service's `AppError` already has a variant for every outcome a run can have, so
 **`error.rs` does not change** — no new variant, no new `status` arm, no `From` impl. One
 function in the chat module, `agent_error`, maps a `PromptError` onto what is there, and
-the handler calls it with `.map_err(agent_error)?`:
+the handler calls it with `.map_err(agent_error)?`. The first row that matches wins:
 
 | `PromptError` | `AppError` | Status | Client sees |
 |---|---|---|---|
 | `Cancelled` with the reason `DECLINED` (a policy hook's `Stop`) | `BadRequest("the assistant declined this request")` | 400 | that constant |
 | `Cancelled` with the reason `UNAVAILABLE` (a policy hook whose own dependency is down) or starting `failed to retrieve dynamic context` (a vector store that is down) | `Unavailable(error.to_string())` | 503 | `"service unavailable"` |
-| `MaxTurns`, `UnknownToolCall`, any other `Cancelled` | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
-| `Provider(ProviderError::Response(..))`, a reply rig could not use | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
-| `Report` that rig raised itself (`kind` `Request`, such as a generation option the model does not take, `HandlerUnavailable`, `Internal`, or `Other` / `Denied` from a hook or layer that refused the completion) | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
-| provider answered a 4xx other than 408 and 429 (`provider_response_status()`) | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
-| provider answered 429 | `TooManyRequests { retry_after_secs }` | 429 | `"too many requests"` + `Retry-After` |
-| anything else | `Unavailable(error.to_string())` | 503 | `"service unavailable"` |
+| provider answered 429 (`provider_response_status()`) | `TooManyRequests { retry_after_secs }` | 429 | `"too many requests"` + `Retry-After` |
+| a `Report` or `Provider` failure rig marks retryable (`is_retryable()`): no reply at all, a reply cut short, a provider 408, 425 or 5xx, an in-band transient code such as `overloaded_error` | `Unavailable(error.to_string())` | 503 | `"service unavailable"` |
+| anything else: `MaxTurns`, `UnknownToolCall`, any other `Cancelled`, `Provider(ProviderError::Response(..))`, a `Report` rig raised itself, any other provider 4xx | `Other(anyhow::Error::from(error))` | 500 | `"internal server error"` |
+
+`DECLINED` and `UNAVAILABLE` are two `const` reasons of this service, defined in the chat module
+below. `Memory`, which only an agent built with `.memory(..)` raises, has its own handling
+under With Conversation Memory.
 
 A policy hook declining this request is a normal outcome rather than a fault, so it is a 400.
 Every such hook stops with the one constant, `DECLINED`, because rig raises `Cancelled`
 for its own failures too (a lost prompt, a driver protocol violation, a tool round with no
 results), and those are faults. A dependency that is down stays a 503 even when it ends the run
 through `Cancelled`: a hook whose own check failed stops with `UNAVAILABLE`, and rig's
-`dynamic_context` says only in its message that the vector store failed. The 500 rows are wiring bugs on this side (a budget too small,
-a tool the model invented, a run rig cancelled itself, a request rig could not build, a hook that
-refused the completion, a revoked key, an unknown model id, a request shape the provider
-rejects), so they take the scaffold's *unexpected* path: logged with the whole cause
-chain, answered with a constant. A 503 there would read as an outage and invite clients to retry
-what can never succeed. The 429 is surfaced as a 429, with the
-provider's `Retry-After` when it sends one, so clients back off instead of retrying into the same
-limit. Everything else is the dependency this request cannot do without being down, which is
-exactly what `Unavailable` is for: the string is **logged, never sent** — a provider message can
-carry prompt text, internal URLs and account ids, and `IntoResponse` already renders `Unavailable`
-as a constant. The wire shape stays `{ error, request_id, details }`, so document an agent route
-with `(status = 503, body = ErrorBody, description = "The model provider is unavailable")` and
-`(status = 429, body = ErrorBody, description = "The model provider's rate limit")` like any other.
+`dynamic_context` says only in its message that the vector store failed. The 429 is surfaced as
+a 429, with the provider's `Retry-After` when it sends one, so clients back off instead of
+retrying into the same limit; it is matched before the retryable row, because rig marks a 429
+retryable too.
+
+The 503 row does not keep a list of its own: rig classifies every provider failure once, and
+`is_retryable()` is that verdict, read from the `Report` or from the `ProviderError`. It is true
+exactly when the same request may succeed later, which is what `Unavailable` says to a client.
+Everything rig does not mark retryable fails the same way again (a budget too small, a tool the
+model invented, a run rig cancelled itself, a request rig could not build, a hook that refused
+the completion, a revoked key, an unknown model id, a request shape the provider rejects), so
+it takes the scaffold's *unexpected* path, `Other`. A 503 there would read as an outage and
+invite clients to retry what can never succeed.
+
+`AppError` logs every 5xx once, at ERROR with the whole cause chain, and answers with a
+constant, so neither `agent_error` nor the handler logs the failure again. That log line is the
+only place the provider's message goes: the string in `Unavailable` and the error in `Other`
+are **logged, never sent**, because a provider message can carry prompt text, internal URLs
+and account ids. The wire shape stays `{ error, request_id, details }`, so document an agent
+route with `(status = 503, body = ErrorBody, description = "The model provider is unavailable")`
+and `(status = 429, body = ErrorBody, description = "The model provider's rate limit")` like any
+other.
 
 Since rig 0.44 a turn the provider ended in a content filter or an unknown finish reason, and
 malformed tool arguments that ended the run, fail as `Provider(ProviderError::Response(..))`
-with no status. rig marks that variant not retryable, so it takes a 500 row, not the 503
-catch-all.
+with no status. rig marks that variant not retryable, so it is a 500. A turn that ends at the
+output-token limit is different: rig returns its text as a success, so the handler checks the
+last call's `finish_reason` and logs a truncated reply at WARN.
 
 `provider_response_status()`, `provider_response_headers()` and `provider_request_id()` are
 forwarded through `PromptError`, from its `Report` as well — no destructuring needed.
@@ -210,17 +225,14 @@ use axum::http::{StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::post;
 use futures::{Stream, StreamExt as _};
-use rig::ErrorKind;
-use rig::agent::{Agent, MultiTurnStreamItem};
-use rig::completion::PromptError;
-use rig::error::ProviderError;
+use rig::agent::{Agent, MultiTurnStreamItem, PromptResponse};
+use rig::completion::{FinishReason, PromptError};
 use rig::streaming::{Item, StreamEvent};
 use serde::{Deserialize, Serialize};
-use tower_http::timeout::TimeoutLayer;
 use utoipa::ToSchema;
 use validator::Validate;
 
-use crate::config::REQUEST_TIMEOUT;
+use crate::api::request_timeout;
 use crate::error::AppError;
 use crate::extract::Valid;
 
@@ -258,7 +270,13 @@ pub const DECLINED: &str = "declined by policy";
 /// The reason a policy hook stops with when its own dependency is down.
 pub const UNAVAILABLE: &str = "policy check unavailable";
 
+/// The longest gap between two items of a streamed run. No item arrives while a
+/// tool runs, so it has to exceed the slowest tool's own timeout; `REQUEST_TIMEOUT`
+/// budgets a whole unary request and is too short for that.
+pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Maps a failed run onto the variants `error.rs` already has, so it stays untouched.
+/// The first arm that matches wins.
 fn agent_error(error: PromptError) -> AppError {
     match error {
         // A policy hook said no: a refusal, not a fault, answered with a constant.
@@ -274,33 +292,8 @@ fn agent_error(error: PromptError) -> AppError {
         {
             AppError::Unavailable(error.to_string())
         }
-        // Out of turns, a tool the model invented, a run rig cancelled itself or a reply
-        // rig could not use (a filtered turn, an unknown finish reason, malformed tool
-        // arguments): a bug on this side or a request that cannot succeed, none of it
-        // retryable. `Other` is 500, logged with its cause chain, answered with a constant.
-        PromptError::MaxTurns { .. }
-        | PromptError::UnknownToolCall { .. }
-        | PromptError::Cancelled { .. }
-        | PromptError::Provider(
-            ProviderError::Response(_) | ProviderError::UnsupportedOption(_),
-        ) => AppError::Other(anyhow::Error::from(error)),
-        // A failure rig raised before any provider replied: a request it could
-        // not build, such as an option the model does not take, an unregistered
-        // model label, a broken invariant, a hook or layer that skipped or denied
-        // the completion.
-        PromptError::Report(ref report)
-            if matches!(
-                report.kind,
-                ErrorKind::Request
-                    | ErrorKind::HandlerUnavailable
-                    | ErrorKind::Internal
-                    | ErrorKind::Other
-                    | ErrorKind::Denied
-            ) =>
-        {
-            AppError::Other(anyhow::Error::from(error))
-        }
         // A provider 429 is a 429 here too, so clients back off instead of retrying.
+        // Before the next arm: rig marks a 429 retryable as well.
         _ if error.provider_response_status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
             let retry_after_secs = error
                 .provider_response_headers()
@@ -309,19 +302,40 @@ fn agent_error(error: PromptError) -> AppError {
                 .and_then(|value| value.parse().ok());
             AppError::TooManyRequests { retry_after_secs }
         }
-        // A revoked key, an unknown model id or a request the provider rejects is
-        // a wiring bug too: a 503 would invite clients to retry what can never
-        // succeed. A 408 is the provider timing out, so it stays a 503.
-        _ if error.provider_response_status().is_some_and(|status| {
-            status.is_client_error() && status != StatusCode::REQUEST_TIMEOUT
-        }) =>
-        {
-            AppError::Other(anyhow::Error::from(error))
-        }
-        // The provider is down or broken; the caller's request was fine. The
+        // The provider is down or broken and the same request may succeed later. The
         // message is logged, never sent: it can carry prompt text, internal URLs
         // and account ids.
-        _ => AppError::Unavailable(error.to_string()),
+        _ if is_retryable(&error) => AppError::Unavailable(error.to_string()),
+        // Everything else fails the same way again, so a 503 would invite clients
+        // to retry what can never succeed: out of turns, a tool the model invented,
+        // a run rig cancelled itself, a filtered or failed turn, a request rig could
+        // not build, a hook that refused the completion, a revoked key, an unknown
+        // model id. `Other` is 500, logged with its cause chain, answered with a
+        // constant.
+        _ => AppError::Other(anyhow::Error::from(error)),
+    }
+}
+
+/// rig's own verdict that the same request may succeed later: no reply at all, a
+/// reply cut short, a provider 408, 425, 429 or 5xx, or an in-band error envelope
+/// with a transient code. rig sets it once, when it classifies the failure.
+fn is_retryable(error: &PromptError) -> bool {
+    match error {
+        PromptError::Report(report) => report.is_retryable(),
+        PromptError::Provider(provider) => provider.is_retryable(),
+        _ => false,
+    }
+}
+
+/// rig returns a reply the output-token limit cut short as a success, so this line
+/// is the only sign that a 200 is incomplete. The fix is a larger `max_tokens`.
+fn warn_if_truncated(response: &PromptResponse) {
+    let last = response.completion_calls.last();
+    if matches!(
+        last.and_then(|call| call.finish_reason.as_ref()),
+        Some(FinishReason::Length)
+    ) {
+        tracing::warn!("the reply hit the output-token limit and is cut short");
     }
 }
 
@@ -338,6 +352,7 @@ pub async fn chat(
 
     // A `PromptResponse`: the output plus usage aggregated over the run.
     let response = request.await.map_err(agent_error)?;
+    warn_if_truncated(&response);
 
     Ok(Json(ChatResponse {
         reply: response.output(),
@@ -358,15 +373,15 @@ pub async fn chat_stream(
     Ok(Sse::new(sse_events(run)).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
-/// The run as SSE events. Rig does not bound a completion and `TimeoutLayer`
+/// The run as SSE events. Rig does not bound a completion and the request timeout
 /// stops at the response head, so every item must arrive within
-/// `REQUEST_TIMEOUT`. `Timeout` yields one `Elapsed` and then waits on the run
+/// `STREAM_IDLE_TIMEOUT`. `Timeout` yields one `Elapsed` and then waits on the run
 /// again, so the state turns `None` after the last frame: the next poll ends the
 /// stream without touching the run, which drops it and the provider call.
 fn sse_events(
     run: impl Stream<Item = Result<MultiTurnStreamItem, PromptError>> + 'static,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
-    let run = Box::pin(tokio_stream::StreamExt::timeout(run, REQUEST_TIMEOUT));
+    let run = Box::pin(tokio_stream::StreamExt::timeout(run, STREAM_IDLE_TIMEOUT));
     futures::stream::unfold(Some(run), |run| async move {
         let mut run = run?;
         loop {
@@ -402,6 +417,7 @@ fn frame(
             return Frame::Send(Event::default().event("token").data(text));
         }
         Ok(Ok(MultiTurnStreamItem::FinalResponse(response))) => {
+            warn_if_truncated(&response);
             // Empty when the provider reported no count.
             let output_tokens = response
                 .usage
@@ -424,17 +440,15 @@ fn frame(
     Frame::Last(Event::default().event("error").data("the assistant failed"))
 }
 
-/// The service's `build_router`, reduced to the agent routes. Both sit inside the
-/// stack: `TimeoutLayer` races only the future that produces the response, so it
-/// bounds `/chat` and never cuts a stream that has started.
+/// The service's `build_router`, reduced to the agent routes and the one layer of
+/// the stack that decides how long they may run. The scaffold's `request_timeout`
+/// races only the future that produces the response, so it bounds `/chat`, with a
+/// 503 in `ErrorBody`, and never cuts a stream that has started.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/chat", post(chat))
         .route("/chat/stream", post(chat_stream))
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            REQUEST_TIMEOUT,
-        ))
+        .layer(axum::middleware::from_fn(request_timeout))
         .with_state(state)
 }
 
@@ -445,11 +459,12 @@ mod tests {
     use rig::agent::{
         AgentBuilder, AgentHook, CompletionCallAction, CompletionCallEvent, HookContext,
     };
-    use rig::completion::{FinishReason, Usage};
+    use rig::completion::Usage;
     use rig::test_utils::{MockCompletionModel, MockStreamEvent, MockTurn};
     use serde_json::json;
 
     use super::*;
+    use crate::config::REQUEST_TIMEOUT;
 
     fn server(model: MockCompletionModel) -> TestServer {
         let agent = AgentBuilder::new(model).preamble("You are terse.").build();
@@ -461,13 +476,38 @@ mod tests {
 
     #[tokio::test]
     async fn a_provider_outage_is_a_503_without_the_provider_message() {
+        // 408, 425 and every 5xx are the statuses rig marks retryable besides 429.
+        for status in [
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_EARLY,
+        ] {
+            let server = server(MockCompletionModel::from_turns([
+                MockTurn::provider_response_error(
+                    status,
+                    "upstream overloaded for account acct-42",
+                    "req-0",
+                ),
+            ]));
+
+            let response = server.post("/chat").json(&json!({ "message": "hi" })).await;
+
+            response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+            assert!(!response.text().contains("acct-42"), "the body stays generic");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failure_rig_does_not_mark_retryable_is_a_500() {
+        // `MockTurn::error` is `ProviderError::Provider`, which rig never marks retryable.
         let server = server(MockCompletionModel::from_turns([MockTurn::error(
-            "upstream overloaded for account acct-42",
+            "unexpected reply for account acct-42",
         )]));
 
         let response = server.post("/chat").json(&json!({ "message": "hi" })).await;
 
-        response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+        response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
         assert!(!response.text().contains("acct-42"), "the body stays generic");
     }
 
@@ -518,6 +558,18 @@ mod tests {
         let response = server.post("/chat").json(&json!({ "message": "hi" })).await;
 
         response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn a_truncated_reply_is_still_a_200() {
+        let server = server(MockCompletionModel::from_turns([
+            MockTurn::text("partial").with_finish_reason(FinishReason::Length),
+        ]));
+
+        let response = server.post("/chat").json(&json!({ "message": "hi" })).await;
+
+        response.assert_status_ok();
+        assert_eq!(response.json::<serde_json::Value>()["reply"], "partial");
     }
 
     #[tokio::test]
@@ -608,6 +660,60 @@ mod tests {
         assert!(!body.contains("never sent"), "{body}");
     }
 
+    /// A model call that outlasts the request budget.
+    struct Slow;
+
+    impl AgentHook for Slow {
+        async fn on_completion_call(
+            &self,
+            _ctx: &HookContext,
+            _event: CompletionCallEvent<'_>,
+        ) -> CompletionCallAction {
+            tokio::time::sleep(REQUEST_TIMEOUT + Duration::from_secs(1)).await;
+            CompletionCallAction::continue_run()
+        }
+    }
+
+    // Paused time is safe here: this router has no database, so nothing waits on
+    // real I/O while the clock jumps.
+    #[tokio::test(start_paused = true)]
+    async fn a_run_past_the_request_budget_is_a_503() {
+        let agent = AgentBuilder::new(MockCompletionModel::text("too late"))
+            .add_hook(Slow)
+            .build();
+        let server = TestServer::new(build_router(AppState {
+            agent: Arc::new(agent),
+        }));
+
+        let response = server.post("/chat").json(&json!({ "message": "hi" })).await;
+
+        response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.json::<serde_json::Value>();
+        assert_eq!(body["error"], "service unavailable");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_request_budget_does_not_cut_a_stream() {
+        let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("slow but streamed"),
+            MockStreamEvent::final_response(Usage::default()),
+        ]]))
+        .add_hook(Slow)
+        .build();
+        let server = TestServer::new(build_router(AppState {
+            agent: Arc::new(agent),
+        }));
+
+        let response = server
+            .post("/chat/stream")
+            .json(&json!({ "message": "hi" }))
+            .await;
+
+        let body = response.text();
+        assert!(body.contains("event: token"), "{body}");
+        assert!(body.contains("event: done"), "{body}");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_stalled_run_ends_the_stream_after_one_error_event() {
         let stalled = futures::stream::pending::<Result<MultiTurnStreamItem, PromptError>>();
@@ -662,7 +768,8 @@ mod tests {
 `build_router` above is the shape, reduced to two routes. In a real service both join the
 skeleton's `OpenApiRouter` like any other handler — a `#[utoipa::path]` attribute on each and
 `.routes(routes!(..))` — so they appear in the OpenAPI document and sit inside the middleware
-stack with every other route: request id, panic handling, tracing, metrics, CORS.
+stack with every other route: the server span, request id, panic handling, metrics, CORS,
+compression, the body limit and, innermost, the request timeout.
 
 ```rust
 // api/chat.rs, merged in `api::router()` beside `users::router()`
@@ -673,13 +780,18 @@ pub fn router() -> OpenApiRouter<AppState> {
 }
 ```
 
-Rig does not bound a completion. On `/chat` the stack's `TimeoutLayer` does. On `/chat/stream`
-the layer stops at the response head, which leaves before the first token, so `sse_events` wraps
-the run in `tokio_stream::StreamExt::timeout`. That alone does not end anything: it yields one
-`Elapsed` and then waits on the run again, while the SSE keep-alive, which the timeout never
-sees, stops any proxy from closing the idle connection. So after the `error` event the `unfold`
-state is `None`, and the next poll ends the stream without touching the run, which drops it and
-the provider call with it. `max_turns` bounds how many model calls one run makes.
+Rig does not bound a completion. On `/chat` the scaffold's `api::request_timeout` middleware
+does: past `REQUEST_TIMEOUT` it drops the run, and the provider call with it, and answers
+`AppError::Unavailable`, a 503 in `ErrorBody`. A run that cannot fit that budget, with its
+tool calls and its thinking, belongs on the stream route. On `/chat/stream` the middleware
+stops at the response head, which leaves before the first token, so `sse_events` wraps the run
+in `tokio_stream::StreamExt::timeout` with a constant of its own, `STREAM_IDLE_TIMEOUT`: no item
+arrives while a tool runs, so the gap it allows has to exceed the slowest tool's timeout, which
+`REQUEST_TIMEOUT` does not. The timeout alone does not end anything: it yields one `Elapsed` and
+then waits on the run again, while the SSE keep-alive, which the timeout never sees, stops any
+proxy from closing the idle connection. So after the `error` event the `unfold` state is `None`,
+and the next poll ends the stream without touching the run, which drops it and the provider call
+with it. `max_turns` bounds how many model calls one run makes.
 
 ## Notes on the Handlers
 
@@ -714,8 +826,156 @@ the provider call with it. `max_turns` bounds how many model calls one run makes
   };
   ```
 
-  Every `PromptError::Memory`, `SessionError::Changed` included, goes to `agent_error`'s 503
-  catch-all with no arm of its own.
+  A run of such an agent can also fail in its memory store; see With Conversation Memory.
+
+## With Conversation Memory
+
+An agent built with `.memory(..)` adds one failure, `PromptError::Memory { error, response }`,
+and it means two different things. With `response: None` the conversation could not be loaded,
+before any model call. With `response: Some(..)` the run finished and only its save failed:
+the tools ran and the tokens are spent, so the handler returns that answer and logs the lost
+save; answering 503 would have the client retry and run the tools a second time. The handler
+takes `Memory` out before `agent_error` sees the rest. `rig::memory::SessionError` needs `rig`'s
+`memory` feature.
+
+```rust,verify,test
+//! `api/chat.rs` additions for an agent built with `.memory(..)`.
+use std::io;
+
+use rig::agent::PromptResponse;
+use rig::memory::SessionError;
+
+use crate::error::AppError;
+
+/// In `chat`, in place of `request.await.map_err(agent_error)?`:
+///
+/// ```text
+/// let response = match request.await {
+///     Err(PromptError::Memory { error, response }) => memory_failure(error, response)?,
+///     other => other.map_err(agent_error)?,
+/// };
+/// ```
+fn memory_failure(
+    error: SessionError,
+    response: Option<Box<PromptResponse>>,
+) -> Result<PromptResponse, AppError> {
+    match response {
+        // The run finished and only its save failed, so its answer is returned.
+        // The turn is missing from the log, which only this line says.
+        Some(response) => {
+            tracing::error!(%error, "the conversation was not saved; returning the finished answer");
+            Ok(*response)
+        }
+        None => Err(memory_error(error)),
+    }
+}
+
+/// A memory failure that left no answer, on the variants `error.rs` already has.
+fn memory_error(error: SessionError) -> AppError {
+    match error {
+        // Another run saved to this conversation first. An agent run raises it on
+        // the save, so with an answer; a `save_async` of your own hands it here.
+        SessionError::Changed { .. } => {
+            AppError::Conflict("the conversation changed while this request ran".to_owned())
+        }
+        // The store is down. `InvalidInput` is not an outage: it is a log name rig
+        // refused, a bug in the code that built the name.
+        SessionError::Io(ref failure) if failure.kind() != io::ErrorKind::InvalidInput => {
+            AppError::Unavailable(error.to_string())
+        }
+        // A refused name, or a session another rig version wrote, fails the same
+        // way on every retry.
+        _ => AppError::Other(anyhow::Error::from(error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse as _;
+    use rig::agent::{
+        AgentBuilder, AgentHook, CompletionCallAction, CompletionCallEvent, HookContext,
+    };
+    use rig::completion::{Message, PromptError};
+    use rig::memory::{MemoryStore, load, save};
+    use rig::test_utils::MockCompletionModel;
+
+    use super::*;
+
+    /// Stands in for a second request on the same conversation: it saves a turn
+    /// after this run loaded the log and before this run saves.
+    struct OtherRequestSavesFirst(MemoryStore);
+
+    impl AgentHook for OtherRequestSavesFirst {
+        async fn on_completion_call(
+            &self,
+            _ctx: &HookContext,
+            _event: CompletionCallEvent<'_>,
+        ) -> CompletionCallAction {
+            let mut other = load(&self.0, "u-1").unwrap();
+            other.push(Message::user("from the other request"));
+            save(&self.0, "u-1", &mut other).unwrap();
+            CompletionCallAction::continue_run()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_whose_save_failed_still_answers() {
+        let store = MemoryStore::default();
+        let agent = AgentBuilder::new(MockCompletionModel::text("the answer"))
+            .memory(store.clone())
+            .add_hook(OtherRequestSavesFirst(store))
+            .build();
+
+        let failed = agent.prompt("hi").conversation("u-1").max_turns(1).await;
+
+        let Err(PromptError::Memory { error, response }) = failed else {
+            panic!("the later of two saves fails");
+        };
+        assert!(matches!(error, SessionError::Changed { .. }));
+        let answer = memory_failure(error, response).map(|response| response.output());
+        assert_eq!(answer.ok().as_deref(), Some("the answer"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_load_maps_onto_the_existing_variants() {
+        let agent = AgentBuilder::new(MockCompletionModel::text("never sent"))
+            .memory(MemoryStore::default())
+            .build();
+
+        // `/` is not allowed in a log name, so rig refuses the load.
+        let refused = agent.prompt("hi").conversation("a/b").max_turns(1).await;
+
+        let Err(PromptError::Memory { error, response }) = refused else {
+            panic!("a refused log name fails the load");
+        };
+        let status = |error, response| match memory_failure(error, response) {
+            Ok(_) => StatusCode::OK,
+            Err(error) => error.into_response().status(),
+        };
+        assert_eq!(status(error, response), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let down = io::Error::new(io::ErrorKind::ConnectionRefused, "store down");
+        let down = SessionError::Io(down);
+        assert_eq!(status(down, None), StatusCode::SERVICE_UNAVAILABLE);
+
+        let changed = SessionError::Changed {
+            log: "u-1".to_owned(),
+        };
+        assert_eq!(status(changed, None), StatusCode::CONFLICT);
+    }
+}
+```
+
+A streamed run fails the same way: the stream yields every token and then, in place of
+`FinalResponse`, the `Memory` error carrying the response. In `frame` that item is the answer's
+normal end, not a failure, so match it before the generic error arm, log it as `memory_failure`
+does and send the `done` event built from its `response`.
+
+Returning the answer does not put the turn back: the next request of that conversation loads a
+log without it. Two requests on one conversation that overlap always end that way for the later
+one, so keep them from overlapping: take a lease on the log name before the run (rust-redis
+owns the lease) and answer the request that finds it held with `AppError::Conflict`.
 
 ## Testing with `axum-test` and `MockCompletionModel`
 
@@ -776,9 +1036,10 @@ alongside your axum spans with no extra wiring. Two shapes reach the collector.
 
 **The gotcha, specific to a web service:** rig creates the run-level `invoke_agent` span
 *only when no enabled span is already current*. Inside an axum handler there always is one
-— `OtelAxumLayer`'s server span, or your `#[instrument]` — so rig adopts it and deliberately
-skips recording run-level `gen_ai.usage.*` and `gen_ai.completion` onto a span it does not
-own. Same agent call: `["invoke_agent", "chat"]` bare, `["http_request", "chat"]` handler.
+— the scaffold's `request` span, a child of `OtelAxumLayer`'s server span, or your
+`#[instrument]` — so rig adopts it and deliberately skips recording run-level `gen_ai.usage.*`
+and `gen_ai.completion` onto a span it does not own. Same agent call: `["invoke_agent", "chat"]`
+bare; in a handler the `chat` spans sit directly under the span rig adopted.
 
 Per-call usage is still on each `chat` span and `execute_tool` spans still nest under the
 request, but the run aggregate is yours to record — read it from `PromptResponse::usage`,

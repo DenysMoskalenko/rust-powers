@@ -52,7 +52,7 @@
 - `/orders/:id`, or any other `/:name` capture.
 - `#[async_trait]` on a `FromRequest` or `FromRequestParts` impl.
 - A repository trait or an `OrderRepository`.
-- Multi-statement logic or an if-ladder inline in a handler.
+- More than one query, or an if-ladder, inline in a handler.
 - `Json(order_model)`, returning the entity itself.
 - A status mapping for rejected bodies outside `error.rs`.
 
@@ -60,7 +60,7 @@
 
 **Prompt**: "A colleague added `GET /users/{id}/profile` that returns `Json<Option<user::Model>>` — the whole row, `null` on a miss. `user::Model` now has a `password_hash` column. Hide it and return 404 when the user does not exist."
 
-The fixture has neither the column nor the endpoint, so the answer writes the fixed handler from this description; it is judged on that handler, not on the scaffold's `get_user`, which already follows both rules.
+**Note**: Not part of the prompt. The fixture has neither the column nor the endpoint, so the answer writes the fixed handler from the prompt's description; it is judged on that handler, not on the scaffold's `get_user`, which already follows both rules.
 
 **Must produce**:
 
@@ -132,7 +132,9 @@ The fixture has neither the column nor the endpoint, so the answer writes the fi
 - `Resource::builder()` with no hardcoded service name.
 - `guard.shutdown()` called after `axum::serve` returns, not before.
 - `OtelAxumLayer` + `OtelInResponseLayer` as the only HTTP span source.
-- `/metrics` from one `PrometheusMetricLayer::pair()` call in `build_router`.
+- In a `ServiceBuilder`, `OtelAxumLayer` is listed before `OtelInResponseLayer`, so the response `traceparent` is written inside the server span.
+- `/metrics` rendered from the handle of the Prometheus layer built in `build_router`, with the recorder installed once per process (a `OnceLock` or an equivalent guard).
+- A request that matched no route is counted under a constant label (`EndpointLabel::MatchedPathWithFallbackFn`), not its raw path.
 
 **Must not produce**:
 
@@ -141,7 +143,7 @@ The fixture has neither the column nor the endpoint, so the answer writes the fi
 - `global::shutdown_tracer_provider()`.
 - A second HTTP tracing layer (tower-http's `trace` feature) in the same stack as `OtelAxumLayer`.
 - A provider built in a `LazyLock`, a `OnceLock` or a `static`.
-- `PrometheusMetricLayer::pair()` called more than once.
+- A bare `PrometheusMetricLayer::pair()` in a function that can run more than once per process, such as `build_router`.
 - `opentelemetry-otlp` with `default-features = false` and only `grpc-tonic` listed.
 
 ### Eval 6 - instrumenting a function that handles credentials
@@ -187,8 +189,8 @@ The fixture has neither the column nor the endpoint, so the answer writes the fi
 
 **Must produce**:
 
-- One `from_fn` middleware (`api::request_id`) as the outermost layer.
-- `api::request_id` trusts an inbound `x-request-id` or mints one, and echoes it on the response.
+- One `from_fn` middleware (`api::request_id`), outside every layer except the two Otel layers.
+- `api::request_id` keeps an inbound `x-request-id` only when it is id-shaped (1–64 characters of `[A-Za-z0-9._-]`), mints one otherwise, and echoes it on the response.
 - `api::request_id` opens `info_span!("request", request_id = %id)` and `.instrument`s the rest of the request.
 - `api::request_id` scopes the `REQUEST_ID` task-local declared in `error.rs`.
 - `ErrorBody::new` reads the task-local, so every error, the 404 fallback included, carries the id.

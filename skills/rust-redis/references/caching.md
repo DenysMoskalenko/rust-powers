@@ -105,12 +105,22 @@ attempts with exponential backoff. The timeouts bound a *slow* server: a paused 
 into a miss after the response timeout (measured 101 ms with the settings above). The retries
 bound nothing useful in a request path, because the manager runs the whole retry loop *inside*
 whichever command finds the socket dead, and every later command joins the loop still running.
-Measured with six retries against a refused port: 4.7 s per `Cache::get`, every call, for the
-length of the outage; 8.3 s when the host is unreachable. With zero retries the same calls take
-0.6 ms and one connect timeout, and the manager still reconnects on the next command after the
-server returns (measured after a `docker restart`: first command fails, second succeeds). So the
-worst case a cache call can add to a request is `connect_timeout + response_timeout`, and that is
-the number to keep inside the request budget.
+Measured with the default six retries and the timeouts above: 9.5 s per `Cache::get` against a
+refused port, every call, for the length of the outage; 13 s when the host is unreachable. With
+zero retries the same calls take under a millisecond and one connect timeout (0.5 s), and the
+manager still reconnects on the next command after the server returns (measured after a
+`docker restart`: first command fails, second succeeds). So the worst case a cache call can add to
+a request is `connect_timeout + response_timeout`, and that is the number to keep inside the
+request budget.
+
+All of it is one connection to one primary: a standalone server, a Sentinel-managed primary, or
+the primary endpoint of a managed service. Redis Cluster is a different client,
+`redis::cluster_async::ClusterConnection` behind the `cluster-async` feature, because a
+`ConnectionManager` pointed at one cluster node is answered `MOVED` for every key that node does
+not own. The commands change with it: a multi-key `DEL` or `MGET`, an atomic pipeline and a
+script may touch the keys of one hash slot only and fail with `CROSSSLOT` otherwise, so keys that
+travel together share a `{hash tag}` (`app:v1:{user:42}:profile`), and `SCAN` walks one node at a
+time. `invalidate`, `delete_prefix` and `bump_and_check` below assume one primary.
 
 ## Which command trait
 
@@ -154,11 +164,18 @@ stack's lint table catches that one (`let_underscore_future`), but only that one
 
 `redis`'s `json` feature is the RedisJSON *server module* (`JSON.SET`), not serde support, and
 enabling it to store structs earns `ERR unknown command 'JSON.SET'` against a server without the
-module. Caching a struct needs no feature at all, just a newtype that implements the three
-conversion traits. It composes where a `serde_json::from_slice` at the call site does not: as an
-`hset` value, inside `pipe()`, and as the element type of `Vec<Json<T>>` from an `mget`.
+module. Caching a struct needs no feature at all: a write passes the bytes of
+`serde_json::to_vec`, and a read goes through a newtype that implements `FromRedisValue`. The
+newtype composes where a `serde_json::from_slice` at the call site does not: as `Option<Json<T>>`
+from a `get`, and as the element type of `Vec<Option<Json<T>>>` from an `mget`.
 A value that no longer deserializes (`ParsingError`) comes out of the cache read as `None`, logged
 as a bug: bump the key version instead of living with it.
+
+`Json<T>` is read-only on purpose. `ToRedisArgs::write_redis_args` returns nothing, so a
+write-side impl has to put something on the wire when serialization fails, and the natural
+`null` is the wrong thing to send: `get_or_set` reads a stored `null` as a cached `None`, and an
+existing row is served as not found until the TTL runs out. Serialize where the failure can be
+handled, and skip the write.
 
 ## Keys and TTLs
 
@@ -218,37 +235,23 @@ use std::{
 };
 
 use redis::{
-    AsyncCommands, FromRedisValue, ParsingError, RedisWrite, ToRedisArgs, ToSingleRedisArg, Value,
-    aio::ConnectionManager,
+    AsyncCommands, FromRedisValue, ParsingError, RetryMethod, Value, aio::ConnectionManager,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::error::AppError;
 
-/// The serde bridge. `redis`'s `json` feature is a different thing entirely.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Json<T>(pub T);
-
-impl<T: Serialize> ToRedisArgs for Json<T> {
-    fn write_redis_args<W>(&self, out: &mut W)
-    where
-        W: ?Sized + RedisWrite,
-    {
-        // `ToRedisArgs` cannot fail. Serializing a plain struct cannot either;
-        // a map with non-string keys can. Write a JSON null and let the read
-        // side surface it rather than panic inside a trait that forbids it.
-        // (Not `to_writer(out.writer_for_next_arg(), ..)` with a fallback: a
-        // partial argument is committed on drop, and the null becomes a second
-        // argument - `SET key { null` is a syntax error on the server.)
-        let bytes = serde_json::to_vec(&self.0).unwrap_or_else(|_| b"null".to_vec());
-        out.write_arg(&bytes);
-    }
-}
-
+/// The serde bridge for reads. `redis`'s `json` feature is a different thing
+/// entirely. There is no `ToRedisArgs` for it: that trait cannot fail, and a
+/// serialization failure sent as `null` would read back as a cached "not
+/// found". Writes pass the bytes of `serde_json::to_vec`, which are already one
+/// argument.
+///
 /// `set`, `set_ex`, `set_options` and `hset` take `ToSingleRedisArg`, a marker
 /// saying "this is exactly one argument". A value type that implements only
 /// `ToRedisArgs` compiles against `rpush` and `sadd` and fails against these.
-impl<T: Serialize> ToSingleRedisArg for Json<T> {}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Json<T>(pub T);
 
 impl<T: DeserializeOwned> FromRedisValue for Json<T> {
     fn from_redis_value(v: Value) -> Result<Self, ParsingError> {
@@ -309,16 +312,20 @@ impl Cache {
     }
 
     /// Best effort: the caller has the value already, so a failed write is not
-    /// its problem.
+    /// its problem. A value that does not serialize is not written at all.
     #[tracing::instrument(skip_all, fields(db.system = "redis", db.operation = "SETEX"))]
     pub async fn set<T: Serialize + Sync>(&self, key: &str, value: &T, ttl: Duration) {
         if !self.enabled {
             return;
         }
+        let bytes = match serde_json::to_vec(value) {
+            Ok(bytes) => bytes,
+            Err(e) => return unserializable(&e),
+        };
         let ttl = jittered(key, ttl);
         let write = self
             .conn()
-            .set_ex::<_, _, ()>(key, Json(value), ttl.as_secs().max(1))
+            .set_ex::<_, _, ()>(key, bytes, ttl.as_secs().max(1))
             .await;
         if let Err(e) = write {
             degraded(&e, "SETEX");
@@ -371,10 +378,22 @@ fn jittered(key: &str, ttl: Duration) -> Duration {
     Duration::from_millis(base.saturating_add(base / 100 * spread))
 }
 
-/// "Redis is not answering", as opposed to "Redis answered, and said no".
+/// "Redis is not answering" or "Redis answered: not now", as opposed to "Redis
+/// answered, and said no". The second group is what a failover looks like from
+/// a client: `LOADING` while a replica loads its dataset, `MASTERDOWN`,
+/// `TRYAGAIN`, `CLUSTERDOWN`, and `READONLY` from a primary that was just
+/// demoted. `retry_method()` is the crate's own answer to "would waiting
+/// help", so a kind it learns later is classified without a change here.
 #[must_use]
 pub fn is_unavailable(e: &redis::RedisError) -> bool {
-    e.is_timeout() || e.is_connection_dropped() || e.is_connection_refusal() || e.is_io_error()
+    e.is_timeout()
+        || e.is_connection_dropped()
+        || e.is_connection_refusal()
+        || e.is_io_error()
+        || matches!(
+            e.retry_method(),
+            RetryMethod::WaitAndRetry | RetryMethod::RefreshSlotsAndRetry
+        )
 }
 
 /// For the few commands whose failure a request cannot survive - a lease that
@@ -408,6 +427,11 @@ fn unavailable(e: &redis::RedisError, op: &'static str) {
 fn broken(e: &redis::RedisError, op: &'static str) {
     tracing::error!(db.system = "redis", db.operation = op, error = %e, "cache command failed");
 }
+
+/// A bug in the cached type, such as a map with non-string keys.
+fn unserializable(e: &serde_json::Error) {
+    tracing::error!(db.system = "redis", error = %e, "cache value not serializable, write skipped");
+}
 ```
 
 Wire it up by adding the manager to application state and building the `Cache` beside it. The
@@ -428,6 +452,11 @@ let user = cache
 the database on every retry. `get_or_set` gives both outcomes the same TTL; when the row is likely
 to appear soon, invalidate its key from the code that creates it (below) rather than shortening
 the TTL - that is the same delete-on-write the update path already does.
+
+A negative entry is keyed by whatever id the client asked for, so the client decides how many
+there are. That is harmless on a cache instance that evicts (`allkeys-lru`) and an outage on a
+`noeviction` instance shared with leases and idempotency keys: the entries pile up until every
+write is refused with `OOM`. Negative caching belongs on the instance that evicts.
 
 A stampede is what happens when a popular key expires and every in-flight request loads it at
 once. Three mitigations, in increasing cost:
@@ -568,23 +597,29 @@ fails there while passing locally.
 
 Redis 8.4 added the compare natively: `SetOptions::default().value_comparison(ValueComparison::ifeq(expected))`
 is `SET key v IFEQ expected`, and `conn.del_ex(key, ValueComparison::ifeq(token))` is
-`DELEX key IFEQ token`. Both fail with an unknown-command or syntax error on 7.x, Valkey and most
-managed offerings, so the script stays the default and the native form is an optimisation for a
-fleet known to be on 8.4 or later.
+`DELEX key IFEQ token`. Both are a syntax or unknown-command error on Redis 7.x. Valkey has
+`SET .. IFEQ` from 8.1 but no `DELEX` (its command is `DELIFEQ`, from 9.0, which `del_ex` does not
+send), and a managed service may be either. So the script stays the default and the native form
+is an optimisation for a fleet known to be on Redis 8.4 or later.
 
 ## Degrading, classifying, counting
 
 `RedisError` mixes two unrelated failures. `is_timeout()`, `is_connection_dropped()`,
-`is_connection_refusal()` and `is_io_error()` mean the server is not answering: degrade to a miss,
-count it, and carry on. Anything else - `WRONGTYPE`, `NOSCRIPT` surfacing through a raw `EVALSHA`,
-a `ParsingError` from a bad `FromRedisValue` - is a bug in the code, and `err.code()` names it.
+`is_connection_refusal()` and `is_io_error()` mean the server is not answering. A server that
+answers *not now* belongs with them: `LOADING`, `MASTERDOWN`, `TRYAGAIN`, `CLUSTERDOWN`, and
+`READONLY` from a primary demoted during a failover are replies, so none of the four predicates is
+true for them, and `err.retry_method()` is what recognises them (`WaitAndRetry`, or
+`RefreshSlotsAndRetry` for `READONLY`). Without that arm every failover is logged as a bug and,
+through `required`, answered with a 500. For both groups: degrade to a miss, count it, and carry
+on. Anything else - `WRONGTYPE`, `NOSCRIPT` surfacing through a raw `EVALSHA`, a `ParsingError`
+from a bad `FromRedisValue` - is a bug in the code, and `err.code()` names it.
 
 A cache error reaching the client as a 500 is the failure mode this section exists to prevent, so
 `AppError` gets no `#[from] redis::RedisError`: with one, every `?` on a Redis call in a handler is
 a 500. Cache reads return `Option` and never an error. The few commands a request cannot survive
 without - a lease that must be held, an idempotency claim, a revocation check - go through
 `required(e, "what")` above: `AppError::Unavailable` (503, constant body, the name in the log only)
-when Redis is unreachable, `AppError::Other` (500) for a bug such as `WRONGTYPE`.
+when Redis is unreachable or failing over, `AppError::Other` (500) for a bug such as `WRONGTYPE`.
 
 Metrics worth having: `cache_hits_total`, `cache_misses_total` and `cache_errors_total`. Label them
 by entity if at all (`counter!("cache_hits_total", "entity" => "user")`), never by key, which is
@@ -639,6 +674,7 @@ pub fn blocking_pool(url: &str, longest_block: Duration) -> anyhow::Result<deadp
 | walk keys by pattern | `conn.scan_options::<String>(..)` then `next_item().await` |
 | many commands, one round trip | `redis::pipe().atomic()...query_async(&mut conn)` |
 | run a Lua script | `redis::Script::new(src)` then `.key(..).arg(..).invoke_async(..)` |
-| take a lock | no built-in; `SET NX PX` plus a Lua release (`del_ex` IFEQ on ≥ 8.4) |
+| take a lock | no built-in; `SET NX PX` plus a Lua release (`del_ex` IFEQ on Redis ≥ 8.4 only) |
 | tell a dead server from a bad command | `e.is_connection_refusal()` or `e.is_connection_dropped()` |
+| tell a failover reply from a bad command | `matches!(e.retry_method(), RetryMethod::WaitAndRetry \| RetryMethod::RefreshSlotsAndRetry)` |
 | catch a wrong-type key | `e.code() == Some("WRONGTYPE")` |

@@ -19,7 +19,7 @@ enum: `StringColumn`, `UuidColumn`, `BoolColumn`, `NumericColumn`, `DateTimeLike
 Comparing against the wrong type is a compile error rather than a runtime mismatch, which is the
 whole point of preferring it.
 
-The wrappers implement `Iden` and `IntoSimpleExpr` but **not** `ColumnTrait`, so three APIs still
+The wrappers implement `Iden` and `IntoSimpleExpr` but **not** `ColumnTrait`, so four APIs still
 need the enum:
 
 | Use | Takes |
@@ -40,11 +40,7 @@ makes optional filters a straight `map` with no branching.
 
 ```rust,verify
 use crate::entities::user;
-use sea_orm::{
-    ConnectionTrait, DbErr, EntityTrait, QueryFilter,
-    query::Condition,
-    sea_query::ExprTrait,
-};
+use sea_orm::{ConnectionTrait, DbErr, EntityTrait, QueryFilter, query::Condition};
 use uuid::Uuid;
 
 #[derive(Debug, Default)]
@@ -79,10 +75,12 @@ pub async fn find_users<C: ConnectionTrait>(
 `Condition::all()` is AND, `Condition::any()` is OR, and they nest. `Condition: From<bool>` was
 removed in 2.0, so passing a bare boolean to `add_option` no longer compiles.
 
-Anything the builder cannot express goes through sea-query directly:
+The typed columns' own methods (`eq`, `contains`, `eq_any`, `count`) are inherent and need no
+import. Anything the builder cannot express goes through sea-query directly:
 `Expr::cust_with_values("lower($1) = $2", [..])`, or `.into_query()` to get the raw
-`SelectStatement` for a CTE or window function. Both need `use sea_orm::sea_query::ExprTrait;` in
-scope, which is the cause of most "no method named like found for enum Expr" errors.
+`SelectStatement` for a CTE or window function. Chaining a method onto an `Expr`
+(`Expr::col("name").like(..)`, `user::COLUMN.id.count().gt(0)`) needs `use sea_orm::ExprTrait;`
+in scope, which is the cause of most "no method named like found for enum Expr" errors.
 
 ## Pagination
 
@@ -104,6 +102,8 @@ pub async fn list_users<C: ConnectionTrait>(
     page: u64,
     page_size: u64,
 ) -> Result<PageOfUsers, DbErr> {
+    // `fetch_page` sends `page * page_size` as the OFFSET, and the driver turns that `u64`
+    // into the `i64` Postgres takes with an `unwrap()`: the caller has capped both numbers.
     let paginator = user::Entity::find()
         .order_by_asc(user::COLUMN.created_at)
         // Tiebreaker: OFFSET over a non-total order returns rows twice or not at all.
@@ -132,7 +132,8 @@ pub fn users_after(after: Option<Uuid>) -> Cursor<SelectModel<user::Model>> {
 ```
 
 `PaginatorTrait` also puts `.count(db)` and `.exists(db)` directly on a `Select`. The HTTP shape of
-a page — the query parameters and the response envelope — belongs to `axum-service`.
+a page — the query parameters, the response envelope, and the cap on `offset` that keeps a
+client's number from reaching that `unwrap()` as a panic — belongs to `axum-service`.
 
 ## Projections and aggregates
 
@@ -142,8 +143,8 @@ Select only the columns the caller needs. `DerivePartialModel` already implies `
 ```rust,verify
 use crate::entities::{post, user};
 use sea_orm::{
-    ConnectionTrait, DbErr, DerivePartialModel, EntityTrait, FromQueryResult, QuerySelect,
-    sea_query::ExprTrait,
+    ConnectionTrait, DbErr, DerivePartialModel, EntityTrait, ExprTrait, FromQueryResult,
+    QuerySelect,
 };
 use uuid::Uuid;
 
@@ -200,6 +201,7 @@ The house style is a struct literal with the key `NotSet` and every other column
 the compiler names a forgotten column, and a reviewer sees the whole row at once.
 
 ```rust,verify
+use chrono::{DateTime, Utc};
 use crate::entities::{post, user};
 use sea_orm::{ActiveModelTrait, ActiveValue::{NotSet, Set}, ConnectionTrait, DbErr, EntityTrait};
 use uuid::Uuid;
@@ -208,12 +210,14 @@ pub async fn create_user<C: ConnectionTrait>(
     db: &C,
     email: &str,
     name: &str,
+    now: DateTime<Utc>,
 ) -> Result<user::Model, DbErr> {
     user::ActiveModel {
         id: NotSet,
         email: Set(email.to_owned()),
         name: Set(name.to_owned()),
-        created_at: Set(chrono::Utc::now().into()),
+        // The generated column is `DateTimeWithTimeZone`; `Utc` converts into it.
+        created_at: Set(now.into()),
     }
     .insert(db)
     .await
@@ -243,6 +247,10 @@ pub async fn publish_all<C: ConnectionTrait>(db: &C, user_id: Uuid) -> Result<u6
     Ok(res.rows_affected)
 }
 ```
+
+The time is a parameter: the caller owns the clock (a handler passes `state.clock.now()`), so a
+test can pin every timestamp. A service function that calls `Utc::now()` cannot be pinned from
+outside.
 
 Postgres assigns the key. `DEFAULT uuidv7()` gives every writer, `psql` and backfills included, the
 same time-ordered ids, and `.insert()` reads the row back with `RETURNING`. Assign
@@ -308,7 +316,8 @@ pub async fn bulk_insert<C: ConnectionTrait>(
 ```
 
 An empty iterator is safe in 2.0: `insert_many([])` returns without issuing a statement, and the 1.x
-`on_empty_do_nothing()` is gone. `exec()` yields `last_insert_id`; `exec_with_returning()` yields the
+`on_empty_do_nothing()` is deprecated: it still compiles, with a warning that `-D warnings` turns
+into an error. `exec()` yields `last_insert_id`; `exec_with_returning()` yields the
 rows. `on_conflict_do_nothing_on([..])` returns a `TryInsertResult` with `Inserted`, `Conflicted` and
 `Empty` variants; the bare `on_conflict_do_nothing()` builds its conflict target from the primary key,
 so on a duplicate email it raises 23505 instead of reporting `Conflicted`.
@@ -322,6 +331,7 @@ row that is not there — and both are handled *after* the statement, because a 
 loses every race and the constraint does not:
 
 ```rust,verify
+use chrono::{DateTime, Utc};
 use crate::entities::{post, user};
 use crate::error::AppError;
 use sea_orm::{ActiveModelTrait, ActiveValue::{NotSet, Set}, ConnectionTrait, DbErr, SqlErr};
@@ -338,27 +348,23 @@ pub fn is_missing_reference(err: &DbErr) -> bool {
     matches!(err.sql_err(), Some(SqlErr::ForeignKeyConstraintViolation(_)))
 }
 
+/// A taken email goes up as the bare `DbErr`: the `Db` arm of `AppError` already
+/// answers 23505 with a constant 409.
 pub async fn create_user<C: ConnectionTrait>(
     db: &C,
     email: &str,
     name: &str,
+    now: DateTime<Utc>,
 ) -> Result<user::Model, AppError> {
-    user::ActiveModel {
+    let created = user::ActiveModel {
         id: NotSet,
         email: Set(email.to_owned()),
         name: Set(name.to_owned()),
-        created_at: Set(chrono::Utc::now().into()),
+        created_at: Set(now.into()),
     }
     .insert(db)
-    .await
-    .map_err(|e| {
-        if is_duplicate(&e) {
-            // A constant, not the email: a 409 is logged at ERROR and an address is PII.
-            AppError::Conflict("email already registered".to_owned())
-        } else {
-            e.into()
-        }
-    })
+    .await?;
+    Ok(created)
 }
 
 /// For `POST /users/{user_id}/posts`: the parent id comes from the path, so a
@@ -367,13 +373,14 @@ pub async fn create_post<C: ConnectionTrait>(
     db: &C,
     user_id: Uuid,
     title: &str,
+    now: DateTime<Utc>,
 ) -> Result<post::Model, AppError> {
     post::ActiveModel {
         id: NotSet,
         user_id: Set(user_id),
         title: Set(title.to_owned()),
         published: Set(false),
-        created_at: Set(chrono::Utc::now().into()),
+        created_at: Set(now.into()),
     }
     .insert(db)
     .await
@@ -387,21 +394,27 @@ pub async fn create_post<C: ConnectionTrait>(
 }
 ```
 
-The service picks the domain outcome. A duplicate is `Conflict`. For 23503, where the parent id
-came from decides:
+A bare `?` is the default, because `axum-service`'s `Db` arm already answers what a constraint
+means to a client: 23505 is a 409 with the constant body `"conflict"`, 23503 a 422 with
+`"invalid reference"`, each logged once at WARN with the constraint's name. The same arm answers
+503 when the statement found no connection: `DbErr::ConnectionAcquire`, the pool exhausted or
+closed, and `DbErr::Conn`, Postgres unreachable. A service function passes all of these up and
+classifies only where the default is wrong for its caller:
 
-- **From the path** (`POST /users/{user_id}/posts`): the URL names a parent that is not there, so
-  the service classifies the violation to `NotFound`, as `create_post` does.
-- **From the body** (`POST /posts` with a `user_id` field): the service does not classify it. The
-  bare `DbErr` goes up and reaches `axum-service`'s 23503 arm, a 422 with the constant body
-  `"invalid reference"`.
+- **23503, parent id from the path** (`POST /users/{user_id}/posts`): the URL names a parent that
+  is not there, so the service classifies the violation to `NotFound`, as `create_post` does.
+- **23503, parent id from the body** (`POST /posts` with a `user_id` field): the service does not
+  classify it. The bare `DbErr` goes up and reaches the 23503 arm, the 422.
+- **23505 where a duplicate is not a conflict**: a retry or a redelivery that an earlier attempt
+  already satisfied, which is done rather than failed
+  ([Idempotency and the outbox](#idempotency-and-the-outbox)). `is_duplicate` is the test.
 
-Which HTTP status each `AppError` variant renders as, the 23503 arm, and the default the `Db` arm
-applies to any other bare `DbErr` are `axum-service`'s.
+A function that does build `AppError::Conflict(..)` passes a constant: the string is logged with
+the 409, and an address is PII. Which HTTP status each `AppError` variant renders as, the 23503
+arm, and the default the `Db` arm applies to any other bare `DbErr` are `axum-service`'s.
 
-Other variants worth handling by name: `DbErr::RecordNotFound`, `RecordNotInserted`,
-`RecordNotUpdated`, and `ConnectionAcquire(ConnAcquireErr::Timeout)`, which means the pool is
-exhausted rather than that the database is down.
+Other variants worth handling by name: `DbErr::RecordNotFound`, `RecordNotInserted` and
+`RecordNotUpdated`.
 
 ## Raw SQL
 
@@ -491,7 +504,9 @@ The closure commits on `Ok` and rolls back on `Err`. `Box::pin` is mandatory: th
 pinned boxed future. The error type must be `Display + Debug + Send`.
 
 When the work does not fit a closure, use the explicit form: `db.begin()`, then `commit()` or
-`rollback()` — both live on `TransactionSession`, which has to be in scope. `begin_with_config`
+`rollback()`. On a `DatabaseTransaction` both are inherent and need no import; code generic over
+the connection (`C: TransactionTrait`, whose `begin()` returns `C::Transaction`) reaches them
+through `TransactionSession`, which then has to be in scope. `begin_with_config`
 takes an isolation level and an access mode. A nested `begin()` opens a savepoint, not a second
 transaction.
 
@@ -503,9 +518,12 @@ needs `QueryOrder`, `.paginate` and `.count` need `PaginatorTrait`.
 
 `pg_advisory_xact_lock(key)` serialises work across every replica that names the same key, and
 Postgres releases it with the transaction — commit, rollback or a dropped connection — so there is
-no unlock path to get wrong. The key is one `bigint`; `hashtext(..)::bigint` folds a string into
-it (a collision over-serialises the blocking form and makes an unrelated try-lock skip), or derive
-a stable `i64` in code.
+no unlock path to get wrong. The key is one `bigint`, and the locks are per database: give each
+job an `i64` constant, all declared in one module, so that no two jobs, and no job and the
+scaffold's `MIGRATION_LOCK_KEY`, share a number by accident. A lock per string (one per tenant,
+say) has to hash it. `hashtext({key})` does that on the server, but it is an undocumented
+internal function with a 32-bit result: among a hundred thousand keys two probably collide, and
+a collision over-serialises the blocking form and makes an unrelated try-lock skip.
 
 The blocking form is a queue, not a gate: each waiter runs its own work once the holder commits.
 That is right for "never two at once" and wrong for "once": a nightly job guarded by it runs once
@@ -517,29 +535,32 @@ transaction, because a replica whose timer fires after the leader committed find
 use chrono::NaiveDate;
 use sea_orm::{ConnectionTrait, DbErr, TransactionSession, TransactionTrait, raw_sql};
 
+/// Every advisory lock key the service takes, in one place.
+pub const REBUILD_REPORT_LOCK: i64 = 7_203_001;
+
 /// Blocks until no other transaction holds `key`, then holds it until `txn` ends.
 /// The `TransactionSession` bound rejects the pool: there the lock would bind to
 /// whichever connection ran the statement and vanish with its implicit commit.
-pub async fn advisory_xact_lock<T>(txn: &T, key: &str) -> Result<(), DbErr>
+pub async fn advisory_xact_lock<T>(txn: &T, key: i64) -> Result<(), DbErr>
 where
     T: ConnectionTrait + TransactionSession,
 {
     txn.execute_raw(raw_sql!(
         Postgres,
-        r#"SELECT pg_advisory_xact_lock(hashtext({key})::bigint)"#
+        r#"SELECT pg_advisory_xact_lock({key})"#
     ))
     .await?;
     Ok(())
 }
 
 /// `false` at once while another transaction holds `key`; `true` holds it until `txn` ends.
-pub async fn try_advisory_xact_lock<T>(txn: &T, key: &str) -> Result<bool, DbErr>
+pub async fn try_advisory_xact_lock<T>(txn: &T, key: i64) -> Result<bool, DbErr>
 where
     T: ConnectionTrait + TransactionSession,
 {
     txn.query_one_raw(raw_sql!(
         Postgres,
-        r#"SELECT pg_try_advisory_xact_lock(hashtext({key})::bigint)"#
+        r#"SELECT pg_try_advisory_xact_lock({key})"#
     ))
     .await?
     .ok_or_else(|| DbErr::RecordNotFound("lock row".to_owned()))?
@@ -556,7 +577,7 @@ pub async fn rebuild_report<C: TransactionTrait>(
 ) -> Result<bool, DbErr> {
     let job = "rebuild_report";
     let txn = db.begin().await?;
-    if !try_advisory_xact_lock(&txn, job).await? {
+    if !try_advisory_xact_lock(&txn, REBUILD_REPORT_LOCK).await? {
         txn.rollback().await?;
         return Ok(false);
     }
@@ -586,16 +607,16 @@ after a success no-ops. The same try-lock is how a test proves
 the lock without a race: the second transaction cannot take it until the first commits.
 
 ```rust,verify,test
-use sea_orm::{
-    ConnectionTrait, DatabaseTransaction, DbErr, TransactionSession, TransactionTrait, raw_sql,
-};
+use sea_orm::{ConnectionTrait, DatabaseTransaction, DbErr, TransactionTrait, raw_sql};
 
 use crate::common;
 
-async fn try_lock(txn: &DatabaseTransaction, key: &str) -> Result<bool, DbErr> {
+const REBUILD_REPORT_LOCK: i64 = 7_203_001;
+
+async fn try_lock(txn: &DatabaseTransaction, key: i64) -> Result<bool, DbErr> {
     txn.query_one_raw(raw_sql!(
         Postgres,
-        r#"SELECT pg_try_advisory_xact_lock(hashtext({key})::bigint)"#
+        r#"SELECT pg_try_advisory_xact_lock({key})"#
     ))
     .await?
     .ok_or_else(|| DbErr::RecordNotFound("lock row".to_owned()))?
@@ -609,15 +630,15 @@ async fn second_transaction_waits_for_the_first() {
     let first = db.begin().await.unwrap();
     let second = db.begin().await.unwrap();
 
-    assert!(try_lock(&first, "rebuild_report").await.unwrap());
+    assert!(try_lock(&first, REBUILD_REPORT_LOCK).await.unwrap());
     assert!(
-        !try_lock(&second, "rebuild_report").await.unwrap(),
+        !try_lock(&second, REBUILD_REPORT_LOCK).await.unwrap(),
         "held by `first`"
     );
 
     first.commit().await.unwrap();
     assert!(
-        try_lock(&second, "rebuild_report").await.unwrap(),
+        try_lock(&second, REBUILD_REPORT_LOCK).await.unwrap(),
         "released with the commit"
     );
     second.rollback().await.unwrap();
@@ -627,8 +648,9 @@ async fn second_transaction_waits_for_the_first() {
 An advisory lock fits work whose effect is a write to this Postgres database; when the effect is
 anything else, `rust-redis` covers the lease that replaces it. In the database case the lock also
 wins on mechanics: the release
-is transactional for free, there is no lease TTL to size, and a crashed holder releases on
-reconnect.
+is transactional for free, there is no lease TTL to size, and a holder that crashes releases the
+lock when Postgres sees its session end: at once when the process dies and its socket closes,
+and only after the server's TCP keepalive gives up when the host vanishes without closing it.
 
 ## Idempotency and the outbox
 
@@ -652,6 +674,7 @@ Postgres has aborted the transaction: roll it back and treat the attempt as done
 new row's own key, a uuid the producer minted, is already the idempotency key and needs no marker.
 
 ```rust,verify
+use chrono::{DateTime, Utc};
 use crate::entities::post;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::{NotSet, Set}, ConnectionTrait, DbErr, TransactionSession,
@@ -683,6 +706,7 @@ pub async fn handle_draft_requested<C: TransactionTrait>(
     event_id: Uuid,
     user_id: Uuid,
     title: &str,
+    now: DateTime<Utc>,
 ) -> Result<(), DbErr> {
     let txn = db.begin().await?;
     if !first_delivery(&txn, "drafts", event_id).await? {
@@ -693,7 +717,7 @@ pub async fn handle_draft_requested<C: TransactionTrait>(
         user_id: Set(user_id),
         title: Set(title.to_owned()),
         published: Set(false),
-        created_at: Set(chrono::Utc::now().into()),
+        created_at: Set(now.into()),
     }
     .insert(&txn)
     .await?;

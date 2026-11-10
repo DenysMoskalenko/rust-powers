@@ -8,11 +8,19 @@
 - [Idempotency keys](#idempotency-keys)
 - [Token blacklist](#token-blacklist)
 
-Everything in this file is coordination state, not cache: a lease key that gets evicted means
-two holders, an evicted idempotency marker means a duplicate payment, an evicted limiter bucket
-means a reset limit. It lives on a Redis with `maxmemory-policy noeviction` (the server default),
-or on its own instance; `allkeys-lru` is for a Redis that only caches. When a write is refused
-with `OOM`, that is an outage to surface, not a miss to swallow.
+Leases, idempotency keys and revoked tokens are coordination state, not cache: an evicted lease
+key means two holders, an evicted idempotency marker a duplicate payment, an evicted revocation a
+stolen token that works again. They live on a Redis with `maxmemory-policy noeviction` (the
+server default). Every other policy evicts them: all of these keys carry TTLs, so the
+`volatile-*` policies take them as readily as `allkeys-*`, and `volatile-lru` is what most managed
+services ship as their default. When a write is refused with `OOM`, that is an outage to surface,
+not a miss to swallow.
+
+Limiter buckets are the exception in this file. Their number is the client's to choose (one per
+address, per key, per route), so on a `noeviction` instance a caller who rotates addresses fills
+memory until every lease and idempotency write fails with `OOM`. They go on the cache instance
+that evicts, where an evicted bucket is one caller's limit reset early. A limiter that must not
+reset (the fail-closed kind below) is coordination state again, and is sized for it.
 
 ## A lease is not a mutex
 
@@ -28,8 +36,9 @@ be idempotent.
 Releasing with a plain `DEL` is the classic bug: if the holder stalled past the TTL, the key now
 belongs to somebody else and `DEL` frees *their* lock. Compare the token and delete in one Lua
 script, where the server's single-threaded execution guarantees nothing slips in between. (Redis
-8.4 has this natively as `del_ex(key, ValueComparison::ifeq(token))` - `DELEX key IFEQ token`;
-the script is what runs on 7.x, Valkey and managed offerings.)
+8.4 has this natively as `del_ex(key, ValueComparison::ifeq(token))` - `DELEX key IFEQ token`.
+Redis 7.x and Valkey do not have `DELEX`, and a managed service may be either, so the script is
+what runs everywhere.)
 
 ## The lease
 
@@ -64,6 +73,8 @@ static RENEW: LazyLock<redis::Script> = LazyLock::new(|| {
           end",
     )
 });
+
+const LEASE_TTL: Duration = Duration::from_mins(10);
 
 #[derive(Debug)]
 pub struct Lease {
@@ -146,21 +157,18 @@ impl Lease {
 /// Runs `body` only if the lease is free, and releases it afterwards whatever
 /// `body` returned: a failed run gives the lease up so the next scheduled run,
 /// on any replica, retries — holding it until the TTL would only delay that.
-/// `Ok(None)` means somebody else is already doing the work.
-pub async fn with_lease<T, F, Fut>(
+/// `Ok(None)` means somebody else is already doing the work. `body` is handed
+/// the lease so that work longer than one TTL can `renew` it between steps.
+pub async fn with_lease<T>(
     conn: &ConnectionManager,
     key: impl Into<String>,
     ttl: Duration,
-    body: F,
-) -> Result<Option<T>, redis::RedisError>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = T>,
-{
-    let Some(lease) = acquire(conn, key, ttl).await? else {
+    body: impl AsyncFnOnce(&mut Lease) -> T,
+) -> Result<Option<T>, redis::RedisError> {
+    let Some(mut lease) = acquire(conn, key, ttl).await? else {
         return Ok(None);
     };
-    let out = body().await;
+    let out = body(&mut lease).await;
     lease.release_or_warn().await;
     Ok(Some(out))
 }
@@ -170,7 +178,7 @@ where
 /// `enabled` kill switch in `RedisSettings` is the cache's; a lease ignores it,
 /// because "disabled" would mean every replica runs the job.
 pub async fn nightly_reindex(conn: &ConnectionManager) {
-    let lease = with_lease(conn, "app:v1:lock:reindex", Duration::from_mins(10), reindex).await;
+    let lease = with_lease(conn, "app:v1:lock:reindex", LEASE_TTL, reindex).await;
     let reason = match lease {
         Ok(Some(result)) => return report(result),
         Ok(None) => "another replica holds the lease".to_owned(),
@@ -191,15 +199,21 @@ fn report(result: anyhow::Result<()>) {
     }
 }
 
-/// The work itself; a stand-in here.
-async fn reindex() -> anyhow::Result<()> {
+/// The work itself, in bounded steps; a stand-in here. Each step is shorter
+/// than `LEASE_TTL` and renews before the next one. `false` from `renew` means
+/// the lease expired and another replica may hold it: stop, do not carry on.
+async fn reindex(lease: &mut Lease) -> anyhow::Result<()> {
+    for _step in 0..3 {
+        anyhow::ensure!(lease.renew(LEASE_TTL).await?, "lease lost mid-run");
+    }
     Ok(())
 }
 ```
 
-Size the TTL above the worst-case runtime of the body, not the average, and call `renew` from a
-long job rather than taking a TTL of an hour: a lease held by a crashed process is unavailable
-until it expires.
+Size the TTL above the worst-case runtime of one step, not the average, and `renew` between steps
+rather than taking a TTL of an hour: a lease held by a crashed process is unavailable until it
+expires. `with_lease` hands the body the lease for that; a body that never renews must finish
+inside the one TTL.
 
 Who called decides what an acquire failure means. A job skips the run — contention is the normal
 case with several replicas, and an unreachable Redis is one missed run, not an outage — and the
@@ -218,11 +232,24 @@ service has no `cache.rs`, so give them their own file and let every Redis modul
 
 ```rust,verify
 //! `src/redis_errors.rs` - shared by `cache.rs`, `lock.rs`, `ratelimit.rs`, `idempotency.rs`.
+use redis::RetryMethod;
+
 use crate::error::AppError;
 
+/// Not answering, or answering "not now": `LOADING`, `MASTERDOWN`, `TRYAGAIN`,
+/// `CLUSTERDOWN`, and `READONLY` from a primary demoted in a failover. Those
+/// are replies, so the four predicates miss them; `retry_method()` is the
+/// crate's own classification of them.
 #[must_use]
 pub fn is_unavailable(e: &redis::RedisError) -> bool {
-    e.is_timeout() || e.is_connection_dropped() || e.is_connection_refusal() || e.is_io_error()
+    e.is_timeout()
+        || e.is_connection_dropped()
+        || e.is_connection_refusal()
+        || e.is_io_error()
+        || matches!(
+            e.retry_method(),
+            RetryMethod::WaitAndRetry | RetryMethod::RefreshSlotsAndRetry
+        )
 }
 
 /// For the few commands whose failure a request cannot survive - a lease that
@@ -309,7 +336,9 @@ pub async fn fixed_window(
 /// Trim, count, maybe add - all inside one script, which is what makes this
 /// read-modify-write safe without `WATCH`. The clock is the server's (`TIME`),
 /// so replicas with skewed clocks share one window; the refusal reports when the
-/// oldest member leaves the window rather than a whole window.
+/// oldest member leaves the window rather than a whole window. A limit of zero
+/// refuses with an empty set, so there is no oldest member to read: without
+/// that branch the script fails on `nil` arithmetic and the layer fails open.
 static SLIDING: LazyLock<redis::Script> = LazyLock::new(|| {
     redis::Script::new(
         r"local t      = redis.call('TIME')
@@ -324,6 +353,9 @@ static SLIDING: LazyLock<redis::Script> = LazyLock::new(|| {
               return {limit - used - 1, 0}
           end
           local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+          if not oldest[2] then
+              return {-1, window}
+          end
           return {-1, oldest[2] + window - now}",
     )
 });
@@ -559,16 +591,22 @@ comment, because the code looks the same either way.
 
 For a create, the idempotency key is the unique index: the duplicate insert fails with 23505 and
 `AppError` already maps that to 409 - see `axum-service`. What follows is for a side effect with
-no natural key (a payment, an outbound call), and it implements `axum-service`'s idempotency
-contract exactly: `Idempotency-Key` header; fingerprint = hash of method,
-path and body; same key and fingerprint replays the stored status and body; same key, different
-fingerprint is 422; same key while the first attempt runs is 409.
+no natural key (a payment, an outbound call). The HTTP contract is `axum-service`'s: the
+`Idempotency-Key` header, the request fingerprint, and what a replay, a reused key and a retry
+during the first attempt answer. This file is the storage behind it, and `Claim` below has one
+variant per answer.
 
 The claim and the check have to be one command, or two concurrent retries both believe they are
 first. `SET key marker NX EX ttl` is that command, with a *short* TTL: a claim never followed by a
 `store` (the pod restarted mid-request) would otherwise block the key for the whole replay window.
 That short TTL is a trade, not a free win - the ceiling below. The result then gets its own 24 h
 `EX`. Store the fingerprint and the response, never the body: it is user data and can be large.
+
+Short means the request timeout plus a margin: 45 s over the scaffold's 30 s `REQUEST_TIMEOUT`.
+At the timeout the handler is cancelled in the middle of the effect, the client is answered 503
+and retries at once. A claim that ended in that same instant would hand the retry a fresh claim
+while the provider is still finishing the first call; with the margin the retry is answered 409
+and comes back later.
 
 What this buys and what it does not. Redis dedups concurrent retries and replays the stored
 response; it does not make the effect atomic with the record of it. A crash - or a handler slower
@@ -578,8 +616,15 @@ an outbound call that forwards the same key and is deduplicated by the provider,
 that is safe to repeat. When the effect is a database write, do not use this at all - write the
 idempotency row in the same transaction as the write, which is `sea-orm-postgres`'s. And `store`
 is an unconditional `SETEX`: a stalled first attempt can overwrite a later attempt's entry,
-harmless while both carry the same provider result, and the reason `IN_FLIGHT_TTL` is never
-shorter than the request timeout.
+harmless while both carry the same provider result, and one more reason `IN_FLIGHT_TTL` stays
+above the request timeout.
+
+Two failures have their own rule, and `complete` below applies both. An effect that fails gives
+the claim back (`release`): nothing is in flight any more, and without the release every retry is
+answered 409 until the TTL although no attempt is running. A `store` that fails after the effect
+succeeded is logged and counted, and the request still answers with the success: a 503 there
+reports a completed charge as a failure. The claim then expires by itself and a later retry
+re-runs the effect, which the provider deduplicates.
 
 ```toml
 sha2 = "0.11"   # add when needed; already in the lock file through sqlx-postgres, so nothing new compiles
@@ -588,18 +633,28 @@ sha2 = "0.11"   # add when needed; already in the lock file through sqlx-postgre
 ```rust,verify
 //! src/idempotency.rs - storage for the `Idempotency-Key` contract.
 
-use std::{fmt::Write as _, time::Duration};
+use std::{fmt::Write as _, sync::LazyLock, time::Duration};
 
+use axum::{
+    Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions, aio::ConnectionManager};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use validator::{ValidationError, ValidationErrors};
 
-/// How long a claim without a `store` blocks retries; never below the request
-/// timeout, or a slow first attempt is re-run while it is still running. Both
-/// ends cost something: the 24 h result TTL would make one crash mid-request
-/// block the key for a day, and this short TTL instead lets the retry after
-/// that crash re-run the effect - which is why the effect must survive that.
-pub const IN_FLIGHT_TTL: Duration = Duration::from_secs(30);
+use crate::config::REQUEST_TIMEOUT;
+use crate::error::AppError;
+
+/// How long a claim without a `store` blocks retries: the request timeout plus
+/// a margin, so the retry that follows a timed-out attempt is answered 409
+/// instead of starting a second run beside it. Both ends cost something: the
+/// 24 h result TTL would make one crash mid-request block the key for a day,
+/// and this short TTL instead lets the retry after that crash re-run the
+/// effect - which is why the effect must survive that.
+pub const IN_FLIGHT_TTL: Duration = REQUEST_TIMEOUT.saturating_add(Duration::from_secs(15));
 /// The replay window. 24 hours is the usual contract.
 pub const RESULT_TTL: Duration = Duration::from_hours(24);
 
@@ -629,13 +684,14 @@ pub enum Claim {
     Mismatch,
 }
 
-/// What makes "the same request" checkable without storing the body. SHA-256
-/// rather than `DefaultHasher`, which is not stable across toolchains, and a
-/// replay may arrive after a deploy.
+/// What makes "the same request" checkable without storing the body. `target`
+/// is the path with its query string: `?currency=eur` is a different request
+/// from `?currency=usd`. SHA-256 rather than `DefaultHasher`, which is not
+/// stable across toolchains, and a replay may arrive after a deploy.
 #[must_use]
-pub fn fingerprint(method: &str, path: &str, body: &[u8]) -> String {
+pub fn fingerprint(method: &str, target: &str, body: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    for part in [method.as_bytes(), b"\n", path.as_bytes(), b"\n", body] {
+    for part in [method.as_bytes(), b"\n", target.as_bytes(), b"\n", body] {
         hasher.update(part);
     }
     let mut hex = String::with_capacity(64);
@@ -653,15 +709,11 @@ pub async fn claim(
     fingerprint: &str,
 ) -> Result<Claim, redis::RedisError> {
     let mut conn = conn.clone();
-    let marker = encode(&Entry {
-        fingerprint: fingerprint.to_owned(),
-        response: None,
-    })?;
     let options = SetOptions::default()
         .conditional_set(ExistenceCheck::NX)
         .with_expiration(SetExpiry::EX(IN_FLIGHT_TTL.as_secs()));
     if conn
-        .set_options::<_, _, Option<String>>(key, marker, options)
+        .set_options::<_, _, Option<String>>(key, marker(fingerprint)?, options)
         .await?
         .is_some()
     {
@@ -699,6 +751,84 @@ pub async fn store(
         .await
 }
 
+/// Deletes the key only while it still holds this request's in-flight marker:
+/// a stored response, or another request's claim, is left alone.
+static RELEASE: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r"if redis.call('GET', KEYS[1]) == ARGV[1] then
+              return redis.call('DEL', KEYS[1])
+          end
+          return 0",
+    )
+});
+
+/// Give the claim back after a failed effect. Best effort: when Redis cannot
+/// be reached the claim expires by itself after `IN_FLIGHT_TTL`.
+#[tracing::instrument(skip_all, fields(db.system = "redis", db.operation = "EVALSHA"))]
+pub async fn release(conn: &ConnectionManager, key: &str, fingerprint: &str) {
+    let Ok(marker) = marker(fingerprint) else {
+        return;
+    };
+    let mut conn = conn.clone();
+    let released: Result<i64, _> = RELEASE.key(key).arg(marker).invoke_async(&mut conn).await;
+    if let Err(e) = released {
+        tracing::warn!(error = %e, "idempotency claim not released; it expires by itself");
+    }
+}
+
+/// What an idempotent endpoint does with its claim. `effect` runs for a fresh
+/// claim only and returns the response to remember.
+pub async fn complete(
+    conn: &ConnectionManager,
+    key: &str,
+    fingerprint: &str,
+    claim: Claim,
+    effect: impl AsyncFnOnce() -> Result<StoredResponse, AppError>,
+) -> Result<Response, AppError> {
+    match claim {
+        Claim::Fresh => {}
+        Claim::Replay(stored) => return Ok(reply(stored)),
+        Claim::InFlight => return Err(AppError::Conflict("request still in flight".to_owned())),
+        Claim::Mismatch => {
+            let mut errors = ValidationErrors::new();
+            errors.add("idempotency-key", ValidationError::new("reused for a different request"));
+            return Err(errors.into()); // 422
+        }
+    }
+    let stored = match effect().await {
+        Ok(stored) => stored,
+        Err(err) => {
+            release(conn, key, fingerprint).await;
+            return Err(err);
+        }
+    };
+    // The effect happened: a failed `store` is not allowed to report it as a
+    // failure. The claim expires and a retry re-runs the effect.
+    if let Err(e) = store(conn, key, fingerprint, stored.clone()).await {
+        not_stored(&e);
+    }
+    Ok(reply(stored))
+}
+
+fn not_stored(e: &redis::RedisError) {
+    metrics::counter!("idempotency_store_errors_total").increment(1);
+    tracing::error!(error = %e, "idempotency result not stored");
+}
+
+fn reply(stored: StoredResponse) -> Response {
+    let status = StatusCode::from_u16(stored.status).unwrap_or(StatusCode::OK);
+    (status, Json(stored.body)).into_response()
+}
+
+/// What `claim` writes and `release` compares: the same fingerprint always
+/// encodes to the same string.
+fn marker(fingerprint: &str) -> Result<String, redis::RedisError> {
+    encode(&Entry {
+        fingerprint: fingerprint.to_owned(),
+        response: None,
+    })
+}
+
 fn encode(entry: &Entry) -> Result<String, redis::RedisError> {
     serde_json::to_string(entry).map_err(|e| parse_error(&e))
 }
@@ -709,9 +839,9 @@ fn parse_error(e: &serde_json::Error) -> redis::RedisError {
 ```
 
 The handler side, with the key scoped to the caller so one client's `Idempotency-Key: 1` cannot
-collide with another's, and every storage error mapped through `required` (`cache::required`, or
-`redis_errors::required` in a service without a cache module) because a request that promised
-idempotency cannot proceed without it:
+collide with another's. The claim's error is mapped through `required` (`cache::required`, or
+`redis_errors::required` in a service without a cache module), because a request that promised
+idempotency cannot start without it; `complete` owns every outcome after that:
 
 ```rust
 let header = headers
@@ -719,33 +849,20 @@ let header = headers
     .and_then(|v| v.to_str().ok())
     .ok_or_else(|| AppError::BadRequest("Idempotency-Key header is required".to_owned()))?;
 let key = format!("app:v1:idem:{}:{header}", user.0.sub);
-let fingerprint = idempotency::fingerprint(method.as_str(), uri.path(), &body);
-match idempotency::claim(&state.redis, &key, &fingerprint)
-    .await
-    .map_err(|e| cache::required(e, "idempotency store"))?
-{
-    Claim::Fresh => {}
-    Claim::Replay(stored) => {
-        let status = StatusCode::from_u16(stored.status).unwrap_or(StatusCode::OK);
-        return Ok((status, Json(stored.body)).into_response());
-    }
-    Claim::InFlight => return Err(AppError::Conflict("request still in flight".to_owned())),
-    Claim::Mismatch => {
-        let mut errors = ValidationErrors::new();
-        errors.add("idempotency-key", ValidationError::new("reused for a different request"));
-        return Err(errors.into()); // 422
-    }
-}
-// The effect forwards the same `header` to the provider as *its* idempotency
-// key, so the provider collapses a re-run after a lost claim into one charge.
-// Redis only keeps concurrent retries out and replays the answer.
-let created = state.payments.charge(&input, header).await?;
-let body = serde_json::to_value(&created).map_err(anyhow::Error::from)?;
-let stored = StoredResponse { status: 201, body };
-idempotency::store(&state.redis, &key, &fingerprint, stored.clone())
+let target = uri.path_and_query().map_or(uri.path(), |target| target.as_str());
+let fingerprint = idempotency::fingerprint(method.as_str(), target, &body);
+let claim = idempotency::claim(&state.redis, &key, &fingerprint)
     .await
     .map_err(|e| cache::required(e, "idempotency store"))?;
-Ok((StatusCode::CREATED, Json(stored.body)).into_response())
+idempotency::complete(&state.redis, &key, &fingerprint, claim, async || {
+    // The effect forwards the same `header` to the provider as *its* idempotency
+    // key, so the provider collapses a re-run after a lost claim into one charge.
+    // Redis only keeps concurrent retries out and replays the answer.
+    let created = state.payments.charge(&input, header).await?;
+    let body = serde_json::to_value(&created).map_err(anyhow::Error::from)?;
+    Ok(StoredResponse { status: 201, body })
+})
+.await
 ```
 
 ## Token blacklist

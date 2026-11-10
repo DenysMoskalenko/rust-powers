@@ -2,7 +2,7 @@
 name: rust-code-style
 description: "Use when writing or reviewing Rust for an axum or tokio backend service — ownership and cloning, thiserror versus anyhow, no-panic rules, newtypes, derive_more and strum, async discipline, module layout, dependency injection. Also for E0502, E0499, a clone added to satisfy the borrow checker, future cannot be sent between threads safely, or a clippy finding in code such as ptr_arg or needless_pass_by_value. Not for lint configuration (rust-tooling), framework patterns (axum-service), or tests (rust-testing)."
 metadata:
-  version: "0.2.2"
+  version: "0.3.0"
 ---
 
 # Rust Code Style
@@ -16,7 +16,7 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
 - Never `.clone()` to silence the borrow checker; end the borrow with a smaller scope, `&` instead of `&mut`, or ownership in the signature.
 - No `unwrap()` or `expect()` outside tests: return the error with context, or, where failure is impossible, put `#[expect(clippy::expect_used, reason = "why it cannot fail")]` on the item.
 - A `thiserror` enum per domain module with matched-on variants or more than one failure mode; `anyhow` for errors only logged; production code never returns `Box<dyn Error>` or `Result<T, String>`, which lose the source chain.
-- Never block the runtime: `spawn_blocking` for sync or CPU-bound work past about 100 microseconds.
+- Never block the runtime: `spawn_blocking` for sync or CPU-bound work past about 100 microseconds, CPU-heavy work behind a core-sized `Semaphore` (the blocking pool grows to 512 threads).
 - No trait with a single implementation; the only injected traits are for side effects a test cannot exercise (time, email, payments, an LLM).
 
 ## References
@@ -54,7 +54,7 @@ Lock inside a non-async method so the guard cannot reach an `.await`, and settle
 
 ## Errors
 
-A single-variant wrapper is not worth an enum. Domain errors live in the module that raises them and reach `AppError` through `#[from]`; every variant names the concrete thing that failed, with ids, or is `#[error(transparent)]`. Add `anyhow` context once per meaningful operation, not at every `?`. Log an error only where the response is decided or the error is swallowed. For status mapping see `axum-service`.
+A single-variant wrapper is not worth an enum. Domain errors live in the module that raises them and reach `AppError` through a hand-written `impl From` onto existing variants (`#[from]` needs a new one); every variant names the concrete thing that failed, with ids, or is `#[error(transparent)]`. Add `anyhow` context once per meaningful operation, not at every `?`. Log an error only where the response is decided or the error is swallowed. For status mapping see `axum-service`.
 
 ## No Panics in Production Paths
 
@@ -77,9 +77,9 @@ Derive order (*house*): `Debug, Clone, Copy, PartialEq, Eq, Hash, Default`, then
 
 ## Async Discipline
 
-`tokio::fs` over `std::fs`; static data such as a template is `include_str!` or `LazyLock` once, never a read per request. `spawn_blocking` for password hashing, image work, any sync client; such a task cannot be aborted, so a loop that never ends gets `std::thread::spawn`.
+`tokio::fs` over `std::fs`; static data such as a template is `include_str!` or `LazyLock` once, never a read per request. `spawn_blocking` for any sync client, and with a permit (`references/async-patterns.md`) for password hashing and image work; such a task cannot be aborted, so a loop that never ends gets `std::thread::spawn`.
 
-Native `async fn` in traits, but a `pub` trait writes the method out as `fn send(&self, ...) -> impl Future<Output = T> + Send;`: rustc's `async_fn_in_trait` fires on the sugar there, because the returned future promises no `Send` bound. `#[async_trait]` only when the trait is stored as `dyn`. An `async fn` with no `.await` is sync (*lint* `unused_async`). Drop a `JoinHandle` only for fire-and-forget work that logs its own failure inside the task; otherwise the `JoinError` and the panic go with it. Before a `select!`, read `references/async-patterns.md`: a branch that is not cancel-safe loses data when another wins.
+Native `async fn` in traits, but a `pub` trait writes the method out as `fn send(&self, ...) -> impl Future<Output = T> + Send;`: rustc's `async_fn_in_trait` fires on the sugar there, because the returned future promises no `Send` bound. `#[async_trait]` only when the trait is stored as `dyn`. An `async fn` with no `.await` is sync (*lint* `unused_async`). Drop a `JoinHandle` only for fire-and-forget work that logs its own failure inside the task; otherwise nothing logs its `JoinError`.
 
 ## Control Flow, Iterators and Numbers
 
@@ -99,7 +99,7 @@ Iterators over index loops; past four chained adaptors, a `for` loop (*house*).
 
 `main.rs` is thin: everything testable lives in `lib.rs` and below, because integration tests can only import the lib target. For the service tree and the one-ORM-statement-per-handler rule see `axum-service`.
 
-`foo.rs` beside `foo/` for modules you write by hand, never mixed with `mod.rs` at one level (*house*). `mod.rs` where a generator or a convention fixes it: `tests/common/` beside one test binary per file (cargo), generated `src/entities/` (sea-orm-cli), `src/api/` (*house*). No `utils.rs`, `helpers.rs` or `types.rs`, and no crate-wide prelude (*house*): a `prelude::*` makes every file's dependencies invisible. Imports in three blocks — std, external crates, then `crate` (*house*; rustfmt does not enforce it).
+`foo.rs` beside `foo/` for modules you write by hand, never mixed with `mod.rs` at one level (*house*). `mod.rs` where a generator or a convention fixes it: generated `src/entities/` (sea-orm-cli), `src/api/` (*house*), `tests/common/` where test binaries are per file (cargo; the template has one, `tests/api/`). No `utils.rs`, `helpers.rs` or `types.rs`, and no crate-wide prelude (*house*): a `prelude::*` makes every file's dependencies invisible. Imports in three blocks — std, external crates, then `crate` (*house*; rustfmt does not enforce it).
 
 Three visibility levels only: private, `pub(crate)`, `pub`. No `pub(super)` or `pub(in path)` (*house*): moving the module silently changes the caller set. Never widen visibility for a test. A new workspace crate needs a second consumer.
 
@@ -111,18 +111,18 @@ Three visibility levels only: private, `pub(crate)`, `pub`. No `pub(super)` or `
 
 Constructors take their collaborators; `AppState` is the composition root; no globals or service singletons.
 
-Beyond the effect seams in Important, injected through `AppState` as `Clock` already is, a trait earns its keep only for a second implementation you can name today. A mock of your own repository only proves the mock behaves, while real Postgres and `httpmock` exercise the thing that breaks.
+A mock of your own repository only proves the mock behaves, while real Postgres and `httpmock` exercise the thing that breaks.
 
 ## Reuse, Suppressions and Project Style
 
 Check std and the crates already locked before hand-writing a retry loop, a builder or a `Display` impl. Read the callers before editing; extend a near-duplicate rather than adding another.
 
-Fix the finding rather than silencing it. A justified suppression is `#[expect(lint, reason = "...")]`, which warns once the lint stops firing (*lint* `allow_attributes_without_reason`). Never `#![deny(warnings)]`. Priority when rules collide: KISS, YAGNI, single responsibility, DRY after the third repetition, fail fast.
+Fix the finding rather than silencing it. A justified suppression is `#[expect(lint, reason = "...")]`, which warns once the lint stops firing (*house*; the reason is *lint* `allow_attributes_without_reason`). Never `#![deny(warnings)]`. Priority when rules collide: KISS, YAGNI, single responsibility, DRY after the third repetition, fail fast.
 
 ## Valid Patterns — Do Not Flag
 
 - `#[expect(clippy::expect_used, reason = "...")]` on an item whose `expect` cannot fail, and `unwrap` or `expect` under `cfg(test)` or in `tests/`.
-- `#![allow(lint, reason = "...")]` where `#![expect]` would go unfulfilled: a file several targets compile when the lint fires in only some (a `tests/common/mod.rs` shared by per-file test binaries, a library module `--all-targets` also builds under `cfg(test)`), or a test module whose lint-tripping helpers come and go.
+- `#![allow(lint, reason = "...")]` where `#![expect]` would go unfulfilled: a file several targets compile when the lint fires in only some (a helper module shared by per-file test binaries, a library module `--all-targets` also builds under `cfg(test)`), or a test module whose lint-tripping helpers come and go (`tests/api/common.rs`).
 - A `match` with one arm per variant and no `_` arm — exhaustiveness is the point.
 - A module named after its type (`user::User`).
 - A bare `Uuid` id in an entity, a `Path<Uuid>`, a DTO, or a function taking one id.
@@ -138,7 +138,7 @@ Fix the finding rather than silencing it. A justified suppression is `#[expect(l
 | Call `std::fs`, a sync client or a password hash inside `async fn`, put `#[async_trait]` on a trait not stored as `dyn`, or drop the `JoinHandle` of a task that does not log its own failure | Async Discipline |
 | Use `String` for a fixed set, add a second `bool` parameter, or write a function taking two or more bare `Uuid` ids | Types Carry the Invariant |
 | Write `as` between integer types, chain a fifth iterator adaptor, or add `_ =>` to a match over your own enum | Control Flow |
-| Define a trait with exactly one implementation | Dependency Injection |
+| Define a trait with exactly one implementation | Important |
 | Create `utils.rs`, a crate-wide prelude or `pub(super)`, put business logic in `main.rs`, or widen visibility for a test | Module Layout |
 | Add `#[allow(...)]` to green the build, hand-write a builder or retry loop, or patch from a quoted line | Reuse and Suppressions |
 | Write a comment that narrates the next line | Documentation |

@@ -27,13 +27,17 @@ Observability is four independent wires, and three of them fail without a sound:
 
 The first three are wired in `src/telemetry.rs::init` and nowhere else: a second
 `tracing_subscriber::…init()` anywhere in the process makes one of them lose, and a second
-`global::set_tracer_provider` drops the first provider's spans on the floor. Metrics are wired once
-in `build_router`, where `PrometheusMetricLayer::pair()` installs the recorder.
+`global::set_tracer_provider` drops the first provider's spans on the floor. Metrics are wired in
+`build_router`, which builds the Prometheus layer and installs the process-wide recorder the first
+time it runs.
 
 ## tracing conventions
 
-Instrument the function that does the work, not every layer it passes through. `OtelAxumLayer`
-already opens a span per request, so a handler that extracts and delegates adds nothing but noise.
+Instrument the function that does the work. That is every handler, where the identifiers a
+request carries become span fields and whose span is the parent of everything the handler calls,
+and a `services/` function that is a unit of work of its own: several statements, an outbound
+call, a job. `OtelAxumLayer` already opens the HTTP span, so nothing else on the request path
+needs one: not an extractor, not a conversion, not a helper that only forwards.
 
 ```rust
 #[instrument(skip_all, fields(user_id = %id))]
@@ -73,7 +77,7 @@ pub async fn refresh(pool: &DatabaseConnection, token: String) -> Result<Session
 | Level | Means | Example |
 |---|---|---|
 | ERROR | a request was lost or state is inconsistent; someone should look | 5xx, failed write after retries |
-| WARN | degraded but handled | retry, fallback, upstream 429 |
+| WARN | degraded but handled | retry, fallback, upstream 429, a constraint the client tripped (409, 23503) |
 | INFO | request boundaries and lifecycle | startup, migration applied, shutdown |
 | DEBUG | enough to reconstruct one request locally | branch taken, query parameters |
 | TRACE | never enabled in production | per-row loops |
@@ -207,10 +211,36 @@ bring a trait method into scope, and each has a misleading error:
 | `tracing_subscriber::util::SubscriberInitExt as _` | no method named `init` |
 
 Feature flags matter more than usual. `opentelemetry_sdk` needs `trace` and **not** `rt-tokio`
-(since 0.32 the batch processor runs on its own thread; `rt-tokio` only enables the experimental
+(since 0.28 the batch processor runs on its own thread; `rt-tokio` only enables the experimental
 async-runtime processors), and `opentelemetry-otlp` with `default-features = false` must list
 **both** `grpc-tonic` and `trace` — `grpc-tonic` does not imply it, and the defaults drag in a
 blocking reqwest.
+
+**OTLP over TLS.** The scaffold enables no TLS feature on `opentelemetry-otlp`, so the exporter
+speaks plaintext gRPC: right for a collector on localhost, a sidecar or a cluster-internal
+address. An `https://` endpoint does not fail silently. Building the exporter returns an error,
+`endpoint '..' uses HTTPS but no TLS feature is enabled`, and `init` stops the process at startup.
+For a collector behind TLS, add the features `tls-aws-lc` (the crypto provider rustls already uses
+in this stack) and `tls-roots`, and give the builder a TLS config that trusts the system roots:
+
+```rust
+// Cargo.toml: opentelemetry-otlp = { version = "0.32", default-features = false,
+//     features = ["grpc-tonic", "trace", "tls-aws-lc", "tls-roots"] }
+use opentelemetry_otlp::WithTonicConfig as _;
+use opentelemetry_otlp::tonic_types::transport::ClientTlsConfig;
+
+let exporter = opentelemetry_otlp::SpanExporter::builder()
+    .with_tonic()
+    .with_endpoint(endpoint)
+    .with_tls_config(ClientTlsConfig::new().with_enabled_roots())
+    .build()
+    .context("building the OTLP span exporter")?;
+```
+
+Both halves are needed. With the features and no `with_tls_config`, an `https://` endpoint gets
+`ClientTlsConfig::new()`, which trusts no roots: the build succeeds and every export fails the
+certificate check. For a private CA, add `.ca_certificate(Certificate::from_pem(pem))` from the
+same module. The scaffold ships without these features, so its tests do not cover this path.
 
 Do not call `.with_sampler(..)` or `.with_service_name(..)`: the default sampler is
 `ParentBased(AlwaysOn)` and the builder reads `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG`
@@ -223,9 +253,10 @@ The one `main.rs` is the scaffold's. The telemetry-relevant order in it:
 
 1. `telemetry::init(&settings.telemetry)` first, on the multi-thread runtime `#[tokio::main]`
    provides, so everything below is logged and traced and the exporter has a reactor.
-2. `build_router(state)` installs the HTTP layers and calls `PrometheusMetricLayer::pair()` once.
+2. `build_router(state)` installs the HTTP layers and, the first time it runs, the process-wide
+   metrics recorder.
 3. `axum::serve(..).with_graceful_shutdown(..)` drains in-flight requests, which are still
-   producing spans.
+   producing spans, for at most `SHUTDOWN_TIMEOUT`.
 4. `guard.shutdown()` only now, then `db.close()`.
 
 `guard.shutdown()` blocks until the batch processor has flushed, so it needs the multi-thread
@@ -235,21 +266,28 @@ the process is going down.
 
 ## Request id
 
-One `from_fn` middleware, `api::request_id`, owns the id: it trusts an
-inbound `x-request-id` or mints a uuid v7, opens `info_span!("request", request_id = %id)` and
-`.instrument`s the rest of the request with it, scopes the `REQUEST_ID` task-local declared in
-`error.rs` so `ErrorBody::new` can copy the id into the body, and echoes the header. It is the
-outermost layer, so every event inside the request, including the ones the Otel layer and the
-handlers emit, is logged with the `request` span in its span list. tower-http's `SetRequestIdLayer`
-does the header half only and puts the value in neither a span nor reach of the error body, hence
-the `from_fn`.
+One `from_fn` middleware, `api::request_id`, owns the id: it keeps an inbound `x-request-id` of
+1–64 `[A-Za-z0-9._-]` characters or mints a uuid v7, opens `info_span!("request", request_id = %id)`
+and `.instrument`s the rest of the request with it, scopes the `REQUEST_ID` task-local declared in
+`error.rs` so `ErrorBody::new` can copy the id into the body, and echoes the header. It sits
+directly inside the two Otel layers, so the `request` span is a child of the server span, in the
+caller's trace, and every event below it (a handler's, the error line `into_response` writes, the
+panic catcher's) is logged with the `request` span in its span list. tower-http's
+`SetRequestIdLayer` does the header half only and puts the value in neither a span nor reach of
+the error body, hence the `from_fn`.
 
 ## HTTP spans: OtelAxumLayer and OtelInResponseLayer
 
 One HTTP span source. `OtelAxumLayer` extracts the inbound `traceparent`, takes `http.route` from
 `MatchedPath` (so a uuid path is one span name rather than thousands) and emits the HTTP
-semantic-convention attributes; `OtelInResponseLayer` sits just outside it and writes the context
-back onto the response. Nothing else opens an HTTP span: a second tracing layer (tower-http's
+semantic-convention attributes; `OtelInResponseLayer` sits just inside it and writes the server
+span's context back onto the response. They are the two outermost layers, in that order. In a
+`ServiceBuilder` that is `OtelAxumLayer` first, the reverse of the crate's README, which chains
+`.layer()` on a `Router`: `OtelInResponseLayer` writes whatever span is current when the response
+passes it, so outside the server span it writes the surrounding span's context instead, and with
+the `request` span around it a caller's `traceparent` is answered with a different trace id. And
+with `api::request_id` outside the server span, the `request` span is the root of a trace of its
+own. Nothing else opens an HTTP span: a second tracing layer (tower-http's
 `trace` feature, which the scaffold does not enable) next to `OtelAxumLayer` opens a second,
 unrelated server span per request, doubling every log line's context and giving the exporter two
 candidate parents for the same work.
@@ -338,29 +376,38 @@ reference shows it). Asserting that a span was created is rarely worth it: telem
 observability concern, not a contract, and span assertions break on every refactor while catching
 nothing a user would notice. The one exception is a propagation test proving that `traceparent`
 survives an inbound-to-outbound hop, because that is the part that fails silently in production.
+The scaffold has the inbound half in `tests/api/stack.rs`: it sends a `traceparent`, asserts the
+response carries the same trace id, and reads the `request` span back from an
+`InMemorySpanExporter` (the `testing` feature of `opentelemetry_sdk`, a dev-dependency) to check
+it joined that trace. That test installs its subscriber globally when the slot is free and as its
+own thread's default either way, so it passes beside a `#[test_log::test]` in the same process,
+whichever runs first.
 Default to `#[test_log::test(tokio::test)]` so a failing test prints its own logs, and reach for
 `tracing-test`'s `#[traced_test]`, which provides `logs_contain`, only on the few tests that assert
-on log content; the two attributes conflict because both install a subscriber.
+on log content; the two attributes conflict because both install a subscriber. `test-log` installs
+its subscriber with `try_init`, globally and without failing: under plain `cargo test`, where the
+tests of a binary share one process, a test that runs after another subscriber took the global slot
+prints no logs. Under nextest every test has its own process and its own subscriber.
 
 ## Red flags
 
 | About to… | Rule |
 |---|---|
-| Call `tracing_subscriber::…init()` or `global::set_*` outside `telemetry::init`, or `PrometheusMetricLayer::pair()` outside `build_router` | One wiring point each — the second subscriber silently loses, the second recorder panics |
+| Call `tracing_subscriber::…init()` or `global::set_*` outside `telemetry::init`, or `PrometheusMetricLayer::pair()` anywhere | One wiring point each — the second subscriber silently loses, and `pair()` installs a second recorder next to the one `build_router` owns, which panics |
 | Layer a second HTTP tracing layer next to `OtelAxumLayer` | Two server spans per request — the two Otel layers are the only HTTP span source |
 | Write `#[instrument]` with no `skip_all` on a function taking a pool, client or credential | Every argument becomes a field |
 | `%` or `?` an `.expose_secret()`, a token or a header value | The value itself is recorded; a bare `SecretString` has no `Display` and a redacted `Debug` |
 | Put `err` on a function whose `AppError` reaches `into_response` | Each 5xx is logged twice and each 404 becomes an error event |
 | Call `guard.shutdown()` before `axum::serve` returns, or not at all | The spans of in-flight requests are lost |
 | Build a `reqwest::Client` for one outbound call | No `traceparent` — use the client in `AppState` |
-| Add `.with_sampler(..)`, `.with_service_name(..)` or the `rt-tokio` feature | The first two override env vars; the third has not been the cause since 0.32 |
+| Add `.with_sampler(..)`, `.with_service_name(..)` or the `rt-tokio` feature | The first two override env vars; the third has not been the cause since 0.28 |
 
 ## Older OpenTelemetry APIs
 
 | Pre-0.32 | Now |
 |---|---|
-| `global::shutdown_tracer_provider()` | removed in 0.27 — keep the provider and call `provider.shutdown()` |
-| `opentelemetry_sdk` feature `rt-tokio` | only the experimental async-runtime processors; the batch processor owns a thread |
+| `global::shutdown_tracer_provider()` | removed in 0.28 — keep the provider and call `provider.shutdown()` |
+| `opentelemetry_sdk` feature `rt-tokio` | only the experimental async-runtime processors; since 0.28 the batch processor owns a thread |
 | `opentelemetry-otlp` features `["grpc-tonic"]` | with `default-features = false`, list `trace` as well |
 | `provider.tracer("x")` | needs `use opentelemetry::trace::TracerProvider as _;` |
 | `span.set_parent(cx);` | returns `Result` in 0.33; a bare call trips `unused_must_use` |

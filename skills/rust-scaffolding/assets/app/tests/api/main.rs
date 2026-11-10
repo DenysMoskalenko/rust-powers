@@ -5,4 +5,5 @@ mod common;
 mod health;
 mod migrations;
 mod panic;
+mod stack;
 mod users;

@@ -66,7 +66,7 @@
 - The template loaded once through `include_str!` or a `LazyLock` instead of a file read on every call.
 - The database result's `.unwrap()` replaced by the `?` operator.
 - The cache lock recovered with `unwrap_or_else(PoisonError::into_inner)`, since a single cache insert cannot have left the map half-updated.
-- `Box<dyn Error>` replaced by a typed error: a `thiserror` `OrderError` reaching `AppError` through `#[from]` when the module keeps more than one failure mode, otherwise `AppError` directly.
+- `Box<dyn Error>` replaced by a typed error: a `thiserror` `OrderError` reaching `AppError` through a hand-written `impl From` onto existing variants when the module keeps more than one failure mode, otherwise `AppError` directly.
 - The lock either taken after the await or moved into a non-async helper, citing the guard-across-await rule.
 
 **Must not produce**:

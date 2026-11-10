@@ -69,16 +69,14 @@ use chrono::{DateTime, Utc};
 use fake::Fake;
 use fake::faker::internet::en::SafeEmail;
 use fake::faker::name::en::Name;
-use sea_orm::{ActiveModelTrait, Set};
-use uuid::Uuid;
+use sea_orm::ActiveModelTrait;
+use sea_orm::ActiveValue::{NotSet, Set};
 
 use crate::common;
 
 #[derive(Debug, Clone, bon::Builder)]
 #[builder(start_fn = user, finish_fn = build)]
 struct UserFactory {
-    #[builder(into, default = Uuid::now_v7())]
-    id: Uuid,
     #[builder(into, default = SafeEmail().fake::<String>())]
     email: String,
     #[builder(into, default = Name().fake::<String>())]
@@ -90,7 +88,8 @@ struct UserFactory {
 impl UserFactory {
     fn into_active_model(self) -> user::ActiveModel {
         user::ActiveModel {
-            id: Set(self.id),
+            // Postgres assigns the key (`DEFAULT uuidv7()`); the insert returns it.
+            id: NotSet,
             email: Set(self.email),
             name: Set(self.name),
             // The generated column is `DateTimeWithTimeZone`; `Utc` converts into it.

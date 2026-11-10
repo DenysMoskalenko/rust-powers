@@ -13,29 +13,109 @@ metrics-exporter-prometheus and re-exports the pieces of it you need.
 
 ## The recorder
 
-`PrometheusMetricLayer::pair()` installs a **process-global** recorder and returns the tower layer
-plus the handle that renders the scrape body. The scaffold calls it exactly once, at the top of
-`build_router`, and mounts `/metrics` from the handle there. A second call
-panics with `Failed to set global recorder`. `pair()` also spawns the recorder's upkeep task with
-`tokio::spawn`, so it must run inside the tokio runtime — a `LazyLock` or a call before
-`#[tokio::main]` panics too, for the same reason the OTLP exporter is built inside `init`.
-
-`PrometheusMetricLayer::pair()` is the whole configuration for most services, and it is what the
-scaffold uses: `/metrics` and the probes are counted like every other route. Use the builder when
-you need ignore patterns or custom buckets; it replaces the `pair()` call in `build_router`, and
-`with_ignore_patterns` is how to keep `/metrics` and the probes out of the request metrics without
-moving those routes outside the layers:
+The `metrics` recorder is **process-global**: one per process, installed once.
+`PrometheusMetricLayer::pair()` installs one every time it is called, so a second call anywhere in
+the process panics with `Failed to set global recorder`. That is why the scaffold does not call
+it. `build_router` builds the layer with `PrometheusMetricLayerBuilder` and takes the handle from
+a `OnceLock`, so the first router installs the recorder and every later one (a second listener,
+the next test in the same process) shares it:
 
 ```rust,verify
+//! The metrics half of `lib.rs`: one recorder per process, one layer per router.
+use std::sync::OnceLock;
+
+use axum::Router;
+use axum::routing::get;
+use axum_prometheus::metrics_exporter_prometheus::PrometheusHandle;
+use axum_prometheus::{EndpointLabel, PrometheusMetricLayerBuilder};
+
+/// The `metrics` recorder is one per process by design. It is installed by the
+/// first router and shared by every later one (a second listener, the next test
+/// in the same process), which would otherwise panic installing it again.
+static METRICS: OnceLock<PrometheusHandle> = OnceLock::new();
+
+fn metrics_handle() -> PrometheusHandle {
+    METRICS
+        .get_or_init(|| axum_prometheus::Handle::default().0)
+        .clone()
+}
+
+/// A request no route matched has no `MatchedPath`. Labelling it with the raw
+/// path, the default, mints one series per URL a scanner tries.
+fn unmatched(_path: &str) -> String {
+    "unmatched".to_owned()
+}
+
+pub fn with_metrics(router: Router) -> Router {
+    let (prometheus_layer, metric_handle) = PrometheusMetricLayerBuilder::new()
+        .with_endpoint_label_type(EndpointLabel::MatchedPathWithFallbackFn(unmatched))
+        .with_metrics_from_fn(metrics_handle)
+        .build_pair();
+
+    router
+        .route("/metrics", get(move || async move { metric_handle.render() }))
+        .layer(prometheus_layer)
+}
+```
+
+`axum_prometheus::Handle::default()` is what `pair()` runs inside: it builds the recorder with the
+crate's duration buckets, installs it, and spawns the upkeep task with `tokio::spawn`. The first
+`build_router` call therefore has to happen inside the tokio runtime — in a `LazyLock`, or before
+`#[tokio::main]`, it panics, for the same reason the OTLP exporter is built inside `init`.
+`build_pair` only exists after `with_default_metrics` or `with_metrics_from_fn`: the builder is a
+typestate.
+
+`/metrics` and the probes are counted like every other route. To keep them out of the request
+metrics, add `.with_ignore_patterns(&["/metrics", "/health/live", "/health/ready"])` to the builder
+rather than moving those routes outside the layers.
+
+For custom buckets, replace `Handle::default()` inside the `OnceLock`, and take over the two
+things it did besides building the recorder, installing it and running upkeep:
+
+```rust,verify
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use axum_prometheus::{
-    AXUM_HTTP_REQUESTS_DURATION_SECONDS, EndpointLabel, PrometheusMetricLayer,
-    PrometheusMetricLayerBuilder,
+    AXUM_HTTP_REQUESTS_DURATION_SECONDS,
     metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle},
-    utils::SECONDS_DURATION_BUCKETS,
 };
 use metrics::{Unit, counter, describe_counter, describe_histogram, histogram};
+
+static METRICS: OnceLock<PrometheusHandle> = OnceLock::new();
+
+/// Sub-second buckets for a service whose requests finish in milliseconds.
+const BUCKETS: &[f64] = &[0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0];
+
+pub fn metrics_handle() -> PrometheusHandle {
+    METRICS.get_or_init(install_recorder).clone()
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "a bad bucket list or a second recorder is a startup-time programming error"
+)]
+fn install_recorder() -> PrometheusHandle {
+    let handle = PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            Matcher::Full(AXUM_HTTP_REQUESTS_DURATION_SECONDS.to_string()),
+            BUCKETS,
+        )
+        .expect("bucket list is non-empty")
+        .install_recorder()
+        .expect("no other recorder installed");
+
+    // `install_recorder` leaves upkeep to the caller. Without it histogram
+    // samples pile up between scrapes, and without a scraper they never drain.
+    let upkeep = handle.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            upkeep.run_upkeep();
+        }
+    });
+    handle
+}
 
 /// Once at startup. Without a description the metric still works, but `/metrics`
 /// carries no HELP or TYPE line and a dashboard shows a bare name.
@@ -52,29 +132,6 @@ pub fn record_order(outcome: &'static str, elapsed: Duration) {
     // Labels are a bounded set: `outcome` is one of a handful of literals.
     counter!("orders_total", "outcome" => outcome).increment(1);
     histogram!("db_query_duration_seconds", "table" => "orders").record(elapsed);
-}
-
-/// The configured form. `build_pair` only exists after `with_default_metrics`
-/// or `with_metrics_from_fn` — the builder is a typestate.
-#[expect(
-    clippy::expect_used,
-    reason = "a bad bucket or a second recorder is a startup-time programming error"
-)]
-pub fn metrics_pair() -> (PrometheusMetricLayer<'static>, PrometheusHandle) {
-    PrometheusMetricLayerBuilder::new()
-        .with_ignore_patterns(&["/metrics", "/health/live", "/health/ready"])
-        .with_endpoint_label_type(EndpointLabel::MatchedPath)
-        .with_metrics_from_fn(|| {
-            PrometheusBuilder::new()
-                .set_buckets_for_metric(
-                    Matcher::Full(AXUM_HTTP_REQUESTS_DURATION_SECONDS.to_string()),
-                    SECONDS_DURATION_BUCKETS,
-                )
-                .expect("bucket list is non-empty")
-                .install_recorder()
-                .expect("no other recorder installed")
-        })
-        .build_pair()
 }
 ```
 
@@ -134,10 +191,13 @@ A value that is forbidden as a label is usually fine as a span field: a trace ho
 metric holds all of them. `fields(user_id = %id)` on `#[instrument]` costs nothing;
 `"user_id" => id` in `counter!` is an outage.
 
-`EndpointLabel::MatchedPath` is the default in 0.10, but it falls back to `EndpointLabel::Exact`
-when `MatchedPath` is unavailable — typically under nested routers. `Exact` is the raw URI path, so
-`/users/8f3c…/orders/991` becomes its own series. If the router nests, assert the label in a test
-(below) or use `EndpointLabel::MatchedPathWithFallbackFn`.
+`EndpointLabel::MatchedPath` is the default in 0.10, but it falls back to the raw URI path when
+`MatchedPath` is unavailable. That is every request no route matched, so each URL a scanner
+probes becomes its own series, and it can also happen under nested routers, where
+`/users/8f3c…/orders/991` becomes one. The scaffold uses
+`EndpointLabel::MatchedPathWithFallbackFn(unmatched)` instead: a request without a matched path is
+counted under the one label `unmatched`. Keep the fallback a constant; a function that returns
+the path, or a prefix of it, brings the series back.
 
 The scaffold's stack wraps `/metrics` and the health probes like every other route, so scrapes and
 probes are counted. Once a ten-second scrape interval dominates the request count or a liveness
@@ -150,41 +210,46 @@ than registering those routes after the layer, which would also cost them their 
 cheapest place to prove the `endpoint` label is a route template and not a raw path.
 
 ```rust,verify,test
-use axum::{Router, routing::get};
-use axum_prometheus::PrometheusMetricLayer;
-use axum_test::TestServer;
+use axum::http::StatusCode;
+use uuid::Uuid;
+
+use crate::common::test_app;
 
 #[tokio::test]
-async fn metrics_endpoint_counts_requests_under_the_route_template() -> anyhow::Result<()> {
-    let (layer, handle) = PrometheusMetricLayer::pair();
-    let app = Router::new()
-        .route("/users/{id}", get(async || "{}"))
-        .layer(layer)
-        // Registered after the layer, so the scrape does not count itself.
-        .route("/metrics", get(async move || handle.render()));
-    let server = TestServer::new(app);
+async fn requests_are_counted_under_the_route_template() {
+    let app = test_app().await;
+    let id = Uuid::now_v7();
 
-    server
-        .get("/users/0199a1b2-c3d4-7000-8000-000000000000")
+    // A 404 from the handler: the route matched, the row does not exist.
+    app.server
+        .get(&format!("/users/{id}"))
+        .expect_failure()
         .await
-        .assert_status_ok();
+        .assert_status(StatusCode::NOT_FOUND);
+    // A 404 from the fallback: no route matched.
+    app.server
+        .get("/wp-admin/setup.php")
+        .expect_failure()
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
 
-    let body = server.get("/metrics").await.text();
+    let body = app.server.get("/metrics").await.text();
 
     assert!(
-        body.contains(
-            r#"axum_http_requests_total{method="GET",status="200",endpoint="/users/{id}"} 1"#
-        ),
-        "expected one counted request under the route template, got:\n{body}"
+        body.contains(r#"endpoint="/users/{id}""#),
+        "expected the route template as the label, got:\n{body}"
     );
-    // The uuid must never appear: one series per user id kills Prometheus.
-    assert!(!body.contains("0199a1b2"), "raw path leaked into a label");
-    Ok(())
+    assert!(body.contains(r#"endpoint="unmatched""#), "{body}");
+    // Neither the uuid nor the scanner's path: one series per value kills Prometheus.
+    assert!(!body.contains(&id.to_string()), "raw path leaked into a label");
+    assert!(!body.contains("wp-admin"), "raw path leaked into a label");
 }
 ```
 
-`PrometheusMetricLayer::pair()` installs a process-global recorder, so the second test in one
-process to call it panics with `Failed to set global recorder`. Every test that builds the real
-router through `test_app()` calls it, which is why the suite runs under nextest (one process per
-test) and fails under plain `cargo test` from the second test in a binary onwards. For test
-structure and fixtures see `rust-testing`.
+The test goes through `test_app()` and the real router, and asserts that a label is present, not
+how many requests it counted. Both follow from the recorder being process-wide: under plain
+`cargo test` every test in the binary shares it, so counts include other tests' requests, and a
+test that builds its own router with `PrometheusMetricLayer::pair()` panics with
+`Failed to set global recorder` as soon as another test in the same process has built one (under
+nextest, one process per test, it would pass and hide the problem). For test structure and
+fixtures see `rust-testing`.

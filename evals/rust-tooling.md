@@ -49,17 +49,16 @@
 
 ### Eval 2 - CI that rebuilds everything
 
-**Prompt**: Our workflow sets `RUSTFLAGS: -Dwarnings` at the job level and every step recompiles from scratch even though `Swatinem/rust-cache` is enabled. Fix the workflow.
+**Prompt**: Our workflow sets `RUSTFLAGS: -Dwarnings` on the `cargo build` step to make warnings fatal, and the `cargo test` step after it compiles every dependency a second time even though `Swatinem/rust-cache` is enabled. Fix the workflow.
 
 **Fixture**: empty
 
 **Must produce**:
 
-- The job-level `RUSTFLAGS` removed.
+- `RUSTFLAGS` removed from the workflow.
 - `-D warnings` passed to the clippy invocation instead.
-- The first cause: cargo's fingerprint includes the effective rustflags.
-- The second cause: rust-cache hashes `RUST*` environment variables into the cache key.
-- A separate `shared-key` for the job that needs `RUSTDOCFLAGS`.
+- The cause: cargo's fingerprint includes the effective rustflags, so each value is built as its own set of artifacts and the two steps share nothing.
+- `RUSTDOCFLAGS: -D warnings` left on the `docs` job alone, since it reaches only rustdoc.
 - `--workspace` kept on clippy, nextest, doctests and `cargo doc`.
 - A `cargo machete` step, so CI matches the Makefile's `check` target.
 
@@ -67,7 +66,8 @@
 
 - Disabling the cache.
 - Adding `cargo clean`.
-- Moving `-D warnings` into `.cargo/config.toml` `[build] rustflags`, which reintroduces the same fingerprint problem for every command.
+- Setting the same `RUSTFLAGS` on every step or on the whole job as the fix: the variable replaces the `rustflags` in `.cargo/config.toml`, and the commands stop matching the Makefile's.
+- Moving `-D warnings` into `.cargo/config.toml` `[build] rustflags`, which makes every local build fail on a warning in the middle of an edit.
 
 ### Eval 3 - bumping a dependency
 
@@ -154,7 +154,7 @@
 
 ### Probe 2 - fatal warnings in CI
 
-**Prompt**: Make warnings fatal in our GitHub Actions workflow without making every step rebuild from scratch.
+**Prompt**: Make compiler and clippy warnings fatal in our GitHub Actions workflow.
 
 **Fixture**: empty
 
@@ -178,7 +178,7 @@
 
 **Fixture**: empty
 
-**Wrong answer**: `(?:^|\n)[ \t]*channel\s*=\s*"(?:1\.98|stable)"`
+**Wrong answer**: `(?:^|\n)[ \t]*channel\s*=\s*"(?!1\.98\.1")[^"\n]*"`
 
 **Right answer**: `channel\s*=\s*"1\.98\.1"`
 

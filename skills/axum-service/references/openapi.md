@@ -58,6 +58,12 @@ pub struct Page<T> {
     pub offset: u64,
 }
 
+/// `OFFSET` reads and discards every skipped row, so it is capped: past this a
+/// client narrows the filter, or the endpoint moves to keyset pagination. The
+/// cap is also what keeps a `u64` from the query string inside the `i64` that
+/// Postgres takes; the driver panics on a larger value.
+const MAX_OFFSET: u64 = 10_000;
+
 #[derive(Debug, Deserialize, Validate, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListUsers {
@@ -67,8 +73,9 @@ pub struct ListUsers {
     #[serde(default = "default_limit")]
     #[param(default = 20, minimum = 1, maximum = 100)]
     pub limit: u64,
+    #[validate(range(max = MAX_OFFSET))]
     #[serde(default)]
-    #[param(default = 0)]
+    #[param(default = 0, maximum = 10000)]
     pub offset: u64,
 }
 
@@ -129,13 +136,13 @@ pub async fn get_user(
 /// List users, newest first.
 ///
 /// # Errors
-/// 422 when `limit` is outside 1..=100.
+/// 422 when `limit` is outside 1..=100 or `offset` is past 10 000.
 #[utoipa::path(
     get, path = "/users", tag = "users",
     params(ListUsers),
     responses(
         (status = 200, body = Page<UserResponse>, description = "One page of users"),
-        (status = 422, body = ErrorBody, description = "`limit` is outside 1..=100"),
+        (status = 422, body = ErrorBody, description = "`limit` is outside 1..=100, or `offset` is past 10 000"),
     )
 )]
 #[tracing::instrument(skip_all, fields(limit = query.limit, offset = query.offset))]
@@ -164,7 +171,7 @@ pub fn router() -> OpenApiRouter<AppState> {
 async fn create(state: &AppState, body: CreateUser) -> Result<UserResponse, AppError> {
     state.db.ping().await?;
     Ok(UserResponse {
-        id: Uuid::now_v7(),
+        id: Uuid::nil(), // stand-in: the insert returns the id Postgres generated
         email: body.email,
         name: body.name,
         created_at: state.clock.now(),
@@ -184,8 +191,10 @@ async fn list(
 }
 ```
 
-The scaffold's `users.rs` is this file with the three service functions replaced by one sea-orm
-statement each, inline in the handler, and without `security(("bearer" = []))`: that attribute
+The scaffold's `users.rs` is this file with the three service functions replaced by the queries
+themselves, inline in the handler: one statement for the create and for the fetch, and for the
+list a `count` plus the page, which belong to one page and are the one query a handler runs. It
+is also without `security(("bearer" = []))`: that attribute
 references the scheme the `SecurityAddon` modifier below registers, which the scaffold's `ApiDoc`
 does not have until `auth.md` adds it — copied alone, it documents an undefined scheme. `Page`
 and `ListUsers` are the service-wide pagination contract.
@@ -327,5 +336,9 @@ whose variants each carry `type` as a one-value enum, with no `discriminator` ob
 response type is named after its parameter, so `Page<UserResponse>` appears as `Page_UserResponse`.
 
 External types need their utoipa feature (`chrono`, `uuid`, `decimal`); without it the derive
-fails because the type has no `ToSchema` impl. `axum_extras` is what makes `IntoParams` inference
-work for axum extractors.
+fails because the type has no `ToSchema` impl. `axum_extras` lets `#[utoipa::path]` read
+the handler's arguments: path parameters from `Path<..>`, tuples included, the location of an
+`IntoParams` struct from `Path<..>` or `Query<..>`, and the request body from `Json<..>` or
+`Form<..>`. It matches the extractor by the last segment of its type name, so the crate's own
+`Path` is recognised while `Valid<T>` and `ValidQuery<T>` are not: that is why the handlers above
+spell `request_body = CreateUser`, and `ListUsers` carries `#[into_params(parameter_in = Query)]`.

@@ -60,6 +60,10 @@ the three labelled lines `**Prompt**:`, `**Must produce**:`, `**Must not produce
 `### Probe N - <name>` block has `**Prompt**:` and a backticked `**Wrong answer**:`; a
 `**Fixture**:` line, where present, is `scaffold` or `empty`.
 
+`**Note**:` is optional and written for maintainers. The prompt ends at the next `**` label, so a
+note placed after `**Prompt**:` never reaches the model under test: put there what a reader of the
+eval needs to know and the model must not be told.
+
 `**Fixture**:` is optional. It says what the working directory holds when the case runs:
 `scaffold` (the default) is a copy of `skills/rust-scaffolding/assets/app/`, with the skill's
 add-when-needed crate uncommented in `Cargo.toml` for building-rig-agents, rust-nats and

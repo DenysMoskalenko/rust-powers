@@ -2,7 +2,7 @@
 name: rust-redis
 description: "Use when caching or coordinating through Redis in an axum service with redis-rs — ConnectionManager setup, cache-aside and TTLs, serde values, invalidation, SCAN over KEYS, pipelines, Lua scripts, distributed locks and leases, rate limiting as an axum layer, idempotency keys, testcontainers Redis. Also for Connection refused, NOSCRIPT, WRONGTYPE, the trait bound FromRedisValue is not satisfied, multiple applicable items in scope. Not for pub/sub, queues or events (rust-nats), nor transactional exclusion with advisory locks (sea-orm-postgres)."
 metadata:
-  version: "0.3.2"
+  version: "0.4.0"
 ---
 
 # Redis with redis-rs
@@ -18,13 +18,13 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
   are both `None`. `AppError` gets no `#[from] redis::RedisError` and no new variant; the few
   commands a request cannot survive without go through `required(e, "what")`.
 - One `aio::ConnectionManager` in `AppState` by value, cloned per call, with
-  `set_number_of_retries(0)` and explicit timeouts. Never `Mutex`, `Arc`, a pool, or a `Client`.
+  `set_number_of_retries(0)` and explicit timeouts. No `Mutex`, `Arc` or stored `Client`, and no
+  pool except for blocking commands (below).
 - Every write carries a TTL. Keys and values never reach a span or a log.
-- Work whose effect is a write to this
-  Postgres database takes an advisory lock inside that transaction (`pg_try_advisory_xact_lock` to
-  run once, `pg_advisory_xact_lock` to serialise; `sea-orm-postgres`); anything else — an outbound
-  call, a file, work spanning services or outliving one transaction — takes a Redis lease,
-  which only suppresses duplicates, so that effect must itself be idempotent.
+- A Redis lease only suppresses duplicate runs — after a stall two holders are possible — so what
+  it guards must itself be idempotent: an outbound call, a file, work spanning services or
+  outliving one transaction. Work whose effect is a write to this Postgres database takes
+  `pg_try_advisory_xact_lock` inside that transaction instead (`sea-orm-postgres`).
 
 ## References
 
@@ -62,7 +62,7 @@ Cache-aside over one connection; the reference adds `Json<T>`, invalidation, jit
 //! loader runs; the write is best effort and always carries a TTL.
 use std::{future::Future, time::Duration};
 
-use redis::{AsyncCommands, aio::ConnectionManager};
+use redis::{AsyncCommands, RetryMethod, aio::ConnectionManager};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::error::AppError;
@@ -73,7 +73,6 @@ pub struct Cache {
 }
 
 impl Cache {
-    /// `skip_all`: the key is user data and must not land in the span.
     #[tracing::instrument(skip_all, fields(db.system = "redis", db.operation = "GET"))]
     pub async fn get<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
         match self.conn.clone().get::<_, Option<Vec<u8>>>(key).await {
@@ -116,7 +115,9 @@ impl Cache {
 /// Only for a command the request cannot survive without: a lease that must be
 /// held, an idempotency claim, a revocation check. Canonical variants only.
 pub fn required(e: redis::RedisError, dependency: &str) -> AppError {
-    if e.is_timeout() || e.is_connection_dropped() || e.is_connection_refusal() || e.is_io_error() {
+    // Not answering, or answering "not now": LOADING, READONLY in a failover.
+    let down = e.is_timeout() || e.is_connection_dropped() || e.is_connection_refusal() || e.is_io_error();
+    if down || matches!(e.retry_method(), RetryMethod::WaitAndRetry | RetryMethod::RefreshSlotsAndRetry) {
         AppError::Unavailable(dependency.to_owned()) // 503; the name reaches the log only
     } else {
         AppError::Other(e.into()) // 500: WRONGTYPE, NOSCRIPT, a parse failure — a bug
@@ -125,7 +126,7 @@ pub fn required(e: redis::RedisError, dependency: &str) -> AppError {
 ```
 
 In a handler: `cache.get_or_set(&key, ttl, || users::find(&db, id)).await?.ok_or_else(||
-AppError::NotFound(format!("user {id} not found")))?`; delete the key after an update commits.
+AppError::NotFound(format!("user {id} not found")))?`.
 
 ## One connection for the process
 
@@ -133,7 +134,9 @@ AppError::NotFound(format!("user {id} not found")))?`; delete the key after an u
 every caller over one socket and reconnects itself. Commands take `&mut self` and the manager is
 `Clone` over an `Arc`, so every call site clones it. A pool of multiplexed connections pools
 nothing — except for a module issuing blocking commands (`BLPOP` stalls every other caller),
-which alone gets a small `deadpool-redis` pool.
+which alone gets a small `deadpool-redis` pool. All of this assumes one primary. Redis Cluster
+needs `cluster_async::ClusterConnection`, and a multi-key `DEL`, atomic pipeline or script must
+keep its keys in one slot (a `{hash tag}`) or it fails with `CROSSSLOT`.
 
 `get_connection_manager_with_config` connects eagerly, so a Redis down at boot fails the boot.
 Redis as an optional cache takes `get_connection_manager_lazy(config)`, which dials on first use:
@@ -151,16 +154,18 @@ every call `E0034: multiple applicable items in scope`; use the generic `AsyncCo
 drops it without sending a command.
 
 Keys are `app:v1:entity:id`, built by one function; bump the version when a cached shape changes
-and old entries age out. Every write carries a TTL — `set_ex`, or `SetExpiry` on `set_options` —
-jittered by a few percent so a batch does not expire together. Invalidate by deleting the key
+and old entries age out. The TTL is `set_ex`, or `SetExpiry` on `set_options`, jittered (the
+reference adds up to 20 %) so a batch does not expire together. Invalidate by deleting the key
 after the write commits, never by writing the new value: two writers that both delete cannot
 leave a stale entry.
 
 ## Errors and readiness
 
 `is_timeout()`, `is_connection_dropped()`, `is_connection_refusal()` and `is_io_error()` mean
-the server is not answering: warn, count, degrade to a miss. Anything else is a bug, and
-`err.code()` names it:
+the server is not answering; a `retry_method()` of `WaitAndRetry` or `RefreshSlotsAndRetry` means
+it answered *not now* (`LOADING`, `MASTERDOWN`, `TRYAGAIN`, `CLUSTERDOWN`, `READONLY` in a
+failover). Both are outages: warn, count, degrade to a miss; a 503 through `required`. Anything
+else is a bug, and `err.code()` names it:
 
 | Symptom | Meaning | Fix |
 |---|---|---|
@@ -183,12 +188,16 @@ with `invoke_async`, keys through `.key(..)`.
 
 ## Leases, limits, idempotency
 
-Coordination state, not cache: a `noeviction` Redis, never `allkeys-lru`.
+Leases, idempotency keys and revoked tokens are coordination state and need a `noeviction` Redis:
+they carry TTLs, so `volatile-lru`, the managed default, evicts them as `allkeys-lru` does.
+Limiter buckets and negative-cache entries, whose number the client controls, go on the evicting
+cache instance; on `noeviction` they grow until every write fails with `OOM`.
 
-A lease is `SET key token NX PX ttl` plus a Lua compare-and-delete to release (Redis ≥ 8.4:
-`del_ex` with `ValueComparison::ifeq`); a plain `DEL` frees somebody else's lock whenever the
-holder stalled past the TTL. A job that cannot acquire — held, or Redis down — skips this run
-(info log, counter), never crashes; a failed body releases anyway and the next run retries.
+A lease is `SET key token NX PX ttl` plus a Lua compare-and-delete to release (`del_ex` with
+`ValueComparison::ifeq` only on Redis ≥ 8.4: not 7.x, not Valkey); a plain `DEL` frees somebody
+else's lock whenever the holder stalled past the TTL. A job that cannot acquire — held, or Redis
+down — skips this run (info log, counter), never crashes; a failed body releases anyway and the
+next run retries.
 
 A rate limiter counts per verified caller: the `AuthUser` subject, else the client address — the
 `X-Forwarded-For` entry your own ingress appended (counted from the right, one per proxy of yours
@@ -200,12 +209,14 @@ traffic. Its slot in the stack and `into_make_service_with_connect_info` are `ax
 
 Idempotency implements `axum-service`'s contract, keyed per caller
 (`app:v1:idem:{subject}:{Idempotency-Key}`): with the raw header as the key, two clients sending
-the same value get each other's stored response. The claim is `SET key marker NX EX 30`, a TTL
-never below the request timeout, or a slow first attempt is re-run while it runs; `store` writes
-fingerprint + response (never the body) with its own 24 h `EX`. Redis dedups retries and replays
-the answer; it does not make the effect atomic with the record, so the effect must be an outbound
-call carrying the same key, never a bare database write. For a create, the unique index is the
-idempotency key. A revoked token is one key per `jti`, TTL its lifetime.
+the same value get each other's stored response. The claim is `SET key marker NX EX ttl`, the
+TTL above `REQUEST_TIMEOUT` by a margin (45 s over the scaffold's 30), or a slow first attempt is
+re-run while it runs; a failed effect releases the claim; `store` writes fingerprint + response
+(never the body) with its own 24 h `EX`, and its failure after the effect still returns the
+success. Redis dedups retries and replays the answer; it does not make the effect atomic with the
+record, so the effect must be an outbound call carrying the same key, never a bare database
+write. For a create, the unique index is the idempotency key. A revoked token is one key per
+`jti`, TTL its lifetime.
 
 ## Observability and testing
 
@@ -227,7 +238,7 @@ Most Redis material for Rust predates 1.0; these renames break it:
 | `Commands` / `AsyncCommands` only | plus `TypedCommands` / `AsyncTypedCommands` |
 | `from_redis_value(v: &Value) -> RedisResult<Self>` | `from_redis_value(v: Value) -> Result<Self, ParsingError>` |
 | `set` / `set_ex` took `ToRedisArgs` | they take `ToSingleRedisArg` |
-| `redis::transaction` closure (sync only) | `Pipeline::atomic()` with `query_async` |
+| `redis::transaction` closure | still there, sync connections only; async code uses `Pipeline::atomic()` with `query_async` |
 
 ## Red Flags — STOP
 
@@ -236,9 +247,5 @@ Most Redis material for Rust predates 1.0; these renames break it:
 | Call `KEYS` in application code | It blocks the whole server; `SCAN` with `MATCH` |
 | Release a lease with `DEL` | After a stall the key is the next holder's; Lua compare-and-delete |
 | Reach for `WATCH` on a `ConnectionManager` | Multiplexing arms and disarms it unpredictably; use a Lua script |
-| Add `#[from] redis::RedisError` or a `Cache` variant to `AppError` | Every `?` becomes a 500; map explicitly with `required` onto `Unavailable`/`Other` |
 | Store an idempotency record after a database effect, outside its transaction | The claim expires and the retry repeats the write; write the row in the same transaction (`sea-orm-postgres`) |
-| Put leases or idempotency keys on an `allkeys-lru` Redis | They get evicted under pressure; `noeviction` or a separate instance |
-| Key a limiter on `x-api-key`, the first `X-Forwarded-For` entry, the `ConnectInfo` peer behind an ingress, or an `anonymous` bucket | Chosen by the client, or everyone shares one bucket; user id, else the address your ingress appended |
-| Use the raw `Idempotency-Key` header as the Redis key | Two clients with the same key share a response; prefix it with the caller |
 | Call `SystemTime::now()` in the limiter | Time is the injected `Clock`; the window bucket takes `now` from it |

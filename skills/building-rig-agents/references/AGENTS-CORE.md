@@ -12,6 +12,7 @@ Verified against `rig` 0.45.0.
 - [Create a Provider Client](#create-a-provider-client)
 - [Build an Agent](#build-an-agent)
   - [Reasoning and Caching](#reasoning-and-caching)
+- [Request Rules by Model](#request-rules-by-model)
 - [The Agent Loop](#the-agent-loop)
 - [Choosing an Interface](#choosing-an-interface)
 - [Per-Request Options](#per-request-options)
@@ -109,7 +110,6 @@ use rig::agent::AgentBuilder;
 
 let agent = AgentBuilder::new(client.completion(MODEL))
     .preamble("You are a helpful assistant.")
-    .max_tokens(16_000)
     .build();
 ```
 
@@ -125,7 +125,7 @@ different providers share one type.
 | `context(&str)` | Add one static context document, sent on every request |
 | `dynamic_context(samples, index)` | Retrieve `samples` documents from a vector index per model call |
 | `name(&str)` / `description(&str)` | Become the tool name (default `agent_tool`) and description when this agent is handed to another via `into_tool()`, whose description also carries the preamble; also label telemetry spans |
-| `temperature(f64)`, `max_tokens(u64)` | Model parameters. Claude Opus 4.7 and later, Sonnet 5 and Fable reject `temperature` with a 400. On Claude, `max_tokens` covers thinking plus the reply; rig 0.45 defaults it to the published output limit of the Claude ids in its catalog (128K from Opus 4.6 and Sonnet 4.6 on), to 64K for other `claude-opus-4`, `claude-sonnet-4` and `claude-haiku-4-5` ids and, when `max_tokens` is unset, fails every prompt to any other id |
+| `temperature(f64)`, `max_tokens(u64)` | Model parameters. Claude Opus 4.7 and later, Sonnet 5 and Fable reject `temperature` with a 400. On Claude, `max_tokens` covers thinking plus the reply; rig 0.45 defaults it to the published output limit of the Claude ids in its catalog (128K from Opus 4.6 and Sonnet 4.6 on), to 64K for other `claude-opus-4`, `claude-sonnet-4` and `claude-haiku-4-5` ids and, when `max_tokens` is unset, fails every prompt to any other id. Both have a row under Request Rules by Model |
 | `reasoning(..)`, `cache(..)`, `on_unsupported(..)` | Portable generation options; see Reasoning and Caching |
 | `tool(T)` | Add a static tool (see Tools) |
 | `tool_choice(ToolChoice)` | Force, forbid, or restrict tool use |
@@ -152,7 +152,6 @@ const MODEL: &str = anthropic::CLAUDE_OPUS_5_5;
 fn support_agent(api_key: &str) -> Agent {
     AgentBuilder::new(Anthropic::new(api_key).completion(MODEL))
         .preamble("You are a support assistant.")
-        .max_tokens(32_000)
         .reasoning(Effort::High)
         .cache(CacheRetention::Long)
         .build()
@@ -163,13 +162,125 @@ fn support_agent(api_key: &str) -> Agent {
 (`Effort`, `Reasoning`, `CacheRetention` and `OnUnsupported` in `rig::completion`), and each
 provider maps them to its own fields: on Claude an effort becomes `output_config.effort`, with
 adaptive thinking on the models that take it, and `CacheRetention::Long` a one-hour
-`cache_control`. Set the effort explicitly: Claude Opus 5.5 and Haiku 5.5 default to
-`medium`, the other Claude models to `high`, and changing it between requests of one
-conversation restarts the prompt cache. Prefer these options to `additional_params`, because
-rig checks them against the provider and, for an id in its catalog, the model. An option the
-model cannot take, such as `Effort::Minimal` on Claude, fails the run before the request is
-sent, as a `PromptError::Report` of kind `Request`;
-`.on_unsupported(OnUnsupported::Ignore)` drops it with a warning instead.
+`cache_control`. An unset effort is the model's own default, which rig's catalog records as
+`medium` for Claude Opus 5.5 and the GPT-6 models and `high` for Claude Sonnet 5.5 and Fable
+5.1. Set it explicitly, so that changing the model does not change the effort with it, and
+keep it the same for a whole conversation: changing the effort between requests restarts the
+prompt cache. The agent above names its model, so its
+`max_tokens` stays unset and rig sends that model's published output limit. Prefer these
+options to `additional_params`, because rig checks them against the provider and, for an id
+in its catalog, the model. An option the model cannot take, such as `Effort::Minimal` on
+Claude, fails the run before the request is sent, as a `PromptError::Report` of kind
+`Request`; `.on_unsupported(OnUnsupported::Ignore)` drops it with a warning instead, which is
+what an agent whose model id comes from settings wants beside an explicit effort.
+
+## Request Rules by Model
+
+A model id decides which requests go through. These are the rules rig 0.45 encodes for the
+ids in its catalog (a dated snapshot of a listed id counts as that id), with what rig does
+about each:
+
+| The request | Models | What rig 0.45 does | Do instead |
+|---|---|---|---|
+| sets `temperature` or `top_p` | Claude Opus 4.7, 4.8, 5 and 5.5, Sonnet 5 and 5.5, Fable 5 and 5.1; GPT-5 and the o-series | Refuses it before sending when the request sets a generation option (`reasoning`, `cache`, `top_p`). A bare `temperature` rig sends, and Claude answers 400 | Leave both unset |
+| sets `temperature` or `top_p` while the model reasons | GPT-5.1 to 5.4 and 5.6, GPT-6 Sol, Luna, Astra and 6.1 Sol | The same refusal | `.reasoning(Reasoning::Off)` beside it, where the next row allows that |
+| sets `Reasoning::Off`, or an effort the model does not list | Claude Opus 5.5 and Fable 5.1, GPT-5, the o-series, GPT-6 Astra and 6.1 Sol cannot turn reasoning off; Claude has no `Effort::Minimal` | Refuses it before sending | The lowest effort the model lists |
+| forces a tool with `ToolChoice::Required` or `Specific` | Claude Opus 5.5, Sonnet 5.5, Fable 5.1 | Sends it as `any` or `tool`, and the model answers 400. Only the extractor drops its own force, for native output | `ToolChoice::Auto`; see Steering Tool Use |
+| sets no `max_tokens` | a Claude id outside the catalog, unless it starts `claude-opus-4`, `claude-sonnet-4` or `claude-haiku-4-5` | Fails every prompt before sending: `max_tokens` must be set for Anthropic | `.max_tokens(n)` sized for thinking plus the reply; a listed id stays unset |
+| carries tools over Chat Completions (`Route::Chat`, `client.chat(m)`) | GPT-6 Astra and 6.1 Sol; GPT-6 Sol and Luna at any effort but off | Refuses it for Astra and 6.1 Sol once a generation option is set; sends it for Sol and Luna, which OpenAI refuses | Keep the default route for OpenAI itself, Responses |
+
+A refusal by rig is a `PromptError::Report` of kind `Request`, not retryable, and costs no
+provider call. rig consults the catalog only for a listed id and only when the request sets a
+generation option, so a bare `.temperature(..)` reaches the provider. `model.check(&request)`
+lists every refusal with nothing sent, which lets a test pin the rules for the model a service
+is configured with:
+
+```rust,verify,test
+use rig::agent::AgentBuilder;
+use rig::catalog::Catalog;
+use rig::completion::{
+    CheckError, CompletionRequest, Effort, PromptError, Reasoning, ToolDefinition,
+};
+use rig::message::ToolName;
+use rig::operation::Completion;
+use rig::providers::openai::{self, OpenAIConfig, Route};
+use rig::providers::registry::ConnectOptions;
+use rig::{DynModel, ErrorKind};
+
+/// Connecting is offline, and `check` sends nothing, so the key is never used.
+fn connect(reference: &str) -> anyhow::Result<DynModel<Completion>> {
+    let options = ConnectOptions::new().api_key("unused");
+    Ok(Catalog::builtin().connect_with(reference, options)?)
+}
+
+/// The options of `request` the model refuses, by name.
+fn refused(model: &DynModel<Completion>, request: &CompletionRequest) -> Vec<String> {
+    match model.check(request) {
+        Err(CheckError::Unsupported(refusals)) => refusals
+            .into_iter()
+            .map(|refusal| refusal.option.into_owned())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+#[test]
+fn rig_refuses_what_the_request_rules_list() -> anyhow::Result<()> {
+    let sampled = CompletionRequest::new("hi").temperature(0.2);
+    let reasoning = sampled.clone().reasoning(Effort::High);
+    let off = sampled.clone().reasoning(Reasoning::Off);
+    let opus = connect("anthropic/claude-opus-5-5")?;
+    let sol = connect("openai/gpt-6-sol")?;
+    let astra = connect("openai/gpt-6-astra")?;
+
+    // No generation option set, so rig does not consult the catalog.
+    assert!(opus.check(&sampled).is_ok());
+    assert_eq!(refused(&opus, &reasoning), ["temperature"]);
+    assert_eq!(refused(&opus, &off), ["reasoning", "temperature"]);
+    // Sol samples once its reasoning is off; Astra cannot turn it off.
+    assert_eq!(refused(&sol, &reasoning), ["temperature"]);
+    assert!(sol.check(&off).is_ok());
+    assert_eq!(refused(&astra, &off), ["reasoning", "temperature"]);
+
+    let lookup = ToolDefinition::new(
+        ToolName::new("lookup")?,
+        "Look an order up",
+        serde_json::json!({ "type": "object", "properties": {} }),
+    );
+    let with_tool = CompletionRequest::new("hi")
+        .tools(vec![lookup])
+        .reasoning(Effort::High);
+    let over_chat = OpenAIConfig::new("unused")
+        .with_route(Route::Chat)
+        .client()
+        .completion(openai::GPT_6_ASTRA)
+        .erase();
+    assert_eq!(refused(&over_chat, &with_tool), ["tools"]);
+    assert!(astra.check(&with_tool).is_ok(), "Responses takes them");
+
+    // A Claude id outside the catalog cannot be sent without `max_tokens`.
+    let unlisted = connect("anthropic/claude-next")?;
+    let bare = CompletionRequest::new("hi");
+    assert!(matches!(unlisted.check(&bare), Err(CheckError::Invalid(_))));
+    assert!(unlisted.check(&bare.max_tokens(32_000)).is_ok());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refused_option_fails_the_run_before_anything_is_sent() {
+    let agent = AgentBuilder::new(connect("openai/gpt-6-sol").unwrap())
+        .temperature(0.2)
+        .reasoning(Effort::High)
+        .build();
+
+    let error = agent.prompt("hi").max_turns(1).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        PromptError::Report(report) if report.kind == ErrorKind::Request && !report.is_retryable()
+    ));
+}
+```
 
 ## The Agent Loop
 
@@ -240,8 +351,7 @@ use rig::completion::CompletionRequest;
 
 let model = client.completion(MODEL);
 let request = CompletionRequest::new("What is Rust?")
-    .preamble("You are a helpful assistant.")
-    .max_tokens(16_000);
+    .preamble("You are a helpful assistant.");
 let response = model.call(request).await?;
 ```
 

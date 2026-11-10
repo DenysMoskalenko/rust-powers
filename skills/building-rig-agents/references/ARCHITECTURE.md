@@ -134,7 +134,7 @@ Multi-turn conversation?
                         ├── No               → the store alone
                         ├── Old turns can go → load and save the log yourself, send
                         │                      view(.., LastMessages / TokenBudget) via .history(..)
-                        └── The gist matters → summarize and restart from the summary
+                        └── The gist matters → compact the stored log: CompactionPolicy, apply_summary
 ```
 
 `.memory(..)` sends the whole log every run; rig 0.45 has no window on that path — see

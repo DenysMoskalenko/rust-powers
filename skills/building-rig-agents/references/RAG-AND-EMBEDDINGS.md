@@ -107,7 +107,7 @@ use rig::embeddings::EmbeddingsBuilder;
 use rig::prelude::*;
 use rig::providers::openai::{self, OpenAI};
 use rig::vector_store::in_memory_store::InMemoryVectorStore;
-const MODEL: &str = openai::GPT_5_5;
+const MODEL: &str = openai::GPT_6_SOL;
 
 
 #[tokio::main]

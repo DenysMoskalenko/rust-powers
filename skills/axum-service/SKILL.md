@@ -2,7 +2,7 @@
 name: axum-service
 description: "Use when changing an axum service — routes, extractors, response DTOs, AppError statuses, utoipa OpenAPI, settings, secrets, middleware order, health checks, pagination, SSE, background tasks, shutdown, JWT auth, tracing, JSON logs, OTLP export, traceparent propagation, Prometheus metrics. Also for Handler is not satisfied, Path segments must not start with a colon, no method named tracer, spans never reaching the collector. Not for queries (sea-orm-postgres), a new service (rust-scaffolding), flaky tests (rust-testing), Cargo.toml or CI (rust-tooling)."
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
 ---
 
 # axum service patterns
@@ -13,7 +13,7 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
 
 ## Important
 
-- Handlers return `Result<_, AppError>`; `error.rs` is the only file that chooses a status code, and a 5xx body is a constant. Never `panic!` to signal failure.
+- Handlers return `Result<_, AppError>`; `error.rs` is the only file that chooses an error status, and a 5xx body is a constant. Never `panic!` to signal failure.
 - Every validator rule a client needs is repeated as `#[schema(...)]` or `#[param(...)]`; utoipa never reads `validate`.
 - `#[tracing::instrument(skip_all, fields(..))]` on the function that does the work; `err` only where an error never reaches `into_response`, which already logs each 5xx once.
 - Serve `app.into_make_service_with_connect_info::<SocketAddr>()` or `into_make_service()`, never a bare `Router`: axum 0.8.9 deep-copies it, handler captures included, per open connection.
@@ -23,8 +23,8 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
 - `references/extractors.md` — `AppError`, `ErrorBody`, `Valid` / `ValidQuery` / `Path`, rejection table, argument order, the 23503 arm. Before writing the error type or an extractor.
 - `references/openapi.md` — utoipa 6 wiring, `routes!`, nesting, bearer scheme, a `description` on every response, OpenAPI 3.2 for SSE, what the document omits. When documenting routes.
 - `references/settings.md` — nested env keys, lists, secrecy, `.env` precedence, `from_map`. When adding a configuration value.
-- `references/auth.md` — `Keys`, `Claims`, `AuthUser`, jsonwebtoken's crypto feature, argon2 0.6 hashing. When adding authentication.
-- `references/middleware.md` — `build_router`: the stack in order, the panic catcher, fallbacks, the timeout's empty 408, CORS, `route_layer`, `from_fn`, the rate-limit slot. When adding or reordering a layer.
+- `references/auth.md` — `Keys`, `Claims`, `AuthUser`, guarding a subtree, jsonwebtoken's crypto feature, argon2 0.6 hashing. When adding authentication.
+- `references/middleware.md` — `build_router`: the stack in order, the panic catcher, fallbacks, the 503 request timeout, CORS, `route_layer`, `from_fn`, the rate-limit slot. When adding or reordering a layer.
 - `references/operations.md` — health and the readiness body, request id, `main.rs`, timeout budget, pagination, background work, idempotency, outbound HTTP, memory after load. When wiring `main.rs` or a production concern.
 - `references/streaming.md` — SSE and streaming bodies. When a response is unbounded or long-lived.
 - `references/telemetry.md` — subscriber, `EnvFilter`, OTLP export, propagation, shutdown flush, missing spans. When wiring or fixing observability.
@@ -34,19 +34,19 @@ Queries, migrations, entities: `sea-orm-postgres`. Tests: `rust-testing`. LLM en
 
 ## Architecture
 
-A handler extracts, runs at most one ORM statement directly, and maps the result to a response DTO. Logic that spans more than one statement, or that a second caller needs, moves to a `services/` function. No repository layer — sea-orm is already the abstraction over SQL; a trait on top buys one implementation and a mock that proves nothing.
+A handler extracts, runs at most one query directly, and maps the result to a response DTO; a page's `count` and fetch are one query. Anything more, or logic a second caller needs, moves to a `services/` function. No repository layer — sea-orm is already the abstraction over SQL; a trait on top buys one implementation and a mock that proves nothing.
 
 ```text
 src/
-  main.rs      wiring only: dotenv, Settings::load, telemetry, pool, AppState, serve, shutdown
+  main.rs      wiring only: dotenv, Settings::load, telemetry, migrate, pool, AppState, serve, shutdown
   lib.rs       AppState, ApiDoc, build_router(state) -> Router: the stack and both fallbacks
-  config.rs    Settings sub-structs, the four timeout constants
+  config.rs    Settings sub-structs, the five timeout constants
   error.rs     AppError + ErrorBody + IntoResponse; REQUEST_ID task-local
   extract.rs   Valid, ValidQuery, Path
   telemetry.rs init(&TelemetrySettings) -> TelemetryGuard
   auth.rs      Keys, Claims, AuthUser, hashing (with the first protected route)
-  api/         mod.rs (router(), request_id), health.rs, users.rs (DTOs, handlers, router())
-  services/    multi-statement or shared logic; the scaffold has none yet
+  api/         mod.rs (router(), request_id, request_timeout), health.rs, users.rs (DTOs, handlers, router())
+  services/    multi-query or shared logic; the scaffold has none yet
 ```
 
 ## State
@@ -81,7 +81,7 @@ pub async fn create_user(
         name: Set(body.name),
         created_at: Set(state.clock.now().into()),
     }
-    .insert(&state.db)                       // one statement: it stays in the handler
+    .insert(&state.db)                       // one query: it stays in the handler
     .await?;
     Ok((StatusCode::CREATED, Json(created.into())))
 }
@@ -89,7 +89,7 @@ pub async fn create_user(
 
 ## Errors
 
-One enum, one `IntoResponse`, one wire shape. `Router::fallback` answers 404 with `AppError::NotFound`, `method_not_allowed_fallback` 405 with an `ErrorBody`: a wrong path has the shape of every other failure, never an empty body.
+`Router::fallback` answers 404 with `AppError::NotFound`, `method_not_allowed_fallback` 405 with an `ErrorBody`, so a wrong path has the shape of every other failure.
 
 | Variant | Status | Body `error` |
 |---|---|---|
@@ -104,17 +104,17 @@ One enum, one `IntoResponse`, one wire shape. `Router::fallback` answers 404 wit
 | `Db(DbErr)` with SQLSTATE 23503 | 422 | constant `"invalid reference"` |
 | `Unauthorized` | 401 | constant |
 | `TooManyRequests { retry_after_secs }` | 429 | constant; `Some` adds a `Retry-After` header |
-| `Unavailable(String)` | 503 | constant `"service unavailable"`; the string is logged |
+| `Unavailable(String)`, `Db(DbErr)` without a connection, the request timeout | 503 | constant `"service unavailable"`; the cause is logged |
 | `Db(DbErr)` otherwise, `Other(anyhow::Error)` | 500 | constant `"internal server error"` |
 | `Http(reqwest_middleware::Error)` | 502 | constant `"upstream request failed"` |
 
-`ErrorBody` is `{ "error", "request_id", "details" }` (the last two absent when `None`); `ErrorBody::new(msg)` fills `request_id` from the task-local. `into_response` logs every 5xx, every 409 and every `Db` error once, with the chain.
+`ErrorBody` is `{ "error", "request_id", "details" }` (the last two absent when `None`); `ErrorBody::new(msg)` fills `request_id` from the task-local. `into_response` logs once, with the chain: a 5xx at ERROR, a 409 or a constraint rejection at WARN.
 
-Add-on skills never add a variant: backend down → `Unavailable`, rate limit → `TooManyRequests`, wiring bug → `Other`, bad input → `BadRequest`. A missing parent row (23503) takes its status from where the parent id came from: a path segment (`POST /users/{id}/posts`) names a resource that does not exist, so the service classifies the `DbErr` and returns `NotFound`; a body field lets the `DbErr` reach the 422 row. Never a pre-flight `SELECT`: it loses the race the constraint wins.
+Add-on skills never add a variant: backend down → `Unavailable`, rate limit → `TooManyRequests`, wiring bug → `Other`, bad input → `BadRequest`. A missing parent row (23503) takes its status from the parent id's source: from the path it is `NotFound`, which the service returns by classifying the `DbErr` (`sea-orm-postgres` owns how); from the body the `DbErr` reaches the 422 row; never a pre-flight `SELECT`, which loses the race the constraint wins.
 
 ## Request DTOs and validation
 
-`Valid<T>` is `Json<T>` plus `T::validate()`; `ValidQuery<T>` is the query-string sibling: unparseable query string → `BadRequest` (400), failed rule → 422. `Path<T>` is the third, mapping `PathRejection` onto `BadRequest` so a bad id is an `ErrorBody` and not axum's plain-text `Invalid URL: ...`; a bare `axum::extract::Path` is the one handler that breaks the shape.
+`Valid<T>` is `Json<T>` plus `T::validate()`; `ValidQuery<T>` is the query-string sibling: unparseable query string → `BadRequest` (400), failed rule → 422. `Path<T>` is the third, mapping `PathRejection` onto `BadRequest` so a bad id is an `ErrorBody` and not axum's plain-text `Invalid URL: ...`; a bare `axum::extract::Path` is the one extractor that breaks the shape.
 
 ```rust
 #[derive(Debug, Deserialize, Validate, ToSchema)]
@@ -137,27 +137,27 @@ OpenAPI: `OpenApiRouter::with_openapi(ApiDoc::openapi())`, `.routes(routes!(..))
 
 Settings come from the environment only (`APP__SERVER__PORT`, `__` between every level); `dotenvy::dotenv().ok()` is the first statement of `main`; secrets are `SecretString`; tests use `Settings::from_map` because `std::env::set_var` is `unsafe` in edition 2024.
 
-Layer order has two opposite rules: inside one `ServiceBuilder` the **first** `.layer()` is outermost; chaining `.layer()` on a `Router` the **last** call is. The stack, outermost first: `api::request_id`, `error::catch_panic_layer()`, `OtelInResponseLayer`, `OtelAxumLayer`, Prometheus, CORS from `server.cors_origins` (empty means no layer; never `permissive()`), compression, `DefaultBodyLimit`, `TimeoutLayer` innermost. Everything — `/metrics`, probes, fallbacks, streaming routes — sits inside it.
+Layer order has two opposite rules: inside one `ServiceBuilder` the **first** `.layer()` is outermost; chaining `.layer()` on a `Router` the **last** call is. The stack, outermost first: `OtelAxumLayer`, `OtelInResponseLayer`, `api::request_id`, `error::catch_panic_layer()`, Prometheus, CORS from `server.cors_origins` (empty means no layer; never `permissive()`), compression, `DefaultBodyLimit`, `api::request_timeout` innermost. Everything — `/metrics`, probes, fallbacks, streaming routes — sits inside it.
 
 ## Telemetry
 
-`#[tracing::instrument(skip_all, fields(user_id = %id))]` on the function that does the work: `skip_all` then opt fields back in, because with `skip(state)` an argument added later silently becomes a field. `err` only where an error never reaches `into_response`, such as a background task: `into_response` already logs each 5xx once, so `err` on a handler or on a function returning `AppError` logs it twice and records a 404 as an error. `SecretString` has no `Display` and redacts `Debug`, so the leak is `%secret.expose_secret()`; never log a whole body.
+`#[tracing::instrument(skip_all, fields(user_id = %id))]`: `skip_all` then opt fields back in, because with `skip(state)` an argument added later silently becomes a field. `SecretString` has no `Display` and redacts `Debug`, so the leak is `%secret.expose_secret()`; never log a whole body.
 
-One middleware, `api::request_id`, trusts or mints `x-request-id`, opens a `request` span carrying it, scopes the `REQUEST_ID` task-local that `ErrorBody::new` reads, and echoes the header.
+One middleware, `api::request_id`, keeps an inbound `x-request-id` of 1–64 `[A-Za-z0-9._-]` characters or mints one, opens a `request` span carrying it, scopes the `REQUEST_ID` task-local, and echoes the header.
 
-`OtelAxumLayer` + `OtelInResponseLayer` are the only HTTP span source: inbound `traceparent` continued, server span named by `http.route`, context written back. `telemetry::init` always installs the tracer provider and `TraceContextPropagator`; `APP__TELEMETRY__OTLP_ENDPOINT` only decides whether an exporter is attached — unset means no exporter, and the SDK's own `OTEL_EXPORTER_OTLP_ENDPOINT` is never consulted.
+`OtelAxumLayer` then `OtelInResponseLayer` are the only HTTP span source, outermost and in that order: inbound `traceparent` continued, server span named by `http.route`, the `request` span its child, the same trace written back. `telemetry::init` always installs the tracer provider and `TraceContextPropagator`; `APP__TELEMETRY__OTLP_ENDPOINT` only decides whether an exporter is attached — unset means no exporter, and the SDK's own `OTEL_EXPORTER_OTLP_ENDPOINT` is never consulted.
 
-Metrics are `metrics::counter!` and `histogram!` against the recorder `build_router` installs once with `PrometheusMetricLayer::pair()` (a second call panics) and serves on `/metrics`. Labels are constants: a user id or raw path multiplies the series until the scrape falls over.
+Metrics are `metrics::counter!` and `histogram!` against the process-wide recorder `build_router` installs once through a `OnceLock` (a second `PrometheusMetricLayer::pair()` panics) and serves on `/metrics`; an unmatched path is labelled `unmatched`. Labels are constants: a user id or raw path multiplies the series.
 
 ## Operations
 
-Liveness `/health/live` is 200 with no dependencies. Readiness `/health/ready` returns `{ "status", "checks": { "<name>": ... } }` where every value is `"ok"`, `"degraded"` or `"unavailable"` and `status` is the worst check: a required dependency (the database, pinged under `READINESS_TIMEOUT`) failing is `"unavailable"` and 503; an optional one (cache, messaging) failing is `"degraded"` and still 200. Add-on skills add one entry to `checks`, nothing else. `/version`: build info; all unauthenticated.
+Liveness `/health/live` is 200 with no dependencies. Readiness `/health/ready` returns `{ "status", "checks": { "<name>": ... } }` where every value is `"ok"`, `"degraded"` or `"unavailable"` and `status` is the worst check: a required dependency (the database, pinged under `READINESS_TIMEOUT`) failing is `"unavailable"` and 503; an optional one (cache, messaging) failing is `"degraded"` and still 200. Add-on skills add one entry to `checks`. `/version`: build info; all unauthenticated.
 
-Timeout budget, four constants in `config.rs`, shortest first: `READINESS_TIMEOUT` 2 s, `DB_STATEMENT_TIMEOUT` 10 s (`ConnectOptions`), `HTTP_CLIENT_TIMEOUT` 10 s, `REQUEST_TIMEOUT` 30 s (`TimeoutLayer`), then the caller's timeout. Inverted, the client gives up while the query still runs.
+Timeout budget, five constants in `config.rs`, shortest first: `READINESS_TIMEOUT` 2 s, `DB_STATEMENT_TIMEOUT` 10 s (`ConnectOptions`), `HTTP_CLIENT_TIMEOUT` 10 s, `REQUEST_TIMEOUT` 30 s (`api::request_timeout`), then the caller's timeout; `SHUTDOWN_TIMEOUT` 35 s, the drain deadline, under the orchestrator's grace period. Inverted, the client gives up while the query still runs.
 
-Shutdown order: drain in-flight (`with_graceful_shutdown`), flush the exporter (`guard.shutdown()`), close the pool.
+Shutdown order: drain in-flight (`with_graceful_shutdown`) until `SHUTDOWN_TIMEOUT`, flush the exporter (`guard.shutdown()`), close the pool.
 
-A new list endpoint pages with `?limit=&offset=`, default 20, maximum 100 via `#[validate(range(min = 1, max = 100))]`, in a `Page<T> { items, total, limit, offset }` envelope, never a bare array. An existing list keeps the shape its clients parse.
+A new list endpoint pages with `?limit=&offset=`, default 20, maximum 100 via `#[validate(range(min = 1, max = 100))]`, `offset` capped at `MAX_OFFSET` (10 000; the driver panics past `i64::MAX`), in a `Page<T> { items, total, limit, offset }` envelope, never a bare array. An existing list keeps the shape its clients parse.
 
 Work that outlives the response is `tokio::spawn` with the error logged inside the task; a dropped `JoinHandle` discards it.
 
@@ -167,7 +167,7 @@ Work that outlives the response is `tokio::spawn` with the error logged inside t
 |---|---|
 | `/:id`, `/*rest` | `/{id}`, `/{*rest}` — the old form panics at router build |
 | `#[async_trait]` on `FromRequest` / `FromRequestParts` | plain `async fn` in trait; the attribute is now a compile error |
-| `Option<Query<T>>` swallowed every rejection | it rejects; opt in with `OptionalFromRequestParts` |
+| `Option<Query<T>>` swallowed every rejection | does not compile; `Option` or `#[serde(default)]` fields, or `axum_extra::extract::OptionalQuery` |
 | handlers required `Send` | handlers and services also require `Sync` |
 | a 405 was an empty response you could not customise | `Router::method_not_allowed_fallback` |
 | `Serve::tcp_nodelay` | `serve::ListenerExt` |
@@ -178,7 +178,7 @@ Work that outlives the response is `tokio::spawn` with the error logged inside t
 |---|---|
 | Return `Json(model)`, or put `#[serde(skip_serializing)]` on an entity | Architecture — a response DTO with `From<Model>`; the model ships `password_hash`, and codegen overwrites entity attributes |
 | Put `Json` or `Valid` before another extractor | Routes — the body extractor goes last, or the only error is `Handler` is not satisfied |
-| Put a second statement, an if-ladder or reused logic in a handler | Architecture — one statement in the handler; more is a `services/` function |
+| Put a second query, an if-ladder or reused logic in a handler | Architecture — one query in the handler; more is a `services/` function |
 | Add a repository trait over sea-orm | Architecture — the ORM is the abstraction |
 | Expect `#[validate(range(max = 100))]` in the schema | Request DTOs — repeat it as `#[schema(maximum = 100)]` |
 | Put an `anyhow` chain or a constraint name in a body | Errors — 5xx and 409 render a constant and log the chain |

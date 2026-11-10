@@ -2,7 +2,7 @@
 name: rust-testing
 description: "Use when writing or fixing tests for an axum service or a new endpoint, or stabilizing a flaky test — API tests through axum-test and TestServer, test_app and its dependency overrides, rstest fixtures, fake and bon factories, httpmock, insta snapshots, injected Clock, nextest filters, coverage exclusions. Also for PoolTimedOut, or tests that leak state under nextest. Not for nextest.toml, llvm-cov flags or CI (rust-tooling), the Postgres container and per-test database (sea-orm-postgres), or rig mocks (building-rig-agents)."
 metadata:
-  version: "0.5.0"
+  version: "0.6.0"
 ---
 
 # Testing an axum service
@@ -27,7 +27,7 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
 
 ## Philosophy
 
-One HTTP request exercises routing, extractors, validation, serialisation, error mapping and the query at once; a handler unit test proves little. `sea_orm::MockDatabase` asserts on the SQL emitted today, so it fails on every refactor and passes on every schema mistake.
+One HTTP request exercises routing, extractors, validation, serialisation, error mapping and the query; a handler unit test proves little. `sea_orm::MockDatabase` asserts on the SQL emitted today, so it fails on every refactor and passes on every schema mistake.
 
 - **Unit-test pure logic only** — parsers, money arithmetic, state machines — in a `#[cfg(test)] mod tests` in the same file, where private items are visible.
 - **Deterministic data.** Random-but-valid for "any valid user"; the moment an assertion depends on a value, pin it.
@@ -50,7 +50,7 @@ Integration tests reach only `pub` items of a **library** target, so a binary-on
 
 ## test_app(): overriding dependencies
 
-There is no override registry in axum and none is needed: the router is a function of its state, so a test builds the **real** router over a state it owns.
+The router is a function of its state, so a test builds the **real** router over a state it owns.
 
 ```rust
 pub struct TestApp {
@@ -63,9 +63,9 @@ pub struct TestApp {
 pub async fn test_app() -> TestApp { /* in tests/api/common.rs */ }
 ```
 
-`test_app()` gives the test a database of its own, cloned from a template the run migrated once, pins the clock to `FixedClock(2026-09-13T12:00:00Z)` so `created_at` is assertable, and starts a `MockServer`: give its `base_url()` to whatever setting the code under test reads for an upstream. Two dependencies swapped, one stub started, nothing global. For how the database is provisioned see `sea-orm-postgres`. A project without `test_app()` copies `tests/api/common.rs` from the rust-scaffolding template, then adapts `AppState` and the settings map to its own.
+`test_app()` gives the test a database of its own, cloned from a template the run migrated once, pins the clock to `FixedClock(2026-09-13T12:00:00Z)` so `created_at` is assertable, and starts a `MockServer`: give its `base_url()` to whatever setting the code under test reads for an upstream. For how the database is provisioned see `sea-orm-postgres`. A project without `test_app()` copies `tests/api/common.rs` from the rust-scaffolding template, then adapts `AppState` and the settings map to its own.
 
-Do **not** add an `Arc<dyn Trait>` to `AppState` to make something swappable: Postgres and outbound HTTP have real local stand-ins.
+Do **not** put Postgres or outbound HTTP behind an `Arc<dyn Trait>` in `AppState` to swap them in a test: both have real local stand-ins. An effect a test cannot exercise (the `Clock`, email, payments, an LLM) is injected as a trait (`references/mocking.md`).
 
 ## The shape of a test
 
@@ -126,7 +126,7 @@ An underscore-prefixed fixture parameter trips `clippy::used_underscore_binding`
 |---|---|
 | assert a call failed | API: `.expect_failure()` then `assert_status`; unit: `let err = f().unwrap_err(); assert!(matches!(err, AppError::NotFound(_)))` |
 | a known failure, unfixed | `#[should_panic(expected = "..")]` for a known panic, `#[ignore = ".."]` otherwise |
-| an implicit fixture | none; every fixture is a named parameter |
+| setup every test needs | call it in the test or name the fixture as a parameter; rstest runs nothing on its own |
 
 ## Running tests
 
@@ -140,7 +140,7 @@ An underscore-prefixed fixture parameter trips `clippy::used_underscore_binding`
 | See output live, serially | `cargo nextest run --no-capture` |
 | Doctests | `cargo test --doc`; nextest skips them |
 
-Mark a test needing a live external dependency `#[ignore = "requires a live IdP"]` so the default run stays green offline. nextest forks a process per test, so `static`, `OnceLock` and `LazyLock` re-initialise per test and an in-process `Mutex` serialises nothing; a test group is for a genuinely shared, uncloneable resource only. For `.config/nextest.toml` see `rust-tooling`.
+Mark a test needing a live external dependency `#[ignore = "requires a live IdP"]` so the default run stays green offline. nextest forks a process per test, so `static`, `OnceLock` and `LazyLock` re-initialise per test and an in-process `Mutex` serialises nothing; a test group is for a shared, uncloneable resource only. Plain `cargo test` passes too; there a binary's tests are threads of one process, so statics are shared and a `tracing` subscriber is installed once, process-wide (`references/mocking.md`). For `.config/nextest.toml` see `rust-tooling`.
 
 ## Coverage
 
@@ -162,16 +162,15 @@ The denominator leaves out four things: `entities/` is generated by `sea-orm-cli
 | Fails when reordered | assertion depends on insertion order | order the query or assert on a set; under `FixedClock` every row shares `created_at`, so a `created_at DESC` list is ordered by the uuid v7 `id` tiebreak alone |
 | Address already in use | a real socket was bound | `TestServer::new(app)` is in-process; drop `http_transport()` |
 | Assertion on a random value | unpinned factory data | override the field or seed the RNG |
-| `OnceCell` re-initialises | nextest forks per test | move the resource out of the process |
-| Every test hangs at startup after a Docker restart | the reused `rust-powers-test-postgres` container is stale and never health-checked again | `docker rm -f rust-powers-test-postgres`, then rerun |
+| Every database test hangs at startup or cannot connect | the reused `rust-powers-test-postgres` container starts but its Postgres does not, and reuse runs no health check | `docker rm -f rust-powers-test-postgres`, then rerun |
 
 ## Slow tests
 
-Most of a light API test is setup. Measured on the scaffold (macOS arm64), the costs besides creating the database:
+Measured on the scaffold (macOS arm64), the costs besides creating the database:
 
 | Cost | Cause | Remedy |
 |---|---|---|
-| ~0.2 s, every test | `build_router` builds the Prometheus recorder, whose quanta clock calibrates once per process, and nextest runs one test per process | none inside the recorder, which calls `Clock::new()` itself; leaving the metrics layer out of tests is `axum-service`'s call |
+| ~0.2 s, every test | the first `build_router` in a process installs the Prometheus recorder, whose quanta clock calibrates then, and nextest runs one test per process | none inside the recorder, which calls `Clock::new()` itself; leaving the metrics layer out of tests is `axum-service`'s call |
 | ~0.2 s per 170k files beside the test binary, macOS | `reqwest::Client::new()` reads the system proxy settings, and that lists the binary's directory; a long-lived `target/debug/deps` grows past 100k | build test clients with `.no_proxy()`, as `test_app()` does |
 
 The per-run template, its clone and cleanup are `sea-orm-postgres`'s.
@@ -189,7 +188,6 @@ The per-run template, its clone and cleanup are `sea-orm-postgres`'s.
 
 | About to… | Do this instead |
 |---|---|
-| Mock the database or your own service layer | real Postgres through `test_app()`; mock only what cannot be controlled |
 | Add `Arc<dyn Repository>` so a test can swap the store | swap the whole `AppState`; one-implementor traits are for genuine side effects only |
 | `tokio::time::sleep` to wait for background work | await the `JoinHandle` or a oneshot; `start_paused` auto-advances past every timeout on the way to Postgres, so `test_app()` fails at once |
 | Assert on `Utc::now()` output | inject the `Clock`; `Utc::now()` has no hook a test can intercept |

@@ -1,5 +1,5 @@
 //! One error type for the whole service. Handlers return
-//! `Result<T, AppError>`; `IntoResponse` is the only place a status code is chosen.
+//! `Result<T, AppError>`; `IntoResponse` is the only place an error status is chosen.
 use std::any::Any;
 
 use axum::Json;
@@ -121,6 +121,11 @@ impl AppError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            // No connection to run the statement on: the pool is exhausted or
+            // Postgres is unreachable. The request was fine and may be retried.
+            Self::Db(sea_orm::DbErr::ConnectionAcquire(_) | sea_orm::DbErr::Conn(_)) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             // 23505 is a duplicate key and 23503 a missing or still-referenced
             // parent row: client problems, not server ones.
             Self::Db(err) => match err.sql_err() {
@@ -135,43 +140,50 @@ impl AppError {
             Self::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
+
+    /// Logged once, here, where every failure passes through. A 5xx is an
+    /// ERROR with the whole cause chain. A constraint the client tripped is a
+    /// WARN: the line is what tells you which constraint fired, and a duplicate
+    /// email must not page anyone.
+    #[expect(
+        clippy::cognitive_complexity,
+        reason = "the lint counts what two tracing macros expand to; the logic is one if/else"
+    )]
+    fn log(&self, status: StatusCode) {
+        if status.is_server_error() {
+            tracing::error!(error = ?self, %status, "request failed");
+        } else if matches!(self, Self::Conflict(_) | Self::Db(_)) {
+            tracing::warn!(error = ?self, %status, "request rejected by a constraint");
+        }
+    }
+
+    /// What the client is told. A `DbErr` or a reqwest error renders its whole
+    /// cause chain, constraint names and connection strings included, so a 409
+    /// and every 5xx answer with a constant picked by status, never with the
+    /// error's own text.
+    fn body(&self, status: StatusCode) -> ErrorBody {
+        match (status, self) {
+            (StatusCode::CONFLICT, _) => ErrorBody::new("conflict"),
+            (StatusCode::SERVICE_UNAVAILABLE, _) => ErrorBody::new("service unavailable"),
+            (StatusCode::BAD_GATEWAY, _) => ErrorBody::new("upstream request failed"),
+            (StatusCode::INTERNAL_SERVER_ERROR, _) => ErrorBody::new("internal server error"),
+            // The one `Db` status left: 23503, a parent row that does not exist.
+            (_, Self::Db(_)) => ErrorBody::new("invalid reference"),
+            (_, Self::Validation(errors)) => ErrorBody {
+                details: serde_json::to_value(errors).ok(),
+                ..ErrorBody::new("validation failed")
+            },
+            (_, other) => ErrorBody::new(other.to_string()),
+        }
+    }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status();
+        self.log(status);
 
-        // Logged once, here, where every failure passes through. 5xx carries the
-        // whole cause chain; a `Conflict` or `Db` line is what tells you which constraint fired.
-        if status.is_server_error() || matches!(self, Self::Conflict(_) | Self::Db(_)) {
-            tracing::error!(error = ?self, %status, "request failed");
-        }
-
-        let body = match &self {
-            // A `DbErr` or a reqwest error renders its whole cause chain,
-            // constraint names and connection strings included, so neither is ever
-            // stringified into a response. Nor is a 409, whose only honest
-            // constant is the status itself.
-            _ if status == StatusCode::CONFLICT => ErrorBody::new("conflict"),
-            Self::Db(err)
-                if matches!(
-                    err.sql_err(),
-                    Some(sea_orm::SqlErr::ForeignKeyConstraintViolation(_))
-                ) =>
-            {
-                ErrorBody::new("invalid reference")
-            }
-            Self::Db(_) | Self::Other(_) => ErrorBody::new("internal server error"),
-            Self::Http(_) => ErrorBody::new("upstream request failed"),
-            Self::Unavailable(_) => ErrorBody::new("service unavailable"),
-            Self::Validation(errors) => ErrorBody {
-                details: serde_json::to_value(errors).ok(),
-                ..ErrorBody::new("validation failed")
-            },
-            other => ErrorBody::new(other.to_string()),
-        };
-
-        let mut response = (status, Json(body)).into_response();
+        let mut response = (status, Json(self.body(status))).into_response();
         if let Self::TooManyRequests {
             retry_after_secs: Some(secs),
         } = self

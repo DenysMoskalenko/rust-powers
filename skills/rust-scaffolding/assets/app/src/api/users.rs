@@ -60,6 +60,12 @@ pub struct Page<T> {
     pub offset: u64,
 }
 
+/// `OFFSET` reads and discards every skipped row, so it is capped: past this a
+/// client narrows the filter, or the endpoint moves to keyset pagination. The
+/// cap is also what keeps a `u64` from the query string inside the `i64` that
+/// Postgres takes; the driver panics on a larger value.
+const MAX_OFFSET: u64 = 10_000;
+
 #[derive(Debug, Deserialize, Validate, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListUsers {
@@ -67,8 +73,9 @@ pub struct ListUsers {
     #[serde(default = "default_limit")]
     #[param(default = 20, minimum = 1, maximum = 100)]
     pub limit: u64,
+    #[validate(range(max = MAX_OFFSET))]
     #[serde(default)]
-    #[param(default = 0)]
+    #[param(default = 0, maximum = 10000)]
     pub offset: u64,
 }
 
@@ -140,13 +147,13 @@ pub async fn get_user(
 /// List users, newest first.
 ///
 /// # Errors
-/// 422 when `limit` is outside 1..=100.
+/// 422 when `limit` is outside 1..=100 or `offset` is past 10 000.
 #[utoipa::path(
     get, path = "/users", tag = "users",
     params(ListUsers),
     responses(
         (status = 200, body = Page<UserResponse>, description = "One page of users"),
-        (status = 422, body = ErrorBody, description = "`limit` is outside 1..=100"),
+        (status = 422, body = ErrorBody, description = "`limit` is outside 1..=100, or `offset` is past 10 000"),
     )
 )]
 #[tracing::instrument(skip_all, fields(limit = query.limit, offset = query.offset))]

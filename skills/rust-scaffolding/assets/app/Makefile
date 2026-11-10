@@ -28,7 +28,7 @@ cap_target = meta=$$(cargo metadata --no-deps --format-version 1); \
 	esac; fi
 
 install-tools:
-	cargo install cargo-binstall
+	cargo install --locked cargo-binstall
 	cargo binstall -y cargo-nextest cargo-llvm-cov cargo-deny cargo-machete cargo-chef bacon cargo-insta sea-orm-cli prek
 	prek install
 

@@ -30,7 +30,7 @@ futures = "0.3"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
-tower-http = { version = "0.7", features = ["cors", "compression-full", "timeout", "catch-panic"] }
+tower-http = { version = "0.7", features = ["cors", "compression-full", "catch-panic"] }
 reqwest = { version = "0.13", features = ["json", "query"] }
 # serialization / validation / openapi
 serde = { version = "1", features = ["derive"] }
@@ -68,7 +68,7 @@ bon = "3"
 itertools = "0.15"
 derive_more = { version = "2", features = ["full"] }
 strum = { version = "0.28", features = ["derive"] }
-# add when needed (all resolved and compiled in the same lock file):
+# add when needed (verified to resolve and compile together with the above; not in Cargo.lock until you add them):
 # axum-extra = { version = "0.12", features = ["typed-header"] }
 # rig = { version = "0.45", features = ["rmcp"] }   # the facade; rig-core has no agents. Add "memory" for rig::memory (stores, windows, compaction), "test-utils" as a dev feature
 # rmcp = { version = "3", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }   # rig-rmcp needs ^3.5
@@ -90,6 +90,7 @@ fake = { version = "5", features = ["derive", "chrono", "uuid", "rust_decimal"] 
 rand = "0.10"                                            # the version fake 5 builds on
 test-log = { version = "0.2", features = ["trace"] }
 tokio = { version = "1.53", features = ["test-util"] }   # `full` does NOT include test-util
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }   # the in-memory span exporter
 
 [package.metadata.cargo-machete]
 # The stack ships these for the code you are about to write; `rust_decimal` is

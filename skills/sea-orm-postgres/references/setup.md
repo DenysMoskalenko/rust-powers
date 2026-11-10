@@ -1,5 +1,9 @@
 # Connecting to Postgres
 
+- [Cargo features](#cargo-features)
+- [ConnectOptions](#connectoptions)
+- [The connection in application state](#the-connection-in-application-state)
+
 ## Cargo features
 
 ```toml
@@ -11,10 +15,11 @@ sea-orm = { version = "2", features = [
 ] }
 ```
 
-Every feature above except the driver is already on by default; list them anyway so a later
-`default-features = false` does not silently remove something. Two defaults are easy to lose that
-way: `stream`, which backs `.stream()`, and `with-time`, which pulls the `time` crate and is the one
-default worth dropping deliberately. `with-bigdecimal` is no longer a default. The `mock` feature
+The driver and the runtime are never defaults, so those two lines are required. `macros` and the
+four `with-*` features are defaults; list them anyway so a later `default-features = false` does
+not silently remove something. Two defaults are easy to lose that way: `stream`, which backs
+`.stream()`, and `with-time`, which pulls the `time` crate and is the one default worth dropping
+deliberately. `with-bigdecimal` is no longer a default. The `mock` feature
 gates `MockDatabase`.
 
 ## ConnectOptions
@@ -28,7 +33,7 @@ use std::time::Duration;
 use crate::config::DB_STATEMENT_TIMEOUT;
 
 // `max_connections` is per process. Budget
-// replicas * max_connections + migrations + admin <= the server's max_connections.
+// peak replicas * max_connections + migrations + admin <= the server's max_connections.
 pub async fn connect(url: &str, max_connections: u32) -> Result<DatabaseConnection, DbErr> {
     let mut opt = ConnectOptions::new(url);
     opt.max_connections(max_connections)
@@ -55,18 +60,26 @@ plan holds a pooled connection until the client times out, and the query keeps b
 afterwards.
 
 Sizing: ten connections per process with four replicas is a reasonable start against the Postgres
-default of 100. Raise the replica count before the per-pod pool, and put PgBouncer in front before
-raising either. `statement_timeout` is a connection-level `SET`, which PgBouncer in transaction
-pooling does not carry reliably; there, set it on the server or the role instead. `connect_lazy(true)`
+default of 100. Count replicas at their peak, not their steady state: a rolling deploy runs the
+old and the surging new pods together, and an autoscaler adds more, so the budget is the largest
+number of pods that can exist at once. Raise the replica count before the per-pod pool, and put
+PgBouncer in front before raising either. sea-orm sends `statement_timeout` as a startup
+`options` parameter, not as a `SET`; PgBouncer may reject such a connection or drop the
+parameter, so behind a pooler set the timeout on the role
+(`ALTER ROLE app SET statement_timeout = '10s'`) and confirm it with `SHOW statement_timeout`.
+That setting reaches migrations too: the scaffold's `migrate()` logs in as the same role, so a
+backfill or an index build is cancelled after ten seconds. With a role-level timeout, migrate
+from a job under a role without it (`make migrate` with that role's `DATABASE_URL`), not at
+startup. `connect_lazy(true)`
 lets a process start before the database is reachable, which matters when the orchestrator starts
 the app and the database in the same batch.
 
 sea-orm's own default is `sqlx_logging(true)`; the scaffold turns it off because with it on every
-statement is an INFO event, `echo=True` for every request in production. To see SQL locally, flip
+statement is an INFO event, seven lines per request in production. To see SQL locally, flip
 it in one place — `.sqlx_logging(cfg!(debug_assertions))`, or a `settings.database.log_statements`
 boolean — and keep `RUST_LOG=info`. sqlx 0.9 emits native `tracing` events with target
-`sqlx::query` (no `log` bridge), so a `tracing_subscriber::Layer` on that target can collect and
-count them; `relations.md` does exactly that to prove a query count. Slow-query logging is
+`sqlx::query` (no `log` bridge), so a `tracing_subscriber::Layer` on that target can collect
+them. Slow-query logging is
 `sqlx_slow_statements_logging_settings(level, threshold)`, which takes a `log::LevelFilter` and
 therefore needs the `log` crate as a direct dependency. The `tracing-spans` feature plus
 `record_stmt_in_spans(true)` attaches the SQL to the surrounding span instead.
@@ -89,8 +102,8 @@ pub struct AppState {
 }
 ```
 
-There is no session-per-request object and nothing to open or close per request. An extractor
-that hands a handler a "session" would have nothing to hand out:
+Nothing is opened or closed per request. An extractor that hands a handler a connection would
+have nothing to hand out:
 checkout happens inside each `await`ed statement and returns to the pool immediately. Where a
 request genuinely needs several statements to commit together, open a transaction explicitly.
 For wiring state into the router see `axum-service`.

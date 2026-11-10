@@ -50,8 +50,9 @@ static ADMIN_URL: LazyLock<OnceCell<String>> = LazyLock::new(OnceCell::new);
 /// binary: a plain testcontainers call would start one container per test.
 /// `TEST_DATABASE_URL` (docker compose locally, `services:` in CI) is the fast
 /// path; the fallback container is named and reused so repeated runs share it.
-/// A reused container is never cleaned up. If a run hangs at startup after a
-/// Docker restart, its data is corrupt: `docker rm -f rust-powers-test-postgres`.
+/// A reused container is never cleaned up, and a stopped one is started again
+/// on reuse. If a run still hangs at startup, Postgres inside it cannot start:
+/// `docker rm -f rust-powers-test-postgres`.
 async fn admin_url() -> &'static str {
     ADMIN_URL
         .get_or_init(|| async {
@@ -228,7 +229,11 @@ pub async fn test_app() -> TestApp {
             "APP__DATABASE__URL".to_owned(),
             database_url(admin_url, &db_name),
         ),
-        ("APP__AUTH__JWT_SECRET".to_owned(), "test-secret".to_owned()),
+        (
+            "APP__AUTH__JWT_SECRET".to_owned(),
+            // 32 bytes or more, the least an HS256 key may be.
+            "test-secret-of-at-least-32-bytes!".to_owned(),
+        ),
         ("APP__TELEMETRY__JSON_LOGS".to_owned(), "false".to_owned()),
     ]))
     .unwrap();

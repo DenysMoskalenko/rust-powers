@@ -8,14 +8,16 @@
 
 ## AppError and ErrorBody
 
-`error.rs` is the only file in the service that chooses a status code. Services return domain
-errors or `anyhow::Error`; `#[from]` lifts them, and `?` in a handler does the rest. The
+`error.rs` is the only file in the service that chooses an error status. Services return
+`AppError`, `DbErr` or `anyhow::Error`; `#[from]` lifts the last two, and `?` in a handler does the
+rest. A domain error enum reaches `AppError` through a hand-written `impl From` that maps each
+case onto an existing variant, never through `#[from]`, which would need a variant of its own. The
 `REQUEST_ID` task-local is declared here and nowhere else; the request-id middleware scopes it,
 and `ErrorBody::new` reads it.
 
 ```rust,verify
 //! One error type for the whole service. Handlers return
-//! `Result<T, AppError>`; `IntoResponse` is the only place a status code is chosen.
+//! `Result<T, AppError>`; `IntoResponse` is the only place an error status is chosen.
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::http::{HeaderValue, StatusCode, header};
@@ -107,6 +109,11 @@ impl AppError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            // No connection to run the statement on: the pool is exhausted or
+            // Postgres is unreachable. The request was fine and may be retried.
+            Self::Db(sea_orm::DbErr::ConnectionAcquire(_) | sea_orm::DbErr::Conn(_)) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             // 23505 is a duplicate key and 23503 a missing or still-referenced
             // parent row: client problems, not server ones.
             Self::Db(err) => match err.sql_err() {
@@ -121,43 +128,50 @@ impl AppError {
             Self::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
+
+    /// Logged once, here, where every failure passes through. A 5xx is an
+    /// ERROR with the whole cause chain. A constraint the client tripped is a
+    /// WARN: the line is what tells you which constraint fired, and a duplicate
+    /// email must not page anyone.
+    #[expect(
+        clippy::cognitive_complexity,
+        reason = "the lint counts what two tracing macros expand to; the logic is one if/else"
+    )]
+    fn log(&self, status: StatusCode) {
+        if status.is_server_error() {
+            tracing::error!(error = ?self, %status, "request failed");
+        } else if matches!(self, Self::Conflict(_) | Self::Db(_)) {
+            tracing::warn!(error = ?self, %status, "request rejected by a constraint");
+        }
+    }
+
+    /// What the client is told. A `DbErr` or a reqwest error renders its whole
+    /// cause chain, constraint names and connection strings included, so a 409
+    /// and every 5xx answer with a constant picked by status, never with the
+    /// error's own text.
+    fn body(&self, status: StatusCode) -> ErrorBody {
+        match (status, self) {
+            (StatusCode::CONFLICT, _) => ErrorBody::new("conflict"),
+            (StatusCode::SERVICE_UNAVAILABLE, _) => ErrorBody::new("service unavailable"),
+            (StatusCode::BAD_GATEWAY, _) => ErrorBody::new("upstream request failed"),
+            (StatusCode::INTERNAL_SERVER_ERROR, _) => ErrorBody::new("internal server error"),
+            // The one `Db` status left: 23503, a parent row that does not exist.
+            (_, Self::Db(_)) => ErrorBody::new("invalid reference"),
+            (_, Self::Validation(errors)) => ErrorBody {
+                details: serde_json::to_value(errors).ok(),
+                ..ErrorBody::new("validation failed")
+            },
+            (_, other) => ErrorBody::new(other.to_string()),
+        }
+    }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status();
+        self.log(status);
 
-        // Logged once, here, where every failure passes through. 5xx carries the
-        // whole cause chain; a `Conflict` or `Db` line is what tells you which constraint fired.
-        if status.is_server_error() || matches!(self, Self::Conflict(_) | Self::Db(_)) {
-            tracing::error!(error = ?self, %status, "request failed");
-        }
-
-        let body = match &self {
-            // A `DbErr` or a reqwest error renders its whole cause chain,
-            // constraint names and connection strings included, so neither is ever
-            // stringified into a response. Nor is a 409, whose only honest
-            // constant is the status itself.
-            _ if status == StatusCode::CONFLICT => ErrorBody::new("conflict"),
-            Self::Db(err)
-                if matches!(
-                    err.sql_err(),
-                    Some(sea_orm::SqlErr::ForeignKeyConstraintViolation(_))
-                ) =>
-            {
-                ErrorBody::new("invalid reference")
-            }
-            Self::Db(_) | Self::Other(_) => ErrorBody::new("internal server error"),
-            Self::Http(_) => ErrorBody::new("upstream request failed"),
-            Self::Unavailable(_) => ErrorBody::new("service unavailable"),
-            Self::Validation(errors) => ErrorBody {
-                details: serde_json::to_value(errors).ok(),
-                ..ErrorBody::new("validation failed")
-            },
-            other => ErrorBody::new(other.to_string()),
-        };
-
-        let mut response = (status, Json(body)).into_response();
+        let mut response = (status, Json(self.body(status))).into_response();
         if let Self::TooManyRequests {
             retry_after_secs: Some(secs),
         } = self
@@ -171,6 +185,18 @@ impl IntoResponse for AppError {
 }
 ```
 
+`into_response` is three steps, each a method. `status` chooses the status. `log` writes the one
+log line a failure gets: a 5xx at ERROR with the whole cause chain, and a constraint the client
+tripped (a `Conflict`, a 23505, a 23503) at WARN, because that line is what tells you which
+constraint fired and a duplicate email must not page anyone. No other 4xx is logged. `body`
+chooses the text by status, which is how a 409 and every 5xx answer with a constant whatever the
+variant holds.
+
+`Db(DbErr::ConnectionAcquire(_) | DbErr::Conn(_))` is a 503 `"service unavailable"`, not a 500:
+the pool is exhausted or Postgres is unreachable, so the request was fine and a client or a load
+balancer may retry it. The arm sits above the general `Db` arm, and so does any other `DbErr`
+case that deserves its own status.
+
 The message affixes belong to the caller: `NotFound(format!("user {id} not found"))`, not
 `NotFound("user")`, because the variants render `{0}` as-is.
 
@@ -178,7 +204,7 @@ The message affixes belong to the caller: `NotFound(format!("user {id} not found
 nested struct as an object instead of an array, so clients branch on array-versus-object to walk
 nested errors. `code` is the stable machine key; `message` is `null` unless the rule sets one.
 
-The generic `other => ErrorBody::new(other.to_string())` arm echoes axum's own rejection text for a
+The generic `(_, other) => ErrorBody::new(other.to_string())` arm echoes axum's own rejection text for a
 4xx (`Failed to deserialize the JSON body into the target type: age: invalid type: string "old",
 expected u8 at line 1 column 12`). That publishes Rust field names and types, which is acceptable
 for a client mistake and never happens for a 5xx or a 409, whose bodies are constants.
@@ -204,14 +230,14 @@ depends on where the parent id came from:
 - **A path segment** (`POST /users/{id}/posts`): the URL names a resource that does not exist, so
   the service classifies the `DbErr` and returns `NotFound(format!("user {id} not found"))`,
   documented as `(status = 404, body = ErrorBody, description = "..")`. Classifying a `DbErr` is `sea-orm-postgres`'s.
-- **A body field** (`POST /posts` with a `user_id`): the `DbErr` reaches the arm in both matches
-  above, a 422 with the constant `"invalid reference"`, documented as
+- **A body field** (`POST /posts` with a `user_id`): the `DbErr` reaches its arm in `status` and
+  in `body` above, a 422 with the constant `"invalid reference"`, documented as
   `(status = 422, body = ErrorBody, description = "..")`, the same entry a validation failure uses.
 
 A pre-flight `SELECT` is the fix for neither: it loses every race the constraint wins. The 422 body
-is a constant because the constraint name is a schema detail. The error is still logged: 23503 also
-fires when a delete or update hits a row something still references, and when the service chose a
-bad id itself, and neither is the client's mistake.
+is a constant because the constraint name is a schema detail. The rejection is still logged, at
+WARN: 23503 also fires when a delete or update hits a row something still references, and when the
+service chose a bad id itself, and neither is the client's mistake.
 
 ## Valid, ValidQuery and Path
 
@@ -335,9 +361,16 @@ Two shapes share the 422 status: a `Validation` failure carries the field map, a
 `JsonDataError` carries only the prose `error`, so a client treats `details` as optional.
 
 Since 0.8 `Query` and `Form` report the failing field through `serde_path_to_error`, `Path` tuples
-check arity exactly, `Json` rejects trailing characters after the document, and
-`Option<Query<T>>` no longer swallows every error — opt into "absent is fine" with
-`OptionalFromRequestParts`.
+check arity exactly, and `Json` rejects trailing characters after the document.
+
+`Option<Query<T>>` does not compile in 0.8. `Option<T>` is an extractor only when `T` implements
+`OptionalFromRequestParts`; `Query` does not, and the orphan rule stops a service from adding the
+impl. The compiler says only that `Handler` is not satisfied. For a query string that may be
+absent, make every field of the query struct optional, with `Option<T>` or `#[serde(default)]`,
+and keep `ValidQuery<T>`: an empty query string then deserialises, and a malformed one is still a
+400. `axum_extra::extract::OptionalQuery<T>` (feature `query`) is the stock extractor that yields
+`None` when the URI has no query string at all; it rejects with its own type, so it needs the
+same `AppError` mapping `ValidQuery` has.
 
 ## Handler argument order
 
