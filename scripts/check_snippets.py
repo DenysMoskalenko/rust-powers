@@ -72,6 +72,7 @@ ADD_WHEN_NEEDED = [
     'nutype = { version = "0.8", features = ["serde"] }',
     'async-nats = "0.50"',
     'redis = { version = "1.8", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager", "script"] }',
+    'stats_alloc = "0.1"',
 ]
 
 

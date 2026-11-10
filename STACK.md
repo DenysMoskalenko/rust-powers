@@ -1,6 +1,6 @@
 # Rust web stack
 
-One pick per concern. Decided 9 November 2026.
+One pick per concern. Decided 10 November 2026.
 
 Toolchain: Rust 1.99, edition 2024, resolver 3. python-powers is the sibling project this
 repository mirrors for Python services.
@@ -130,6 +130,7 @@ sea-orm 1.x → 2.0 — the renames that break nearly every pre-2026 snippet:
 - **Time**: inject a `Clock` trait (`fn now(&self) -> DateTime<Utc>`) and swap a fixed clock in tests. For tokio timers use `#[tokio::test(start_paused = true)]` and `tokio::time::advance`, which need `tokio = { features = ["test-util"] }` in `[dev-dependencies]` — `full` does not include it. Cargo unions features across dependency kinds, so the dev entry only turns `test-util` on for test builds of a crate that already depends on tokio normally.
 - `clippy.toml`'s `allow-unwrap-in-tests` covers only the body of a `#[test]` / `#[tokio::test]` function. Measured: a helper in `tests/api/common.rs` called from a test still warns. Put `#![allow(clippy::unwrap_used, clippy::expect_used, reason = "test helpers")]` at the top of every test module that has non-`#[test]` helpers.
 - **Property tests**: proptest, add when needed.
+- **Allocation-regression tests**: stats_alloc 0.1 as a dev-dependency, add when needed, for the per-connection memory test in `rust-testing`. Last released March 2022, which would normally rule a crate out; it is under 300 lines over the stable `GlobalAlloc` trait, and the alternatives are worse: a hand-written counting allocator needs `unsafe`, which the lint table forbids, and tikv-jemallocator's build script needs `make`. The system allocator stays the production pick; no allocator crate is in the stack.
 
 ### AI (add when needed)
 

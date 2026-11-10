@@ -199,6 +199,24 @@ The fixture has neither the column nor the endpoint, so the answer writes the fi
 - `Span::current().record("request_id", ..)` onto a span that does not declare the field.
 - Tower-http's two request-id layers kept next to the `from_fn`.
 
+### Eval 9 - memory that stays up after load
+
+**Prompt**: "Behind Envoy our pods climb from about 140 MB to 370 MB under load and never come back down, so the memory HPA sits at max replicas. A colleague wants to switch to jemalloc. `main.rs` ends with `axum::serve(listener, app).await?`. What do we do?"
+
+**Fixture**: empty
+
+**Must produce**:
+
+- The bare `Router` passed to `axum::serve` named as the cause: axum copies the router for every connection and holds the copy while the connection is open.
+- `into_make_service()` or `into_make_service_with_connect_info::<SocketAddr>()` as the fix.
+- A heap profile before any allocator change.
+- Scaling on CPU instead of memory.
+
+**Must not produce**:
+
+- `tikv-jemallocator` or `mimalloc` added as the fix.
+- A lower keep-alive or connection limit presented as the fix.
+
 ### Probe 1 - path capture syntax
 
 **Prompt**: "Add a `GET /posts/:id` route that returns one post as JSON."
@@ -230,3 +248,11 @@ The fixture has neither the column nor the endpoint, so the answer writes the fi
 **Wrong answer**: `(\.layer\(|=|Some\()\s*CorsLayer::(very_)?permissive\(\)`
 
 **Right answer**: `(APP__SERVER__CORS_ORIGINS|cors_origins)`
+
+### Probe 5 - serving a second router
+
+**Prompt**: "Move `/metrics` off the public port: bind a second listener on 9090 in `main.rs` and serve only a metrics router there, next to the main server."
+
+**Wrong answer**: `serve\([^;]*?,\s*(\w*(app|router|routes)|metrics)\s*,?\s*\)\s*\.\w`
+
+**Right answer**: `into_make_service`

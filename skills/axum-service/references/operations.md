@@ -8,6 +8,7 @@
 - [Work that outlives the response](#work-that-outlives-the-response)
 - [Idempotent writes](#idempotent-writes)
 - [Outbound HTTP](#outbound-http)
+- [Memory after load](#memory-after-load)
 
 ## Health, readiness and version
 
@@ -270,7 +271,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = ?listener.local_addr()?, "listening");
 
     // `ConnectInfo` gives every request the peer address, a rate limiter's last
-    // resort for an anonymous caller. Plain `app` has no such thing.
+    // resort for an anonymous caller. Never a bare `app`: axum then deep-copies
+    // every route for each connection it accepts.
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -465,3 +467,32 @@ Retry idempotent requests only: GET, PUT and DELETE are safe, a POST is not unle
 honours an idempotency key. `max_extra_load` keeps a token budget so a failing upstream cannot be
 hammered. Do not add `reqwest-retry`; `reqwest-middleware` is in the stack for `traceparent`
 injection, not for retries.
+
+## Memory after load
+
+Checked against axum 0.8.9, governor 0.10.4, moka 0.12.16 and tikv-jemallocator 0.7.0. Resident
+memory that rises under load and never comes back is live heap until a profile says otherwise.
+Look in this order.
+
+1. **The serve call.** Given a bare `Router`, `axum::serve` calls `self.clone().with_state(())`
+   for every accepted connection: a copy of every route and everything its handler captured,
+   held until the connection closes. `into_make_service()` and
+   `into_make_service_with_connect_info()` build the service once and hand out an `Arc` clone.
+   Behind a gateway that keeps connections open, the bare form's memory follows the peak
+   connection count and stays there.
+2. **What handlers own.** A route clones its handler for every request, so a closure that owns
+   a `Vec<u8>` or `String` copies it each time. Serialize a large static body once into `Bytes`,
+   or keep it in `State` behind an `Arc`. `SwaggerUi::url(path, api)` already shares its
+   document through an `Arc` (utoipa-swagger-ui 10).
+3. **Per-key maps.** A governor keyed limiter never drops a key by itself: call
+   `retain_recent()`, then `shrink_to_fit()`. moka evicts only inside reads and writes, so an
+   idle cache keeps its entries: set `time_to_idle` or `time_to_live` and call
+   `run_pending_tasks().await`. Run both from one `tokio::time::interval` task that stops on
+   the shutdown signal, after `serve` returns and before telemetry is flushed.
+4. **The allocator, last.** Swapping it does not free live heap. Profile first: build with
+   tikv-jemallocator's `profiling` feature, run with
+   `_RJEM_MALLOC_CONF=prof:true,prof_final:true` (`prof:true` alone writes nothing) and read
+   the dump with `jeprof`. Keep the system allocator unless a profile justifies another.
+
+Autoscale on CPU. Memory does not follow load: the allocator keeps freed pages, and caches and
+pools stay full, so a memory-based autoscaler sits at its maximum after the first peak.
