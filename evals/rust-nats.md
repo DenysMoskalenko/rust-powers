@@ -35,14 +35,13 @@
 - `send_publish(subject, PublishMessage::build().payload(..).message_id(event_id))` with **two** awaits.
 - The `Nats-Msg-Id` fixed per event (minted with the event or derived from the order id), not per publish attempt.
 - A stream declared at startup with a `duplicate_window`.
-- `DiscardPolicy::New` on the stream, or a note that the default `DiscardPolicy::Old` silently drops the oldest message at a limit.
 - The stream declaration retried with backoff when it returns `TimedOut` (the client may still be connecting under `retry_on_initial_connect`).
 - A `MessagingError` (or equivalent) with a `#[from]` arm for JetStream `PublishError`.
 - The JetStream `PublishError` classified by `err.kind()`.
 - A `fn messaging_error(MessagingError) -> AppError` applied at the call site with `.map_err(messaging_error)?`.
 - `StreamNotFound`, `TimedOut`, `BrokenPipe` and `MaxAckPending` mapped to `AppError::Unavailable` (503).
 - `MaxPayloadExceeded` mapped to `BadRequest` (400).
-- The remaining JetStream kinds (`WrongLastSequence`, `WrongLastMessageId`, `Other`) mapped to `Other` (500).
+- `WrongLastSequence` and `WrongLastMessageId` mapped to `Other` (500).
 - A subject of the form `orders.placed.<id>`.
 
 **Must not produce**:
@@ -55,6 +54,7 @@
 - A new client per request.
 - `Arc<async_nats::Client>` in state.
 - `Nats-Msg-Id` described as making the consumer idempotent.
+- `DiscardPolicy::New` on a stream with `Limits` retention (once full it refuses every publish until `max_age` frees room).
 - The `nats` crate.
 
 ### Eval 2 - the billing worker
@@ -64,14 +64,16 @@
 **Must produce**:
 - A durable **pull** consumer via `get_or_create_consumer` (or `create_consumer`, described as create-or-update).
 - The consumer config setting `AckPolicy::Explicit`, `ack_wait`, `max_deliver`, `filter_subject` and `max_ack_pending`.
-- `consumer.messages()` for the long-lived loop, not `fetch()` in a `loop {}`.
+- An endless message stream for the long-lived loop (`consumer.stream()...messages()` or `consumer.messages()`), not `fetch()` in a `loop {}`.
+- The pull batch sized against `ack_wait` with `consumer.stream().max_messages_per_batch(n)`, or a note that bare `messages()` pulls 200 messages whose `ack_wait` runs while they queue.
 - An outer loop that treats the first `Err` item from `messages()` as terminal for that stream: log, pause with backoff, rebuild the consumer, continue.
 - The handler as a plain function returning an outcome, with the loop doing the acking.
-- `double_ack()` on success.
-- `ack_with(AckKind::Nak(Some(delay)))` for a transient failure.
+- The message acked (`ack()` or `double_ack()`) only after the handler's work is committed.
+- The handler described as idempotent, because a message can be delivered again.
+- `ack_with(AckKind::Nak(Some(delay)))` for a failure of that one message.
 - `ack`/`info` errors converted with `.map_err(|err| anyhow::anyhow!(err))` or returned as `async_nats::Error`, never `?` into `anyhow::Result`.
 - The reopen backoff pause ending early on the stop signal (`timeout(backoff, stop.changed())` or a `select!`), not a bare `sleep`.
-- Poison handled by publishing the original payload and headers to a `dlq.`-prefixed subject keeping the original (`dlq.<subject>` or `dlq.<consumer>.<subject>`) with a durable two-await publish, *then* `ack_with(AckKind::Term)`.
+- Poison handled by publishing the original payload to a `dlq.`-prefixed subject keeping the original (`dlq.<subject>` or `dlq.<consumer>.<subject>`) with a durable two-await publish, *then* `ack_with(AckKind::Term)`.
 - A dead-letter stream capturing the `dlq.` subjects (`dlq.orders.>`, `dlq.billing.>` or similar) plus the `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.ORDERS.>` advisory (or its per-consumer form) for messages that exhausted `max_deliver`.
 
 **Must not produce**:
@@ -84,6 +86,8 @@
 - `tokio_util::sync::CancellationToken` presented as already in the stack without adding the dependency.
 - `Term` alone presented as routing a poison message to the DLQ (it fires `MSG_TERMINATED`, which a max-deliveries listener never sees).
 - `ack_wait` and `backoff` both set on the consumer without noting that `backoff[0]` replaces `ack_wait`.
+- The original's `Nats-Msg-Id` or `Nats-Expected-*` headers forwarded onto the dead-letter copy.
+- `double_ack()` presented as exactly-once delivery or as a replacement for an idempotent handler.
 
 ### Eval 3 - flaky NATS tests under nextest
 
@@ -158,6 +162,24 @@
 - `drain()` called before the worker is joined.
 - More client calls after `drain()`.
 
+### Eval 7 - a dependency outage
+
+**Prompt**: "Our billing worker returns a retry for every message while Postgres is down, and the loop naks each one with a 30 second delay. After last night's ten-minute database outage hundreds of orders were in the DLQ as MAX_DELIVERIES. `max_deliver` is 5. Fix the worker."
+
+**Fixture**: empty
+
+**Must produce**:
+- The cause named: every nak is a delivery, so an outage longer than a few delays exhausts `max_deliver` for every message the worker touches.
+- An outage told apart from a failure of one message (a separate outcome or error class for "a dependency is down").
+- Pulling stopped during the outage by dropping the message stream (or leaving the consume loop), not only by not polling it.
+- The message in hand kept alive with `ack_with(AckKind::Progress)` while it is retried, or left unacked, rather than nak'd.
+- The stream reopened once the dependency answers again.
+
+**Must not produce**:
+- Raising `max_deliver` or the nak delay presented as the whole fix.
+- A `Nak` for each message kept as the outage path.
+- `message.in_progress()`.
+
 ### Probe 1 - one await on a JetStream publish
 
 **Prompt**: "Publish an `OrderPlaced` JSON event to JetStream with a dedup id and return the stream sequence."
@@ -190,4 +212,14 @@
 
 **Prompt**: "Read the `checkout.v2` feature flag from a NATS KV bucket at startup and react to every change."
 
-**Wrong answer**: `^(?![\s\S]*\.entry\()[\s\S]*?let\s+(?:mut\s+)?\w+\s*=\s*[\w.]*\.watch\(`
+**Wrong answer**: `let\s+(?:mut\s+)?\w+\s*=\s*[\w.]*\.watch\(`
+
+**Right answer**: `\.watch_with_history\(|\.watch_from_revision\(`
+
+### Probe 6 - a serial worker on the default pull batch
+
+**Prompt**: "Write the consume loop for our durable pull consumer `billing`. The handler calls the payment provider and takes about a second per message, one at a time; `ack_wait` is 30 seconds."
+
+**Wrong answer**: `\b\w+\s*\.\s*messages\(\)\s*\.await`
+
+**Right answer**: `max_messages_per_batch\(`

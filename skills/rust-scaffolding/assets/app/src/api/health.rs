@@ -88,7 +88,7 @@ async fn database(db: &sea_orm::DatabaseConnection) -> Health {
     Health::Unavailable
 }
 
-/// Build info, so a running pod can be matched to a commit.
+/// Build info, so a running pod can be matched to a release.
 #[utoipa::path(
     get, path = "/version", tag = "health",
     responses((status = 200, body = Version, description = "Crate name and version"))

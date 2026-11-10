@@ -3,9 +3,10 @@
 ## Contents
 
 - [Keys, claims and the AuthUser extractor](#keys-claims-and-the-authuser-extractor)
+- [Guarding a subtree](#guarding-a-subtree)
 - [Password hashing with argon2 0.6](#password-hashing-with-argon2-06)
 
-Needs two crates beyond the base set: `axum-extra = { version = "0.12", features = ["typed-header"] }`
+Needs three crates beyond the base set: `axum-extra = { version = "0.12", features = ["typed-header"] }`
 (0.10 is a year stale and does not declare axum 0.8), `jsonwebtoken = { version = "11", features =
 ["aws_lc_rs"] }` and, for passwords, `argon2 = "0.6"`. jsonwebtoken 11 needs exactly one crypto backend:
 `aws_lc_rs` is already in the graph through rustls, while `rust_crypto` pulls `rsa`, which cargo-deny
@@ -16,9 +17,12 @@ not automatically determine the process-level CryptoProvider`.
 
 ```rust,verify
 //! `auth.rs` — key material in state, a `FromRequestParts` extractor per route.
-use axum::RequestPartsExt;
-use axum::extract::{FromRef, FromRequestParts};
+use axum::extract::{FromRef, FromRequestParts, Request};
 use axum::http::request::Parts;
+use axum::middleware::Next;
+use axum::response::Response;
+use axum::routing::get;
+use axum::{RequestPartsExt, Router};
 use axum_extra::TypedHeader;
 use axum_extra::headers::{Authorization, authorization::Bearer};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
@@ -42,15 +46,24 @@ pub struct Keys {
     ttl_secs: u64,
 }
 
+/// HS256 wants a key at least as long as its 256-bit output (RFC 7518, 3.2).
+/// jsonwebtoken signs with any length, so a short secret is refused here.
+const MIN_SECRET_BYTES: usize = 32;
+
 impl Keys {
-    #[must_use]
-    pub fn new(secret: &SecretString, ttl_secs: u64) -> Self {
+    /// # Errors
+    /// The secret is shorter than 32 bytes.
+    pub fn new(secret: &SecretString, ttl_secs: u64) -> anyhow::Result<Self> {
         let bytes = secret.expose_secret().as_bytes();
-        Self {
+        anyhow::ensure!(
+            bytes.len() >= MIN_SECRET_BYTES,
+            "the JWT secret must be at least {MIN_SECRET_BYTES} bytes for HS256"
+        );
+        Ok(Self {
             encoding: EncodingKey::from_secret(bytes),
             decoding: DecodingKey::from_secret(bytes),
             ttl_secs,
-        }
+        })
     }
 
     /// # Errors
@@ -94,11 +107,35 @@ where
         Ok(Self(data.claims))
     }
 }
+
+/// Every route under the layer needs a valid token. The check is the extractor
+/// itself, so a subtree is guarded by the same code as a single handler.
+pub async fn require_user(_user: AuthUser, request: Request, next: Next) -> Response {
+    next.run(request).await
+}
+
+pub fn admin_routes<S>(state: S) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+    Keys: FromRef<S>,
+{
+    Router::new()
+        .route("/admin/stats", get(|| async { "ok" }))
+        // `route_layer`: these routes only, and a path that matches none of
+        // them stays a 404 instead of becoming a 401.
+        .route_layer(axum::middleware::from_fn_with_state(state, require_user))
+}
 ```
 
-Wire it with `impl FromRef<AppState> for Keys` and document the route with
-`security(("bearer" = []))`. Never reveal which half failed: an expired token, a bad signature
-and a missing header are all `AppError::Unauthorized`.
+Wire it with a `keys: Keys` field in `AppState` and `impl FromRef<AppState> for Keys`, and
+document the route with `security(("bearer" = []))`. Never reveal which half failed: an expired
+token, a bad signature and a missing header are all `AppError::Unauthorized`.
+
+`Keys::new` runs once in `main.rs`, as `Keys::new(&settings.auth.jwt_secret, ttl_secs)?`, so a
+secret under 32 bytes stops the process at startup instead of signing tokens that can be
+brute-forced. The template's placeholder secrets (`.env.example`, `test_app()`) are long enough;
+in a project whose placeholders are shorter, lengthen them in the change that adds `Keys` to
+`AppState`.
 
 `Validation` also carries `leeway`, `validate_nbf`, `aud`, `iss`, `required_spec_claims` and
 `reject_tokens_expiring_in_less_than`. `validate_aud` defaults to `true` with `aud: None`,
@@ -109,8 +146,18 @@ call.
 
 `Claims { sub, exp }` is the minimum for a first-party HS256 token. There is no `iat` for audit,
 no `nbf`, and no `jti`, so a token cannot be revoked before it expires; keep the TTL short
-(`Keys::new(&settings.auth.jwt_secret, ttl_secs)`, with `ttl_secs` added to `AuthSettings`) and
+(`ttl_secs` is a field added to `AuthSettings`) and
 add `jti` plus a denylist only when revocation becomes a requirement.
+
+## Guarding a subtree
+
+`require_user` and `admin_routes`, at the end of the `auth.rs` block above, are the whole pattern:
+a `from_fn` middleware whose first argument is `AuthUser`, applied with `route_layer`. The extractor verifies
+the signature and the expiry, and its rejection is the same 401 `ErrorBody` a handler would give.
+A guard that inspects the header itself, checking that it exists or starts with `Bearer `, accepts
+any string a client makes up; never write one. A handler that needs the claims still takes
+`AuthUser` as an argument: verifying twice is cheap, and the handler stays correct if the layer
+is ever removed.
 
 ## Password hashing with argon2 0.6
 
@@ -125,31 +172,48 @@ let hash = Argon2::default().hash_password(pw.as_bytes(), &salt)?.to_string();
 
 ```rust,verify
 //! argon2 0.6: `hash_password` generates the salt, `verify_password` takes the PHC string.
+use argon2::password_hash::Error;
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 
 /// # Errors
 /// Fails on an argon2 parameter or internal error.
-pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
+pub fn hash_password(password: &str) -> Result<String, Error> {
     Ok(Argon2::default()
         .hash_password(password.as_bytes())?
         .to_string())
 }
 
 /// # Errors
-/// Returns an error when the password does not match the hash.
-pub fn verify_password(password: &str, phc: &str) -> Result<(), argon2::password_hash::Error> {
+/// Returns `Error::PasswordInvalid` when the password does not match the hash.
+pub fn verify_password(password: &str, phc: &str) -> Result<(), Error> {
     // `PasswordVerifier<str>` compares against the stored PHC string.
     Argon2::default().verify_password(password.as_bytes(), phc)
 }
 
-/// Both calls burn roughly 100 ms of CPU, which stalls the worker thread they run
-/// on. In a handler, move them off the async runtime.
+/// argon2 is slow on purpose, and all of that time is CPU on the thread that
+/// runs it. In a handler, hash and verify on the blocking pool, or every other
+/// request on that worker thread waits.
 ///
 /// # Errors
-/// Propagates the hashing error; panics inside the closure surface as a join error.
+/// Propagates the hashing error; a panic inside the closure surfaces as a join error.
 pub async fn hash_password_off_thread(password: String) -> anyhow::Result<String> {
     let phc = tokio::task::spawn_blocking(move || hash_password(&password)).await??;
     Ok(phc)
+}
+
+/// `Ok(false)` is a wrong password, which the login handler answers with
+/// `AppError::Unauthorized`.
+///
+/// # Errors
+/// The stored hash is malformed, or the blocking task panicked: both are a 500.
+pub async fn verify_password_off_thread(password: String, phc: String) -> anyhow::Result<bool> {
+    let outcome =
+        tokio::task::spawn_blocking(move || verify_password(&password, &phc)).await?;
+    match outcome {
+        Ok(()) => Ok(true),
+        Err(Error::PasswordInvalid) => Ok(false),
+        Err(err) => Err(err.into()),
+    }
 }
 ```
 

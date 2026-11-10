@@ -44,7 +44,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 app
 COPY --from=builder /build/target/release/app /usr/local/bin/app
-USER app
+# Numeric: Kubernetes `runAsNonRoot` cannot verify a user it only knows by name.
+USER 10001
 EXPOSE 8000
 ENV APP__SERVER__HOST=0.0.0.0 APP__SERVER__PORT=8000
 CMD ["app"]
@@ -61,8 +62,11 @@ Rules that keep the cache working:
   Bump the channel and the tag in one commit.
 - `cargo chef prepare` walks the workspace manifests, so a directory the manifest names must exist in the
   build context. Keep `tests/` out of `.dockerignore`.
-- Install the tool with `cargo install cargo-chef --locked --version 0.1.78` when building on a plain
-  `rust:` image yourself; the chef image ships the same version.
+- `latest-rust-1.99.1` pins the compiler and floats on cargo-chef itself: the tag moves with each
+  cargo-chef release. That is safe because the planner and the builder start from the one `chef` stage, so
+  `prepare` and `cook` always run the same cargo-chef. For a reproducible image pin both, with a tag of the
+  form `<cargo-chef version>-rust-1.99.1`. On a plain `rust:` image, install the tool once in the stage the
+  other two start from: `cargo install cargo-chef --locked --version 0.1.78`.
 
 Every change to `Cargo.toml` or `Cargo.lock` leaves the previous `cargo chef cook` layer behind, up to about
 1 GB each for a service on this stack, and BuildKit keeps unused cache until it passes
@@ -78,9 +82,14 @@ then ships the image publishes a dead port, and the `ENV` line is where the next
 three together — a build for a binary that does not exist fails at `cargo build`, not at `COPY`, which is the
 easier half of the mistake to spot.
 
-`COPY` before `USER`, so the binary is owned by root and not writable by the process that runs it. Setting
-`USER` first and then creating a directory leaves it root-owned instead, which is the opposite of the
-intention.
+`USER 10001` is numeric because Kubernetes' `runAsNonRoot` check cannot resolve a name: with `USER app` the
+pod fails to start with `container has runAsNonRoot and image has non-numeric user (app), cannot verify user
+is non-root`. The `useradd --uid 10001` above it gives that id a passwd entry and a home directory.
+
+`COPY` without `--chown` writes the binary as root on either side of `USER`, so the process that runs it
+cannot replace it; leave it that way. A directory the service must write to is created and `chown`ed to
+`10001` in the `RUN` above `USER`: below that line a `RUN` no longer has the rights to create one outside
+the home directory.
 
 ## .dockerignore
 
@@ -150,8 +159,9 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: app
     ports:
-      # Override in .env when 5432 is already taken on this machine.
-      - "${POSTGRES_PORT:-5432}:5432"
+      # Loopback only: the password is `postgres`. Override the port in .env when
+      # 5432 is already taken on this machine.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       # Postgres 18 keeps its data in a major-version subdirectory, so the mount
       # goes one level up. Mounting .../data instead makes the container exit.
@@ -172,7 +182,7 @@ services:
       - source: otel
         target: /etc/otel-config.yaml
     ports:
-      - "4317:4317"
+      - "127.0.0.1:4317:4317"
 
 configs:
   otel:
@@ -195,6 +205,9 @@ volumes:
   pgdata:
 ```
 
+Both published ports bind to `127.0.0.1`. A bare `"5432:5432"` publishes on every interface of the
+machine, and this database's password is `postgres`; keep the loopback address on any port added here.
+
 `name:` pins the compose project, so two services on one machine do not share a `pgdata` volume. The
 service is `postgres` and the database `app` (`rust-scaffolding` renames both when the template is copied); `docker compose up -d
 postgres` is the day-to-day command, then `cargo run` on the host keeps the compile loop fast.
@@ -211,7 +224,7 @@ client side and the tests; the tests read `TEST_REDIS_URL` / `TEST_NATS_URL` the
   redis:
     image: redis:8-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -223,7 +236,7 @@ client side and the tests; the tests read `TEST_REDIS_URL` / `TEST_NATS_URL` the
     # `-js` turns JetStream on; the image default is core NATS only.
     command: ["-js", "-m", "8222"]
     ports:
-      - "4222:4222"
+      - "127.0.0.1:4222:4222"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
       interval: 5s
@@ -244,10 +257,10 @@ daily development; `cargo run` on the host is the fast loop.
         condition: service_healthy
     environment:
       APP__DATABASE__URL: postgres://postgres:postgres@postgres:5432/app
-      APP__AUTH__JWT_SECRET: dev-only-change-me
+      APP__AUTH__JWT_SECRET: dev-only-change-me-not-for-production
       RUST_LOG: info
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 ```
 
 `condition: service_healthy` needs the `healthcheck` block on `postgres`; without it `depends_on` waits for

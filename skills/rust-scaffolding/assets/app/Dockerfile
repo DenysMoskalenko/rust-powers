@@ -25,7 +25,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 app
 COPY --from=builder /build/target/release/app /usr/local/bin/app
-USER app
+# Numeric: Kubernetes `runAsNonRoot` cannot verify a user it only knows by name.
+USER 10001
 EXPOSE 8000
 ENV APP__SERVER__HOST=0.0.0.0 APP__SERVER__PORT=8000
 CMD ["app"]

@@ -23,6 +23,13 @@ enum User {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // The foreign key below takes a lock on `user`. Give up after 5 s
+        // instead of queueing every write to that table behind this migration.
+        manager
+            .get_connection()
+            .execute_unprepared("SET LOCAL lock_timeout = '5s'")
+            .await?;
+
         manager
             .create_table(
                 Table::create()
@@ -62,6 +69,11 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Dropping a referencing table takes the strongest lock on `user` too.
+        manager
+            .get_connection()
+            .execute_unprepared("SET LOCAL lock_timeout = '5s'")
+            .await?;
         manager
             .drop_table(Table::drop().table(Post::Table).to_owned())
             .await

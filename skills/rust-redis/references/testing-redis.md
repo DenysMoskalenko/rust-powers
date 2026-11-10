@@ -76,7 +76,9 @@ In a real suite the fixture lives in `tests/api/common.rs` and each test module 
 
 use std::time::{Duration, Instant};
 
-use redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions, aio::ConnectionManager};
+use redis::{
+    AsyncCommands, ExistenceCheck, RetryMethod, SetExpiry, SetOptions, aio::ConnectionManager,
+};
 use testcontainers::{ContainerAsync, ImageExt, ReuseDirective, runners::AsyncRunner};
 use testcontainers_modules::redis::{REDIS_PORT, Redis};
 use uuid::Uuid;
@@ -242,6 +244,27 @@ async fn wrong_type_is_a_bug_not_an_outage() {
     // The classification a cache layer branches on: this one must not degrade
     // to a miss, because retrying it will fail the same way forever.
     assert!(!err.is_timeout() && !err.is_connection_dropped() && !err.is_io_error());
+    assert!(matches!(err.retry_method(), RetryMethod::NoRetry));
+}
+
+/// What a primary demoted during a failover answers to a write. A healthy
+/// server will not say it on demand, so a script replies with the same error.
+#[tokio::test]
+async fn a_failover_reply_is_an_outage_not_a_bug() {
+    let t = test_redis().await;
+    let mut conn = t.conn.clone();
+    let demoted = redis::Script::new("return redis.error_reply('READONLY demoted to replica')");
+
+    let reply: Result<(), redis::RedisError> = demoted.invoke_async(&mut conn).await;
+    let err = reply.expect_err("the script replies with an error");
+
+    assert_eq!(err.code(), Some("READONLY"));
+    // A reply, not an I/O failure: only `retry_method` tells it from a bug.
+    assert!(!err.is_io_error());
+    assert!(matches!(
+        err.retry_method(),
+        RetryMethod::WaitAndRetry | RetryMethod::RefreshSlotsAndRetry
+    ));
 }
 
 #[tokio::test]
@@ -288,10 +311,10 @@ Test the behaviour the helpers encode, not the helpers' plumbing:
 - a lease is not handed out twice, and a stale holder cannot release the new one;
 - the limiter allows exactly `limit` calls and then refuses, and the next window allows again;
 - an idempotency key claims once and replays afterwards;
-- `WRONGTYPE` is classified as a bug, and an unreachable server as an outage.
+- `WRONGTYPE` is classified as a bug, and a failover reply and an unreachable server as outages.
 
-The last one needs no container: point the manager at `redis://127.0.0.1:1`, which is closed
-everywhere, and assert `is_connection_refusal()`. Eager connection makes that fail at construction
+The unreachable server needs no container: point the manager at `redis://127.0.0.1:1`, which is
+closed everywhere, and assert `is_connection_refusal()`. Eager connection makes that fail at construction
 time. Use the production config with `set_number_of_retries(0)` - the manager's default of six
 retries with backoff takes 9.5 s to report the refusal, the zero-retry config under a millisecond.
 
@@ -306,12 +329,14 @@ The compose `redis` service (`redis:8-alpine`) and the CI `services:` entry that
 above is the fallback for a machine without either. Two flags on that service matter here:
 `--save "" --appendonly no` turns off persistence, which a cache does not want and which is the
 main source of surprise latency in a test run, and `--maxmemory-policy noeviction` (the server
-default, spelled out) is what a Redis holding leases, idempotency markers or limiter buckets
+default, spelled out) is what a Redis holding leases, idempotency markers or revoked tokens
 needs in production too: under memory pressure `allkeys-lru` - and every `volatile-*` policy,
 since all those keys carry TTLs - silently drops a lease (two holders), a marker (a duplicate
-side effect) or a bucket (a reset limit). `allkeys-lru` is right only for an instance that does
-nothing but cache; a service that does both either runs two instances or accepts `OOM` errors as
-the loud failure they are.
+side effect) or a revocation (a stolen token that works again). `allkeys-lru` is right for the
+instance that caches, and that is also where limiter buckets and negative-cache entries go: the
+client decides how many of those exist, so on `noeviction` they grow until writes are refused. A
+service that does both either runs two instances or keeps one on `noeviction` and treats `OOM`
+errors as the loud failure they are.
 
 Test organisation, fixtures and factories belong to `rust-testing`; what is above is only the
 Redis half.

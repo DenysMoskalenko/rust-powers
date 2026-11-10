@@ -16,8 +16,13 @@ A blocking call inside `async fn` occupies a worker thread and starves every oth
 
 Triggers for `spawn_blocking`: password hashing, image or PDF work, `std::fs`, any synchronous database or HTTP client, and anything CPU-bound past roughly 100 microseconds.
 
+The blocking pool is sized for IO: it grows to 512 threads by default and only then queues. CPU-heavy work (password hashing, image or PDF work) therefore takes a permit from one process-wide `Semaphore`, sized to the cores, before it is spawned; without the bound a burst of logins hashes on hundreds of threads at once and starves every other request of CPU and memory. A blocking IO call needs no permit.
+
 ```rust,verify
+use std::sync::Arc;
+
 use argon2_stub::hash_password;
+use tokio::sync::Semaphore;
 
 mod argon2_stub {
     pub fn hash_password(password: &str) -> String {
@@ -25,10 +30,26 @@ mod argon2_stub {
     }
 }
 
+/// One semaphore for the whole process, built at startup and kept in the
+/// application state.
+pub fn cpu_permits() -> Arc<Semaphore> {
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    Arc::new(Semaphore::new(cores))
+}
+
 /// `spawn_blocking` returns `Result<T, JoinError>`, so a fallible closure gives
 /// two layers to unwrap — here the closure is infallible and there is only one.
-pub async fn register(password: String) -> Result<String, tokio::task::JoinError> {
-    tokio::task::spawn_blocking(move || hash_password(&password)).await
+pub async fn hash(cpu: Arc<Semaphore>, password: String) -> anyhow::Result<String> {
+    let permit = cpu.acquire_owned().await?;
+    let hash = tokio::task::spawn_blocking(move || {
+        let hash = hash_password(&password);
+        // Released by the thread, not by the caller: the hash keeps running
+        // after a cancelled request, and the bound has to count it until it ends.
+        drop(permit);
+        hash
+    })
+    .await?;
+    Ok(hash)
 }
 ```
 
@@ -36,7 +57,7 @@ A `spawn_blocking` task cannot be aborted once it starts, and runtime shutdown w
 
 ## Cancellation safety
 
-A future is cancel-safe if dropping it part-way and recreating it loses nothing. This only matters inside `select!`, because `select!` drops every losing branch. `AsyncReadExt::read` is cancel-safe; a hand-written `read_exact_message` that has already consumed half a frame is not, and the half is gone.
+A future is cancel-safe if dropping it part-way and recreating it loses nothing. Three things drop a future part-way: `select!` drops every losing branch, `timeout` drops its future at the deadline, and axum drops a handler's future when the client disconnects or the request timeout fires. `AsyncReadExt::read` is cancel-safe; a hand-written `read_exact_message` that has already consumed half a frame is not, and the half is gone.
 
 Check the "Cancel safety" note in the tokio docs for every method you put in a `select!` branch. If a branch is not cancel-safe, spawn it and select on the handle instead, so the work survives the race.
 
@@ -62,7 +83,7 @@ pub async fn read_with_deadline() -> Option<Vec<u8>> {
 }
 ```
 
-Never mutate shared state half-way through a `select!` branch: the branch can be dropped between the two halves of the mutation.
+A branch has two parts and only one of them can be cut short. The future before `=>` is dropped at whatever `.await` it had reached when another branch completes first; the handler after `=>` runs only for the winning branch, once the others are gone, so `select!` never cuts it short. A mutation in two steps therefore belongs in the handler, or in a spawned task, never in the raced future, where the second step can be lost. Inside a request handler use the spawned task or one database transaction: the handler's own future can be dropped at any `.await`.
 
 ## Structured concurrency
 
@@ -72,9 +93,9 @@ Never mutate shared state half-way through a `select!` branch: the branch can be
 | A dynamic number of tasks, results as they finish | `JoinSet` — dropping it aborts the rest |
 | A deadline on one operation | `tokio::time::timeout`, before reaching for `select!` |
 | Broadcast "stop" to many tasks | a `tokio::sync::watch` channel |
-| Wait for tasks to finish shutting down | `JoinSet::join_all` |
+| Wait for tasks to finish shutting down | `JoinSet::join_next` in a loop, logging each `JoinError`; `join_all` panics when any task panicked or was aborted |
 
-Never `tokio::spawn` and drop the `JoinHandle` unless fire-and-forget is genuinely intended: the `JoinError` is discarded, so nothing can learn the task failed, and the panic lands on stderr outside the tracing subscriber. Keep the handle, or own it in a `JoinSet`.
+Never `tokio::spawn` and drop the `JoinHandle` unless fire-and-forget is genuinely intended. The runtime catches a panic inside a task: the process carries on, the panic hook prints to stderr, outside the tracing subscriber, whether the handle is kept or not, and the `JoinError` is the only thing code can act on. Dropping the handle discards it, so nothing logs the failure through tracing and nothing restarts the task. Keep the handle, or own it in a `JoinSet`, and log the `JoinError` where it is joined.
 
 ## Shutting background work down
 
@@ -114,7 +135,13 @@ impl Workers {
     /// drained and before the telemetry exporter is flushed.
     pub async fn shutdown(mut self) {
         self.shutdown.send_replace(true);
-        self.tasks.join_all().await;
+        // Not `join_all`: it panics again here if a worker panicked, and the
+        // flush that follows would never run.
+        while let Some(joined) = self.tasks.join_next().await {
+            if let Err(error) = joined {
+                tracing::error!(%error, "background worker failed");
+            }
+        }
     }
 }
 ```

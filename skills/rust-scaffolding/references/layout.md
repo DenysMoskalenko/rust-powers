@@ -21,17 +21,17 @@ Dockerfile               cargo-chef build, non-root runtime
 docker-compose.yml       local Postgres, optional OTLP collector
 .dockerignore            keeps target/ out of the build context
 .env.example             every setting, with a safe default
-.gitignore               /target, .env, *.pending-snap
+.gitignore               /target, .env, *.pending-snap, *.snap.new
 .github/workflows/ci.yml lint, test and coverage, cargo-deny, docs
 src/
-  main.rs                process wiring only: settings, telemetry, pool, serve
+  main.rs                process wiring only: settings, telemetry, startup migration, pool, serve, shutdown
   lib.rs                 AppState, build_router, the middleware stack
   config.rs              Settings, its nested structs, the timeout constants
   error.rs               AppError, ErrorBody, the request-id task local
   extract.rs             Valid, ValidQuery and Path
   clock.rs               the Clock trait, SystemClock, FixedClock
   telemetry.rs           subscriber, OTLP exporter, TelemetryGuard
-  api/mod.rs             assembles every resource router; the request_id middleware
+  api/mod.rs             assembles every resource router; the request_id and request_timeout middleware
   api/health.rs          liveness, readiness (status + checks), version
   api/users.rs           one resource: schemas, handlers, router
   entities/              generated from the database; never hand-edited
@@ -46,6 +46,7 @@ tests/api/
   health.rs              the probes and both router fallbacks
   migrations.rs          every migration rolled back and applied again
   panic.rs               the catch-panic layer, wired around a panicking route of its own
+  stack.rs               the middleware stack: request id, timeout, metric labels, trace propagation
   users.rs               the cases that prove the wiring
 ```
 
@@ -54,16 +55,18 @@ exercise, because an integration test in `tests/` can use the library but never 
 
 ## A request through the tree
 
-1. `main.rs` binds the listener and serves `build_router(state)` with
-   `into_make_service_with_connect_info`, so every request carries the peer address and
-   the router is shared, not copied, between connections.
-2. `lib.rs::build_router` runs the middleware stack, `request_id` (in `api/mod.rs`) first
-   and the timeout last, then matches the route. Both fallbacks answer in `ErrorBody`.
+1. `main.rs` applies pending migrations, opens the pool, binds the listener and serves
+   `build_router(state)` with `into_make_service_with_connect_info`, so every request carries
+   the peer address and the router is shared, not copied, between connections.
+2. `lib.rs::build_router` matches the route and runs the middleware stack around its handler:
+   the OpenTelemetry server span outermost, `request_id` (in `api/mod.rs`) inside it,
+   `request_timeout` (same file) innermost. An unmatched request takes the same stack to a
+   fallback, and both fallbacks answer in `ErrorBody`.
 3. `api/<resource>.rs` extracts `State<AppState>`, `Path<T>` and, last, `Valid<T>` from
    `extract.rs`; the handler queries `state.db`, reads time from `state.clock`, calls
    upstreams through `state.http`.
-4. The handler returns a DTO or an `AppError`; `error.rs` is the only place a status code
-   is chosen, and the body is always `ErrorBody`.
+4. The handler returns a DTO or an `AppError`; `error.rs` maps each `AppError` variant to its
+   status, and an error body is always `ErrorBody`.
 
 The layer order and its reasons, the status table, the timeout budget in `config.rs` and
 the shutdown order are `axum-service`'s; this file only says which file holds each.
@@ -78,7 +81,7 @@ the shutdown order are `axum-service`'s; this file only says which file holds ea
 | A readiness check for a new dependency | one entry in `checks` in `src/api/health.rs` |
 | A schema change | a new file in `migration/src/`, then `make migrate` and `make entity` |
 | A new middleware | `build_router` in `src/lib.rs` |
-| A new timeout | `src/config.rs`, next to the other four |
+| A new timeout | `src/config.rs`, in the timeout budget at its top |
 | A new test helper | `tests/api/common.rs` |
 | A new test area | a new `tests/api/<area>.rs` plus `mod <area>;` in `tests/api/main.rs` |
 | A new configuration file or CI job | see `rust-tooling` |

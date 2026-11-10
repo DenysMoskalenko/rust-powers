@@ -65,12 +65,14 @@ An alternate registry takes its own value as `[registries.<name>] min-publish-ag
 
 Levels live here, thresholds live in `clippy.toml`. The tables sit under `[workspace.lints.*]` in the
 root manifest and every member, the root package included, opts in with `[lints] workspace = true`; a
-member without that line inherits nothing. Groups carry `priority = -1` so the individual lines below
-them win.
+member without that line inherits nothing. The first table below is in the root package and again in
+`migration/Cargo.toml`. Groups carry `priority = -1` so the individual lines below them win.
 
 ```toml
+# Every member opts in with `[lints] workspace = true`; a member without that
+# line inherits nothing.
 [lints]
-workspace = true            # in the root package AND in migration/Cargo.toml
+workspace = true
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -240,8 +242,9 @@ There is no built-in `ci` profile; select it with `cargo nextest run -P ci` or `
 inherit from `default` unless they set `inherits`. The JUnit file lands in `target/nextest/ci/junit.xml`:
 the path is relative to the profile store dir, not to the repository root. `status-level` and
 `final-status-level` use different ladders: `none|fail|retry|slow|leak|pass|skip|all` and
-`none|fail|flaky|slow|skip|leak|pass|all`; the defaults (`pass` and `none`) are already right, so only the
-second is set here.
+`none|fail|flaky|slow|skip|leak|pass|all`. nextest's defaults are `pass` and `flaky`; the `ci` profile
+writes the second out so its end-of-run summary keeps listing the tests that passed only on a retry even
+when `default`, which it inherits from, is later given another level.
 
 Deliberately absent: a `[test-groups]` entry capping database tests. It would not reduce anything — nextest
 forks one process per test, so a group only serializes tests that each already own a private database. Add one
@@ -351,8 +354,10 @@ merged job list, which is the fastest way to confirm the file was picked up.
 
 ## .pre-commit-config.yaml
 
-Run through prek (`prek install`, then `prek run --all-files`). The local hooks deliberately invoke the same
-commands as the Makefile, so a hook cannot pass while CI fails.
+Run through prek (`prek install`, then `prek run --all-files`). The local hooks are the `check` target's
+four commands, each skipped when no file it watches is staged. CI runs more than they do: it passes
+`--locked`, runs the tests and the coverage gate, and builds the docs with warnings denied. Before a pull
+request run `make check && make test`, and `make cov` when the change adds code.
 
 ```yaml
 repos:
@@ -398,8 +403,9 @@ repos:
 ```
 
 The two `args:` lines are the only tuning worth making: `--markdown-linebreak-ext=md` stops
-`trailing-whitespace` from eating the two-space line break Markdown uses, and `--maxkb=512` catches a fixture
-or a binary committed by accident well before the default 500 kB would.
+`trailing-whitespace` from eating the two-space line break Markdown uses, and `--maxkb=512` writes the size
+limit into the file. The hook's default is 500 kB, so 512 changes almost nothing; the line is there so the
+number that rejects a fixture or a binary committed by accident is visible and has one place to change.
 
 `types: [rust]` and `pass_filenames: false` are not in conflict: the filter decides whether the hook runs at
 all, and the hook then ignores the file list and checks the whole crate. With no Rust file staged, the four
@@ -443,7 +449,7 @@ cap_target = meta=$$(cargo metadata --no-deps --format-version 1); \
 	esac; fi
 
 install-tools:
-	cargo install cargo-binstall
+	cargo install --locked cargo-binstall
 	cargo binstall -y cargo-nextest cargo-llvm-cov cargo-deny cargo-machete cargo-chef bacon cargo-insta sea-orm-cli prek
 	prek install
 
@@ -488,7 +494,9 @@ entity:
 	sea-orm-cli generate entity -o src/entities --with-serde both --entity-format dense
 ```
 
-Recipes are tab-indented. `cargo test --doc` needs a library target, so it fails with "no library targets
+Recipes are tab-indented. `cargo install --locked` builds cargo-binstall from the `Cargo.lock` its release
+shipped; without the flag cargo resolves every dependency of the tool afresh, and `cargo install` ignores the
+publish-age setting above. `cargo test --doc` needs a library target, so it fails with "no library targets
 found" on a binary-only crate — the service keeps `src/lib.rs` for this reason among others.
 
 `--workspace` belongs on every cargo command here. Without it clippy skips member crates' `#[cfg(test)]` code
@@ -515,8 +523,9 @@ both, so change the two together or the Makefile and CI drift apart. For which f
 `rust-testing`; a regex that excludes everything reports zero lines and the gate can no longer pass.
 
 Snapshot review is part of the same loop: `cargo insta review` walks the `.snap.new` files interactively,
-`cargo insta accept` takes them all, and `cargo insta reject` discards them. `*.pending-snap` belongs in
-`.gitignore`. Never set `INSTA_UPDATE=always` in CI — it rewrites the snapshots the run is supposed to be
+`cargo insta accept` takes them all, and `cargo insta reject` discards them. `.gitignore` lists `*.snap.new`
+and `*.pending-snap`, the pending form of an inline snapshot, so an unreviewed snapshot is never committed.
+Never set `INSTA_UPDATE=always` in CI — it rewrites the snapshots the run is supposed to be
 checking, and every assertion passes.
 
 ## Optional: the typos hook

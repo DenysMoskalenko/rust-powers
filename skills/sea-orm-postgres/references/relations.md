@@ -56,13 +56,11 @@ pub async fn all_users_with_posts<C: ConnectionTrait>(
     user::Entity::load().with(post::Entity).all(db).await
 }
 
-pub fn post_count(found: &user::ModelEx) -> usize {
-    // `posts` is HasMany<post::Entity>; iterating an Unloaded relation yields nothing,
-    // so check explicitly when "no posts" and "never loaded" must be told apart.
-    if found.posts.is_unloaded() {
-        return 0;
-    }
-    found.posts.len()
+/// `None`: the posts were never loaded, which is not the same as having none.
+pub fn post_count(found: &user::ModelEx) -> Option<usize> {
+    // `posts` is HasMany<post::Entity>. An Unloaded relation has `len()` 0 and iterates
+    // as empty, so without this check "never loaded" reads as "no posts".
+    found.posts.is_loaded().then(|| found.posts.len())
 }
 ```
 
@@ -144,7 +142,7 @@ Filtering parents by a predicate on their children is not a join problem.
 
 ```rust,verify
 use crate::entities::{post, user};
-use sea_orm::{ConnectionTrait, DbErr, EntityTrait, QueryFilter, sea_query::ExprTrait};
+use sea_orm::{ConnectionTrait, DbErr, EntityTrait};
 
 // SELECT ... FROM "user" WHERE EXISTS(SELECT 1 FROM "post" WHERE "post"."published" = $1
 //                                     AND "user"."id" = "post"."user_id")
@@ -210,24 +208,20 @@ The fix is to lift the child query out of the loop: `Entity::load().with(..)` fo
 `load_many` when the parents are already in hand. `find_related` is correct only for a single parent
 that was fetched by id.
 
-To confirm it rather than guess, count the statements. sqlx 0.9 emits one `tracing` event per
-statement, target `sqlx::query`, whenever `sqlx_logging` is on (sea-orm's default; the scaffold
-turns it off, so the test opens a second pool with it on). A `Layer` that collects those events
-turns "is it N+1?" into an assertion that survives refactors; a request that logs the same
-`SELECT ... WHERE "user_id" = $1` fifty times has the answer in the log.
+To confirm it rather than guess, count the statements. `set_metric_callback` on a
+`DatabaseConnection` is called once per statement that connection runs, with the SQL. Set it on a
+clone of the test's connection: the clone shares the pool and the callback belongs to the clone
+alone, so the count is this call's and nothing global is installed. That turns "is it N+1?" into
+an assertion that survives refactors.
 
 ```rust,verify,test
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use app::entities::{post, user};
 use sea_orm::{
-    ActiveModelTrait as _, ActiveValue::{NotSet, Set}, ConnectOptions, ConnectionTrait, Database, DbErr,
-    EntityTrait, LoaderTrait as _,
+    ActiveModelTrait as _, ActiveValue::{NotSet, Set}, ConnectionTrait, DbErr, EntityTrait,
+    LoaderTrait as _,
 };
-use secrecy::ExposeSecret as _;
-use tracing::field::{Field, Visit};
-use tracing_subscriber::layer::{Context, Layer, SubscriberExt as _};
-use uuid::Uuid;
 
 use crate::common::{frozen_now, test_app};
 
@@ -238,35 +232,6 @@ async fn users_and_posts<C: ConnectionTrait>(
     let users = user::Entity::find().all(db).await?;
     let posts = users.load_many(post::Entity, db).await?;
     Ok(users.into_iter().zip(posts).collect())
-}
-
-/// Collects the `summary` field of every `sqlx::query` event: one per statement.
-#[derive(Default, Clone)]
-struct SqlLog(Arc<Mutex<Vec<String>>>);
-
-struct Summary(String);
-
-impl Visit for Summary {
-    fn record_debug(&mut self, _: &Field, _: &dyn std::fmt::Debug) {}
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "summary" {
-            value.clone_into(&mut self.0);
-        }
-    }
-}
-
-impl<S: tracing::Subscriber> Layer<S> for SqlLog {
-    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
-        if event.metadata().target() != "sqlx::query" {
-            return;
-        }
-        let mut summary = Summary(String::new());
-        event.record(&mut summary);
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(summary.0);
-    }
 }
 
 #[tokio::test]
@@ -295,25 +260,32 @@ async fn load_many_issues_two_statements_whatever_the_user_count() {
             .unwrap();
         }
     }
-    // A second pool on the same database, statement logging on.
-    let mut options = ConnectOptions::new(app.state.settings.database.url.expose_secret());
-    options.sqlx_logging(true);
-    let db = Database::connect(options).await.unwrap();
+    let statements = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&statements);
+    // The same pool; the callback is set on this clone only.
+    let mut db = app.state.db.clone();
+    db.set_metric_callback(move |info| {
+        seen.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(info.statement.sql.clone());
+    });
 
-    let log = SqlLog::default();
-    let guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(log.clone()));
     let rows = users_and_posts(&db).await.unwrap();
-    drop(guard);
 
     assert_eq!(rows.len(), 5);
     assert!(rows.iter().all(|(_, posts)| posts.len() == 2));
-    let statements = log.0.lock().unwrap().clone();
+    let statements = statements.lock().unwrap().clone();
     assert_eq!(statements.len(), 2, "statements: {statements:#?}");
 }
 ```
 
-The same layer over the naive loop counts six. The alternative is the `tracing-spans` feature
-with `record_stmt_in_spans(true)`, which attaches each SQL to the surrounding span.
+The same callback over the naive loop counts six. In a running service the answer is in the
+log instead: with `sqlx_logging` on, a request that logs the same
+`SELECT ... WHERE "user_id" = $1` fifty times is N+1, and the `tracing-spans` feature with
+`record_stmt_in_spans(true)` attaches each SQL to the surrounding span. A `tracing` subscriber
+is the wrong counter in a test: `set_default` is per thread and `tracing` caches whether a call
+site is enabled, so under `cargo test`, where tests share a process, a thread with no subscriber
+can get the call site cached as disabled and the scoped subscriber then misses its events.
 
 Checking a plan does not need a first-class API: build the statement with `.into_query()`, render it
 with `db.get_database_backend().build(&query)`, and run `EXPLAIN` over the result through

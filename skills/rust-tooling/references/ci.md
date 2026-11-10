@@ -1,13 +1,15 @@
 # GitHub Actions
 
-One workflow, three jobs: `test` (format, lint, tests, coverage), `deny` (supply chain), `docs`. It runs the
-same commands as the Makefile, so a green local run of the `check` and `test` targets predicts a green
-pipeline.
+One workflow, three jobs: `test` (format, lint, tests, coverage), `deny` (supply chain), `docs`. Its commands
+are the Makefile's, plus three things that neither the hooks nor the `check` and `test` targets do: `--locked`
+on every cargo call that resolves, the coverage gate (`make cov` locally), and the `docs` job, which has no
+Makefile target (`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --all-features` reproduces it).
+A green `make check && make test` predicts the pipeline up to those three.
 
 ## Contents
 
 - [The workflow](#the-workflow)
-- [The toolchain step](#the-toolchain-step)
+- [No toolchain step](#no-toolchain-step)
 - [The RUSTFLAGS trap](#the-rustflags-trap)
 - [Postgres: service container, not testcontainers](#postgres-service-container-not-testcontainers)
   - [Optional services: Redis and NATS](#optional-services-redis-and-nats)
@@ -19,16 +21,33 @@ pipeline.
 
 ```yaml
 name: CI
-on: [push, pull_request]
+# A branch with an open pull request would otherwise run twice per push.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Nothing here writes to the repository.
+permissions:
+  contents: read
+
+# A newer push to a pull request cancels that pull request's older run. A push
+# to main has no pull request, so each commit there gets a group of its own
+# and always finishes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  # RUSTFLAGS is deliberately not set: it changes cargo's fingerprint and the
-  # rust-cache key, so every step would rebuild. `-D warnings` goes to clippy.
+  # RUSTFLAGS is deliberately not set: the variable replaces the rustflags in
+  # .cargo/config.toml, and each value is built as its own set of artifacts.
+  # `-D warnings` goes to clippy.
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:18-alpine
@@ -47,9 +66,9 @@ jobs:
       TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt, llvm-tools-preview
+      # No toolchain step: rustup reads rust-toolchain.toml on the first cargo
+      # call and installs that channel with its components. A step naming
+      # `stable` would download a second toolchain beside it.
 
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
@@ -89,6 +108,7 @@ jobs:
 
   deny:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -97,18 +117,25 @@ jobs:
 
   docs:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          # A fixed key shared across runs of this job, which has its own
-          # RUSTDOCFLAGS and therefore its own artifacts.
-          shared-key: docs
       - run: cargo doc --no-deps --workspace --all-features --locked
 ```
+
+The triggers are a push to `main` and any pull request. A bare `on: [push, pull_request]` runs the workflow
+twice for every push to a branch that has a pull request open. `permissions: contents: read` narrows the
+`GITHUB_TOKEN` to what the three jobs use, since none of them writes to the repository; a job added later that
+comments on a pull request or publishes a package widens it for that job alone. `concurrency` cancels the
+older run when a newer commit arrives on the same pull request: the group is the pull request's number.
+A push to `main` has no pull request, so its group falls back to the run id, which is unique, and every
+commit on `main` finishes its own run; a group keyed on `github.ref` would cancel the run of the previous
+merge instead, and one keyed on `github.head_ref`, the bare branch name, is shared by two pull requests
+from forks whose branches have the same name.
+`timeout-minutes` ends a hung job in minutes, where GitHub's default lets it hold a runner for six hours.
 
 The lcov file is uploaded as a workflow artifact; to publish it, append a `codecov/codecov-action@v7`
 step with `files: target/lcov.info` and a `CODECOV_TOKEN` secret. Either way the `--fail-under-lines` gate is
@@ -128,40 +155,51 @@ doctests and `cargo doc` alike: without it clippy never lints a member crate's `
 counterpart elsewhere in the pipeline, so leaving it out means a dropped dependency passes CI and fails the
 next person's pre-commit hook.
 
-## The toolchain step
+## No toolchain step
 
-`dtolnay/rust-toolchain@stable` bootstraps rustup and installs a stable toolchain; it does not decide which
-compiler the build uses. The action runs `rustup toolchain install` and `rustup default` and sets no
-`RUSTUP_TOOLCHAIN`, so `rust-toolchain.toml` still wins for every cargo command executed inside the
-repository, and rustup installs that channel on first use together with the components the file declares —
-`llvm-tools-preview` included, without anyone asking. The version pin therefore lives in exactly one file, and
-the action's ref only decides what bootstraps rustup.
+The workflow installs no toolchain, on purpose. GitHub's hosted runners ship rustup, and
+`rust-toolchain.toml` decides the compiler: the first `rustc` or `cargo` call inside the checkout makes
+rustup install that channel together with the components the file lists, `llvm-tools-preview` included,
+without anyone asking. The version pin therefore lives in exactly one file.
 
-The `components:` input names them for the action's own `stable` toolchain. It is belt and braces: useful if
-someone later deletes `rust-toolchain.toml`, redundant while the file exists.
+`dtolnay/rust-toolchain@stable` in front of that adds a second toolchain nothing uses. The action runs
+`rustup toolchain install` and `rustup default` for `stable` and sets no `RUSTUP_TOOLCHAIN`, so
+`rust-toolchain.toml` still wins for every cargo command executed inside the repository, and its
+`components:` input lands on the toolchain that is never run.
 
-`rustup toolchain install` with no argument does the same thing in one step (valid on rustup 1.28 and later,
-which installs "the given toolchains, or by default the active toolchain") and skips the second download.
-Either is correct; the action is the version with a maintained cache key output.
+Add a step in two cases only. Where rustup's install on demand is switched off (`RUSTUP_AUTO_INSTALL=0`,
+or `rustup set auto-install disable` on a self-hosted runner), run `rustup toolchain install` with no
+argument right after the checkout: on rustup 1.28 and later it installs "the given toolchains, or by default
+the active toolchain", which is the one the file names. In a project that has no `rust-toolchain.toml`, or
+on a runner without rustup, use `dtolnay/rust-toolchain@<channel>`, which bootstraps rustup; name the
+file's own channel where there is a file, and keep the step before `Swatinem/rust-cache`, which hashes
+`rustc -vV` into its key.
 
-`Swatinem/rust-cache` must come after the toolchain step: it keys the cache on `rustc -vV`.
+`Swatinem/rust-cache` goes after `actions/checkout`: its key also hashes `Cargo.lock`, the manifests and
+`rust-toolchain.toml`, which do not exist before it.
 
 ## The RUSTFLAGS trap
 
-Setting `RUSTFLAGS: -Dwarnings` job-wide looks like the obvious way to make warnings fatal. It costs two full
-rebuilds:
+Setting `RUSTFLAGS: -Dwarnings` looks like the obvious way to make warnings fatal. The variable reaches
+every rustc call, dependencies included, and that has three costs:
 
-1. Cargo's fingerprint includes the effective rustflags, so a step with `RUSTFLAGS` set cannot reuse artifacts
-   from a step without it.
-2. `Swatinem/rust-cache` hashes environment variables by prefix — the default `env-vars` list is
-   `CARGO CC CFLAGS CXX CMAKE RUST`, which matches `RUSTFLAGS`. The cache key changes too, so this job also
-   fights the other jobs for a cache entry.
+1. It replaces the `rustflags` in `.cargo/config.toml` instead of adding to them: cargo takes the flags
+   from the first source that has any, and the environment comes before the file. A linker or
+   `target-cpu` setting kept there stops applying in CI, with no warning.
+2. Cargo's fingerprint includes the effective rustflags, and each value gets an artifact set of its own.
+   A cargo command that runs under a different value than the others (a step-level `env`, for example)
+   shares nothing with them: every crate is compiled once more, and the cache has to hold both sets.
+3. `Swatinem/rust-cache` hashes environment variables by prefix into the cache key — the default `env-vars`
+   list is `CARGO CC CFLAGS CXX CMAKE RUST`, which matches `RUSTFLAGS`. Adding, editing or removing the
+   variable changes the key, and the next run starts from an empty cache.
 
-Pass `-D warnings` to the clippy invocation instead, as the workflow above does. The same reasoning applies to
-`RUSTDOCFLAGS`: the `docs` job needs it, and its artifacts are therefore not interchangeable with the test
-job's. `shared-key: docs` gives that job one fixed, stable cache entry of its own rather than a key that moves
-with every environment change — rust-cache already separates jobs by default, so this is about keeping the
-docs cache hittable, not about isolating it.
+Pass `-D warnings` to the clippy invocation instead, as the workflow above does: clippy reports rustc's
+warnings too, and the same command then runs unchanged in the Makefile and the hook, where no job
+environment exists.
+
+`RUSTDOCFLAGS` is not the same trap. It reaches rustdoc only: cargo documents the crates again when it
+changes and recompiles nothing. The `docs` job needs it, and setting it there, on that job alone, costs
+nothing. The job needs no `shared-key` either: rust-cache already keeps one cache entry per job id.
 
 ## Postgres: service container, not testcontainers
 
@@ -216,8 +254,9 @@ it in the first step instead and wait for its monitoring endpoint:
 Verified current: `actions/checkout` v7, `Swatinem/rust-cache` v2, `taiki-e/install-action` v2,
 `EmbarkStudios/cargo-deny-action` v2, `actions/upload-artifact` v7, `codecov/codecov-action` v7.
 
-`dtolnay/rust-toolchain` is referenced by branch (`stable`, `nightly`, `master`, version branches) rather than
-by the `v1` tag it also publishes, because the branch name is the toolchain selector, not a version number.
+`dtolnay/rust-toolchain`, where a project needs it, is referenced by branch (`stable`, `nightly`, `master`,
+version branches) rather than by the `v1` tag it also publishes, because the branch name is the toolchain
+selector, not a version number.
 
 Use `taiki-e/install-action` for cargo tools in CI rather than `cargo binstall`: it resolves prebuilt binaries
 from its own manifest, needs no bootstrap install and accepts a comma-separated list.

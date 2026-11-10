@@ -21,7 +21,7 @@ In production code `Box<dyn Error>` and `Result<T, String>` are banned; a test d
 
 ## One enum per domain module
 
-A single flat error type with thirty variants is the same dumping ground as a `utils` module. Keep the domain error next to the domain, and let it reach the service error through `#[from]`.
+A single flat error type with thirty variants is the same dumping ground as a `utils` module. Keep the domain error next to the domain, and let it reach the service error through a hand-written `impl From<OrderError> for AppError` that maps each variant onto an existing `AppError` variant, as below. `#[from]` on `AppError` would need a new variant, and a new row in the status table, for every domain module; `#[from]` belongs inside the domain enum, on the variant that wraps a foreign error.
 
 ```rust,verify
 use chrono::{DateTime, Utc};

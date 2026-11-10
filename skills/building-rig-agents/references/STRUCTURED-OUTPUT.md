@@ -37,9 +37,9 @@ every model that supports it.
 only `JsonSchema`.
 
 Import it as `use rig::schemars::{self, JsonSchema};` rather than adding your own
-`schemars` dependency: Rig needs v1, a second copy in the graph causes confusing trait
-mismatches, and the `self` is load-bearing — the derive macro's generated code needs a
-`schemars` name in scope. Field descriptions come from `///` doc comments;
+`schemars` dependency: Rig needs v1, a `schemars` of another major is a second crate in the
+graph whose `JsonSchema` rig's bounds reject with confusing trait mismatches, and the `self`
+is load-bearing — the derive macro's generated code needs a `schemars` name in scope. Field descriptions come from `///` doc comments;
 `#[schemars(description = "…")]` also works and wins when both are present.
 
 ## Extractor
@@ -49,7 +49,7 @@ use rig::extractor::ExtractorBuilder;
 use rig::providers::openai::{self, OpenAI};
 use rig::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
-const MODEL: &str = openai::GPT_5_5;
+const MODEL: &str = openai::GPT_6_SOL;
 
 
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -88,7 +88,7 @@ calls the submit tool, and Rig deserializes the arguments back into your type.
 | `context(&str)` | Add a static context document |
 | `dynamic_context(samples, index)` | Retrieve context from a vector index per attempt |
 | `max_tokens(u64)`, `additional_params(Value)` | Model parameters |
-| `retries(usize)` | Maximum retry attempts |
+| `retries(usize)` | Run a failed attempt again, up to this many times, at once and whatever failed. It is for a reply that did not parse or made no submit call; a provider failure is repeated just the same, so keep it at 1 or 2 (see Retries in Errors and Reliability) |
 | `add_hook(H)` | Lifecycle hook on every extraction attempt |
 
 ### Extraction methods
@@ -158,9 +158,10 @@ pub enum StructuredOutputError {
 }
 ```
 
-`EmptyResponse` means the run succeeded but produced no structured payload. Handle it
-separately from a deserialization failure: one means "ask a better model", the other means
-"fix the schema".
+`EmptyResponse` means the run succeeded but its final turn held nothing to parse. Handle it
+separately from `Deserialization`, which keeps the text that failed in `output` and means the
+schema or its field descriptions need work. A typed run takes `.retries(n)` as an extractor
+does, with the same caveat, and on an agent with tools every retry runs them again.
 
 ## Schema-Constrained Agents
 

@@ -138,3 +138,35 @@ async fn a_body_over_the_limit_returns_413() {
     response.assert_status(StatusCode::PAYLOAD_TOO_LARGE);
     assert_error_body(&response.json());
 }
+
+#[tokio::test]
+async fn an_offset_past_the_cap_returns_422() {
+    let app = test_app().await;
+
+    // `u64::MAX` also proves the value never reaches the driver, which panics
+    // on anything past `i64::MAX`.
+    for offset in ["10001", "18446744073709551615"] {
+        let response = app
+            .server
+            .get("/users")
+            .add_query_param("offset", offset)
+            .expect_failure()
+            .await;
+
+        response.assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+        assert_error_body(&response.json());
+    }
+}
+
+#[tokio::test]
+async fn a_database_that_cannot_be_reached_answers_503_not_500() {
+    let app = test_app().await;
+    app.state.db.close_by_ref().await.unwrap();
+
+    let response = app.server.get("/users").expect_failure().await;
+
+    response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = response.json();
+    assert_eq!(body["error"], "service unavailable");
+    assert_error_body(&body);
+}

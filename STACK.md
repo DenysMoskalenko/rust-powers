@@ -4,7 +4,7 @@ One pick per concern. Decided 10 November 2026.
 
 Toolchain: Rust 1.99, edition 2024, resolver 3. python-powers is the sibling project this
 repository mirrors for Python services.
-Re-validated on rustc 1.99.1 / clippy 0.1.99, 26 October 2026: `cargo update` (583 packages in the scaffold lock, 935 with every add-when-needed crate), `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings` with the `[lints]` table below active (zero warnings), and `cargo deny check` (advisories, bans, licenses, sources all ok). The skeleton wires settings, `AppError`, `Valid<T>`/`ValidQuery<T>`, sea-orm + a `migration/` crate, OTLP traces with the W3C propagator and the axum OTel middleware, a traced reqwest client, Prometheus metrics and Swagger UI. Every "add when needed" crate (rig, rmcp, axum-extra, jsonwebtoken, argon2, nutype) is resolved and compiled in the same lock file. The messaging and cache crates (async-nats 0.50, redis 1.8, deadpool-redis 0.23.1) compile clippy-clean in that lock file, and their snippet tests pass against Docker NATS 2.14 / Redis 8.
+Re-validated on rustc 1.99.1 / clippy 0.1.99, 26 October 2026: `cargo update` (583 packages in the scaffold lock, 935 with every add-when-needed crate), `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings` with the `[lints]` table below active (zero warnings), and `cargo deny check` (advisories, bans, licenses, sources all ok). The skeleton wires settings, `AppError`, `Valid<T>`/`ValidQuery<T>`, sea-orm + a `migration/` crate, OTLP traces with the W3C propagator and the axum OTel middleware, a traced reqwest client, Prometheus metrics and Swagger UI. Every "add when needed" crate (rig, rmcp, axum-extra, jsonwebtoken, argon2, nutype) was resolved and compiled in one graph with the baseline; the scaffold's committed `Cargo.lock` holds the baseline only, so a service resolves an add-on when it adds it. The messaging and cache crates (async-nats 0.50, redis 1.8, deadpool-redis 0.23.1) compile clippy-clean in that graph, and their snippet tests pass against Docker NATS 2.14 / Redis 8.
 
 ## One Pick Per Concern
 
@@ -59,19 +59,23 @@ Re-validated on rustc 1.99.1 / clippy 0.1.99, 26 October 2026: `cargo update` (5
 ### Web
 
 - **axum 0.8** with `macros`. actix-web is ~10 % faster and has its own middleware model; not worth it.
-- **tower-http 0.7** for `CorsLayer`, `CompressionLayer`, `TimeoutLayer`, `CatchPanicLayer` (features `cors`, `compression-full`, `timeout`, `catch-panic` only; the request id is one `from_fn` middleware, not tower-http's set/propagate pair, and there is no `TraceLayer`). `CatchPanicLayer::custom(handle_panic)` sits directly inside the request-id middleware (`error::catch_panic_layer()`): a handler panic is logged and answered with the constant 500 `ErrorBody`, request id included, instead of dropping the connection. `TimeoutLayer::new` is deprecated since 0.6.7; use `TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, dur)`, which `-D warnings` otherwise rejects.
+- **tower-http 0.7** for `CorsLayer`, `CompressionLayer`, `CatchPanicLayer` (features `cors`, `compression-full`, `catch-panic` only; the request id is one `from_fn` middleware, not tower-http's set/propagate pair, and there is no `TraceLayer`). `CatchPanicLayer::custom(handle_panic)` sits directly inside the request-id middleware (`error::catch_panic_layer()`): a handler panic is logged and answered with the constant 500 `ErrorBody`, request id included, instead of dropping the connection.
+- **Request timeout**: the scaffold's own `api::request_timeout`, a `from_fn` middleware and the innermost layer, returns `AppError::Unavailable` when a handler passes `REQUEST_TIMEOUT`: a 503 `ErrorBody` with the request id, logged once. tower-http's `TimeoutLayer` is not used: it answers with an empty body and logs nothing, and its usual 408 tells the client that the client was too slow to send the request.
+- **Layer order**, outermost first: `OtelAxumLayer`, `OtelInResponseLayer`, request id, catch-panic, Prometheus, CORS, compression, body limit, request timeout. An inbound `x-request-id` is kept only when it is 1 to 64 characters of `[A-Za-z0-9._-]`; anything else is replaced, because the value is echoed into logs and the response.
 - **utoipa 6 + utoipa-axum + utoipa-swagger-ui** (`vendored` feature so the build does not download Swagger UI). Serves `/docs` and `/openapi.json`.
 - **validator 0.21** with a hand-written `Valid<T>` extractor. axum-valid is not used because it pins validator 0.20.
 - **nutype** for validated newtypes (`Email`, `NonEmptyString`) only where the type is reused.
-- **thiserror** for the `AppError` enum, **anyhow** inside services. `AppError` implements `IntoResponse` and is the only place a status is chosen; every failure, both router fallbacks included, renders the same `ErrorBody { error, request_id?, details? }`. The eleven variants and their statuses are in the wiring section below. 5xx and 409 bodies are constants; the cause chain goes to `tracing::error!`.
+- **thiserror** for the `AppError` enum, **anyhow** inside services. `AppError` implements `IntoResponse` and is the only place an error status is chosen; every failure, both router fallbacks included, renders the same `ErrorBody { error, request_id?, details? }`. The eleven variants and their statuses are in the wiring section below. 5xx and 409 bodies are constants; the cause chain is logged once, in `IntoResponse`: at ERROR for a 5xx, at WARN for a 409 or another constraint rejection, so a duplicate email is visible and pages nobody.
 - `AppError` never grows a variant for an add-on (rig, NATS, Redis): each maps its own errors onto the canonical ones — unreachable or failed backend → `Unavailable(String)` (503; the string is logged, the body is constant), a provider or client rate limit → `TooManyRequests { retry_after_secs }` (429), a programming or wiring error → `Other(anyhow::Error)` (500), bad input → `BadRequest(String)` (400). No 502 except the existing `Http` variant for outbound HTTP.
 - Readiness: `GET /health/ready` returns `{ "status": "ok" | "degraded" | "unavailable", "checks": { "<name>": ... } }`. A required dependency (the database) failing is 503 + `unavailable`; an optional one (cache, messaging) failing is 200 + `degraded`. Add-ons add one entry under `checks`.
-- Rate limiting is Redis-backed (see the `rust-redis` skill): a `from_fn_with_state` middleware applied per router with `route_layer`, after request id, OTel and auth extraction and before `TimeoutLayer`; `main.rs` serves with `into_make_service_with_connect_info::<SocketAddr>()` so the IP fallback has a `ConnectInfo`.
-- **reqwest 0.13** for outbound HTTP, features `["json", "query"]` — `query` and `form` became opt-in in 0.13, and rustls is already the default (no `rustls-tls` feature any more). Retries are first-party: `ClientBuilder::retry(reqwest::retry::for_host(h).max_retries_per_request(3))`. reqwest-retry is not needed.
+- Rate limiting is Redis-backed (see the `rust-redis` skill): a `from_fn_with_state` middleware applied per router with `route_layer`, which puts it inside every global layer: the request id and the server span exist when it runs, and the time it waits on Redis counts against the request timeout; `main.rs` serves with `into_make_service_with_connect_info::<SocketAddr>()` so the IP fallback has a `ConnectInfo`.
+- **reqwest 0.13** for outbound HTTP, features `["json", "query"]` — `query` and `form` became opt-in in 0.13, and rustls is already the default (no `rustls-tls` feature any more). Retries are first-party: `ClientBuilder::retry(reqwest::retry::for_host(h).classify_fn(..))`. `for_host` alone retries nothing: its classifier starts as "never", and installing the policy replaces the default retries of protocol NACKs, so `classify_fn` must name what is retryable (an idempotent method, on a transport error or a 502, 503 or 504) and compare the host as well: 0.13.5 checks the `for_host` scope only from the second retry (`retry.rs`, `clone_request`), so a request to any other host is retried once. A policy carries a 20 % retry budget and no backoff. reqwest-retry is not needed.
 
 ### Config
 
 - `config::Environment` (separator `__`) deserialised into a serde `Settings` struct with `#[serde(default)]` for defaults. No config files.
+- No `try_parsing` and no `list_separator`: `try_parsing` re-types every value that looks like a number or a bool, so a secret `0012345` reaches the service as `12345`. Values stay strings, serde parses `u16` and `bool` fields from them, and a list field splits itself with `#[serde(deserialize_with = "comma_separated")]`.
+- A setting that cannot work fails `Settings::load`, not the first request: a CORS origin that is not `scheme://host[:port]` aborts startup.
 - `dotenvy::dotenv().ok()` is the first line of `main`. Missing `.env` is a no-op, so production reads real environment variables only. dotenvy 0.15.7 is from 2023 but the crate is finished, the repo is active (August 2026 commits) and it has 44 M downloads per 90 days; sea-orm-cli reads `.env` through it as well.
 - **secrecy** `SecretString` for passwords, tokens and `DATABASE_URL`. Redacted `Debug`, explicit `expose_secret()`.
 - Settings tests never touch the process environment: `Settings::from_map(map)` feeds `config::Environment::with_prefix("APP").source(Some(map))` an in-memory map with the same `APP__` keys. `std::env::set_var` is `unsafe` in edition 2024 and `unsafe_code = "forbid"` cannot be relaxed by `#[allow]`, so the alternative would be a `temp-env` dev-dependency.
@@ -84,8 +88,8 @@ Re-validated on rustc 1.99.1 / clippy 0.1.99, 26 October 2026: `cargo update` (5
 - **Writes**: the house style is a struct literal, `ActiveModel { id: NotSet, .. }.insert(db)`. Never `.save()` a new row whose primary key is set in application code — `save()` sees a `Set` PK, issues an `UPDATE`, matches zero rows and fails with `DbErr::RecordNotUpdated`. The nested `ActiveModel::builder()` is worth it only for inserting a whole object graph atomically.
 - Pagination: `Entity::find().paginate(&db, page_size)` gives `fetch_page`, `num_pages`, `num_items`.
 - Raw SQL: `raw_sql!` macro + `FromQueryResult`; a bare `Statement` goes through `execute_raw` / `query_all_raw`. `sqlx::query_as!` is possible on the same pool but needs `DATABASE_URL` at build time; avoid it.
-- Service functions take `&C where C: ConnectionTrait`, so they work with a pool and a transaction alike. `DatabaseConnection` is cheap to clone — put it in axum state, never `Arc<_>`. Map unique violations with `DbErr::sql_err()` → `SqlErr::UniqueConstraintViolation`. Set `ConnectOptions::statement_timeout`.
-- **Migrations**: `sea-orm-cli migrate init` creates the `migration/` workspace crate. Migrations are Rust (`SeaQuery` DSL or raw SQL in `up`). Run on startup with `Migrator::up(&db, None)` or `make migrate`. Add an index for every FK column.
+- Service functions take `&C where C: ConnectionTrait`, so they work with a pool and a transaction alike. `DatabaseConnection` is cheap to clone — put it in axum state, never `Arc<_>`. Map unique violations with `DbErr::sql_err()` → `SqlErr::UniqueConstraintViolation`. Set `ConnectOptions::statement_timeout`. `DbErr::ConnectionAcquire` and `DbErr::Conn` (pool exhausted, Postgres unreachable) answer 503, not 500. `offset` is capped (`MAX_OFFSET`, 10 000): the driver converts it with `i64::try_from(..).unwrap()`, so an unbounded `u64` from a query string is a panic.
+- **Migrations**: `sea-orm-cli migrate init` creates the `migration/` workspace crate. Migrations are Rust (`SeaQuery` DSL or raw SQL in `up`). Add an index for every FK column. On startup `main.rs` runs `Migrator::up` before the service pool exists, on two connections of its own with no `statement_timeout` (the service's ten seconds would cancel a backfill or an index build), inside `pg_advisory_xact_lock` held by an open transaction, so replicas that start together migrate one at a time. That transaction idles while the migrations run, so it first lifts `idle_in_transaction_session_timeout` and `transaction_timeout` for itself with `SET LOCAL`; either would end the session and release the lock. `make migrate` runs the same migrations as a separate step.
 - **Entities**: generated from the migrated database, `make entity` (`sea-orm-cli generate entity -o src/entities --with-serde both --entity-format dense`). Without `--entity-format dense` you get 1.x compact entities and none of the 2.0 relation story. **Migration first, always**: sea-orm-cli 2.0.4 has no autogenerate — no `--from-entity`, no `diff`, codegen only points database → entities. The 2.0 Schema Registry `sync` adds missing tables and columns, renames `renamed_from` columns and tries to drop any unique key the entity does not declare, never alters a column type or drops a column or table, leaves no reviewable artifact and is semver-exempt: prototyping and test harnesses only.
 - **Types**: chrono 0.4 (`DateTime<Utc>`), uuid v7 primary keys, rust_decimal for money.
 - **UUID keys**: v7, assigned by the database with `DEFAULT uuidv7()`, so every writer shares one generator. `Uuid::now_v7()` in Rust only when the id must exist before the INSERT or the server predates Postgres 18. v4 never on a new table: its random order scatters inserts across the index.
@@ -103,16 +107,16 @@ sea-orm 1.x → 2.0 — the renames that break nearly every pre-2026 snippet:
 | `DatabaseConnection` enum | struct (old variants in `conn.inner`) |
 | hand-written `Relation` enum + `impl Related` | dense format: relations are fields on the Model |
 | `db.execute(Statement)` | `db.execute_raw(Statement)` |
-| `insert_many(..).on_empty_do_nothing()` | gone; empty iterators are handled |
+| `insert_many(..).on_empty_do_nothing()` | deprecated since 2.0.0; `exec` handles an empty iterator without SQL |
 | Postgres `serial` primary keys | `GENERATED BY DEFAULT AS IDENTITY` |
 
 ### Telemetry
 
 - **tracing** everywhere (`#[instrument]`, `info!`), **tracing-subscriber** JSON output with `EnvFilter` (`RUST_LOG`).
 - **Traces**: tracing-opentelemetry 0.33 + opentelemetry-otlp 0.32 over gRPC (tonic). The endpoint is the setting `APP__TELEMETRY__OTLP_ENDPOINT`, passed with `.with_endpoint(..)`; unset means no exporter is built at all (the tracer provider still exists, so trace ids are minted and propagated, then the spans are dropped), and the SDK's own `OTEL_EXPORTER_OTLP_ENDPOINT` is therefore never consulted. `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` are honoured through `Resource::builder()`. `opentelemetry_sdk` needs `trace`, not `rt-tokio` — since 0.32 the batch processor runs on its own thread. `opentelemetry-otlp` with `default-features = false` must list both `grpc-tonic` and `trace`; `grpc-tonic` does not imply it, and the defaults drag in a blocking reqwest.
-- **Propagation**: `global::set_text_map_propagator(TraceContextPropagator::new())` belongs in `init_telemetry`. The default global propagator is a no-op, so without that line nothing propagates in either direction and nothing warns. Inbound: **axum-tracing-opentelemetry 0.39** (`OtelAxumLayer` + `OtelInResponseLayer`), which reads `MatchedPath` for `http.route`. Outbound: **reqwest-middleware 0.5** + **reqwest-tracing 0.7** (`opentelemetry_0_32`).
+- **Propagation**: `global::set_text_map_propagator(TraceContextPropagator::new())` belongs in `init_telemetry`. The default global propagator is a no-op, so without that line nothing propagates in either direction and nothing warns. Inbound: **axum-tracing-opentelemetry 0.39** (`OtelAxumLayer` + `OtelInResponseLayer`), which reads `MatchedPath` for `http.route`. `OtelAxumLayer` is the outermost layer with `OtelInResponseLayer` directly inside it, both outside the request-id middleware: the server span then parents the `request` span and the response `traceparent` carries the caller's trace id. In any other order the echoed header belongs to a different trace; a scaffold test pins it. Outbound: **reqwest-middleware 0.5** + **reqwest-tracing 0.7** (`opentelemetry_0_32`).
 - `use opentelemetry::trace::TracerProvider as _;` or `provider.tracer(..)` is not found; `OpenTelemetrySpanExt::set_parent` returns `Result` in 0.33, so a bare call trips `unused_must_use`.
-- **Metrics**: `metrics` 0.24 facade + axum-prometheus 0.10, which provides the request counter, duration histogram and the `PrometheusHandle` for a `/metrics` route. Custom metrics via `metrics::counter!` / `histogram!`.
+- **Metrics**: `metrics` 0.24 facade + axum-prometheus 0.10, which provides the request counter, duration histogram and the `PrometheusHandle` for a `/metrics` route. Built with `PrometheusMetricLayerBuilder`, not `PrometheusMetricLayer::pair()`: `EndpointLabel::MatchedPathWithFallbackFn` gives every unmatched path the one label `unmatched` (the default labels each 404 by its raw path, which a scanner turns into unbounded series), and the recorder is installed once per process through a `OnceLock`, so `build_router` can be called any number of times and the suite also passes under plain `cargo test`. Custom metrics via `metrics::counter!` / `histogram!`.
 - Version set that compiles together: opentelemetry 0.32, opentelemetry_sdk 0.32, opentelemetry-otlp 0.32, tracing-opentelemetry 0.33, axum-tracing-opentelemetry 0.39.1, reqwest-middleware 0.5.2, reqwest-tracing 0.7.1, tonic 0.14, axum-prometheus 0.10.1, metrics 0.24.6, metrics-exporter-prometheus 0.18.3.
 
 ### Testing
@@ -134,7 +138,7 @@ sea-orm 1.x → 2.0 — the renames that break nearly every pre-2026 snippet:
 
 ### AI (add when needed)
 
-- **rig 0.45** — the facade crate, not `rig-core`. `rig-core` has no agent layer at all: `Agent` and `Extractor` live in `rig-agent`, which `rig` re-exports. Default features are `rig-core/default`, `reqwest`, `agent`, `derive`, `rustls`. 0.43 rewrote the public API (`AgentBuilder::new(client.completion(model))`, `.output` on `PromptResponse`, `prompt(..).stream()`), 0.44 renamed the `PromptError` variants and made `output()` a method, and 0.45 moved conversation memory onto `rig-memory` stores (`.memory(store)` plus a one-segment `.conversation(log)`) and MCP onto `McpConnection`; the old-to-new tables are the skill's `VERSION-DRIFT.md`. MSRV 1.97.1. Gives agents, tools, structured output, RAG, 20+ providers, OTel GenAI conventions.
+- **rig 0.45** — the facade crate, not `rig-core`. `rig-core` has no agent layer at all: `Agent` and `Extractor` live in `rig-agent`, which `rig` re-exports. Default features are `rig-core/default`, `reqwest`, `agent`, `derive`, `rustls`. 0.43 rewrote the public API (`AgentBuilder::new(client.completion(model))`, `.output` on `PromptResponse`, `prompt(..).stream()`), 0.44 renamed the `PromptError` variants and made `output()` a method, and 0.45 moved conversation memory onto `rig-memory` stores (`.memory(store)` plus a one-segment `.conversation(log)`) and MCP onto `McpConnection`; the old-to-new tables are the skill's `VERSION-DRIFT.md`. MSRV 1.97.1. Gives agents, tools, structured output, RAG, 20+ providers, OTel GenAI conventions. rig retries nothing with backoff (`.retries(n)` reruns at once), so the skill's retry wrapper is hand-written and takes its jitter from `rand`, which a service using it moves from `[dev-dependencies]` to `[dependencies]`.
 - **rmcp 3**: rig-rmcp 0.45, which rig's `rmcp` feature pulls in, needs `rmcp ^3.5`, and two rmcp majors in one graph produce two incompatible `RunningService` types that `McpConnection::new` rejects. Enable rig's `rmcp` feature to use MCP tools inside an agent; the same major serves a standalone MCP server.
 
 ### Auth (add when needed)
@@ -161,7 +165,7 @@ sea-orm 1.x → 2.0 — the renames that break nearly every pre-2026 snippet:
 - The `json` feature is the RedisJSON server module, not serde support; a `Json<T>` newtype over `serde_json` needs no feature. Keys `app:v1:entity:id`, every write has a TTL, `SCAN` never `KEYS`, an outage degrades to a miss and never a 500.
 - Pub/sub and streams belong to NATS, not Redis.
 - **Tests**: `TEST_REDIS_URL` when set, else the testcontainers-modules `redis` module with `.with_tag("8-alpine")` — the module default is `5.0`. Isolate with a per-test key prefix, not `FLUSHDB`.
-- Rejected: fred (last release February 2025, 18 months silent while redis-rs shipped 1.0→1.7), rustis (0.x, six breaking minors in six weeks).
+- Rejected: fred (last release February 2025, 20 months silent while redis-rs shipped 1.0→1.8), rustis (0.x, six breaking minors in six weeks).
 
 ## Cargo.toml
 
@@ -198,7 +202,7 @@ futures = "0.3"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
-tower-http = { version = "0.7", features = ["cors", "compression-full", "timeout", "catch-panic"] }
+tower-http = { version = "0.7", features = ["cors", "compression-full", "catch-panic"] }
 reqwest = { version = "0.13", features = ["json", "query"] }
 # serialization / validation / openapi
 serde = { version = "1", features = ["derive"] }
@@ -236,7 +240,7 @@ bon = "3"
 itertools = "0.15"
 derive_more = { version = "2", features = ["full"] }
 strum = { version = "0.28", features = ["derive"] }
-# add when needed (all resolved and compiled in the same lock file):
+# add when needed (verified to resolve and compile together with the above; not in Cargo.lock until you add them):
 # axum-extra = { version = "0.12", features = ["typed-header"] }
 # rig = { version = "0.45", features = ["rmcp"] }   # the facade; rig-core has no agents. Add "memory" for rig::memory (stores, windows, compaction), "test-utils" as a dev feature
 # rmcp = { version = "3", features = ["client", "macros", "transport-streamable-http-client-reqwest"] }   # rig-rmcp needs ^3.5
@@ -258,6 +262,7 @@ fake = { version = "5", features = ["derive", "chrono", "uuid", "rust_decimal"] 
 rand = "0.10"                                            # the version fake 5 builds on
 test-log = { version = "0.2", features = ["trace"] }
 tokio = { version = "1.53", features = ["test-util"] }   # `full` does NOT include test-util
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }   # the in-memory span exporter
 
 [package.metadata.cargo-machete]
 # The stack ships these for the code you are about to write; `rust_decimal` is
@@ -309,7 +314,7 @@ components = ["rustfmt", "clippy", "llvm-tools-preview"]
 .PHONY: install-tools fmt lint check test cov dev run migrate entity
 
 install-tools:
-	cargo install cargo-binstall
+	cargo install --locked cargo-binstall
 	cargo binstall -y cargo-nextest cargo-llvm-cov cargo-deny cargo-machete cargo-chef bacon cargo-insta sea-orm-cli prek
 	prek install
 
@@ -434,7 +439,7 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 
 ## Reference wiring
 
-The scaffold in the `rust-scaffolding` skill (`assets/app/src/`) is the reference wiring and is what every snippet compiles against: `config.rs` (nested `Settings` from `APP__` variables plus the four timeout constants), `error.rs` (`AppError`, `ErrorBody`, the request-id task local), `extract.rs` (`Valid<T>`, `ValidQuery<T>`), `telemetry.rs` (subscriber, optional OTLP exporter, `TelemetryGuard`), `lib.rs` (`AppState`, `build_router` with the layer stack), `api/health.rs` (the readiness body above), `main.rs` (settings → telemetry → pool → migrations → serve with `into_make_service_with_connect_info` → drain → flush spans → close pool).
+The scaffold in the `rust-scaffolding` skill (`assets/app/src/`) is the reference wiring and is what every snippet compiles against: `config.rs` (nested `Settings` from `APP__` variables plus the five timeout constants: `SHUTDOWN_TIMEOUT` 35 s, `REQUEST_TIMEOUT` 30 s, `HTTP_CLIENT_TIMEOUT` and `DB_STATEMENT_TIMEOUT` 10 s, `READINESS_TIMEOUT` 2 s), `error.rs` (`AppError`, `ErrorBody`, the request-id task local), `extract.rs` (`Valid<T>`, `ValidQuery<T>`), `telemetry.rs` (subscriber, optional OTLP exporter, `TelemetryGuard`), `lib.rs` (`AppState`, `build_router` with the layer stack), `api/mod.rs` (the request-id and request-timeout middleware), `api/health.rs` (the readiness body above), `main.rs` (settings → telemetry → migrations on their own connections → pool → serve with `into_make_service_with_connect_info` → drain, bounded by `SHUTDOWN_TIMEOUT` from the signal → flush spans → close pool, bounded at 5 s).
 
 The error type, verbatim from `error.rs`:
 
@@ -477,12 +482,14 @@ pub enum AppError {
 | Variant | Status |
 |---|---|
 | `Validation`, `JsonRejection::JsonDataError` | 422 |
-| other `JsonRejection`, `BadRequest` | 400 |
+| `Db` when the driver reports 23503 | 422 (constant body `invalid reference`) |
+| other `JsonRejection` | the rejection's own status: 400, 415 or 413 |
+| `BadRequest` | 400 |
 | `NotFound` | 404 |
 | `Conflict`, `Db` when the driver reports 23505 | 409 (constant body) |
 | `Unauthorized` | 401 |
 | `TooManyRequests` | 429, `Retry-After` when `Some` |
-| `Unavailable` | 503 (constant body) |
+| `Unavailable` (a request past `REQUEST_TIMEOUT` included), `Db` with no connection (`ConnectionAcquire`, `Conn`) | 503 (constant body) |
 | `Http` | 502 (constant body) |
 | `Db` otherwise, `Other` | 500 (constant body) |
 
@@ -501,9 +508,10 @@ pub enum AppError {
 |---|---|---|
 | sqlx alone | no query builder, relations by hand | sea-orm (sqlx underneath) |
 | diesel | typed DSL, async is second-class | sea-orm |
-| Toasty | Tokio team, but 23k downloads / 90 days | sea-orm; revisit 2027 |
+| Toasty | Tokio team, but pre-1.0 (0.11) and 78k downloads / 90 days | sea-orm; revisit 2027 |
 | actix-web | own middleware model for ~10 % throughput | axum |
-| Rocket, Poem | no release in 14+ months | axum |
+| Rocket | still the 2023 0.5 line (0.5.2, October 2026, is a patch); not tower-based, so tower-http and the OTel middleware do not apply | axum |
+| Poem | no release in 15 months | axum |
 | garde + axum-valid | fine, 7x smaller community | validator + `Valid<T>` |
 | jiff | better API, but sqlx bridge is a small separate crate | chrono |
 | figment, envy | no release in 2+ years / dead | config |
@@ -516,7 +524,7 @@ pub enum AppError {
 | pretty_assertions | 2 years idle | similar-asserts |
 | wiremock | 13 months idle | httpmock |
 | color-eyre | 16 months idle | anyhow |
-| fred | last release February 2025, 18 months silent while redis-rs shipped 1.0→1.7 | redis |
+| fred | last release February 2025, 20 months silent while redis-rs shipped 1.0→1.8 | redis |
 | rustis | 0.x, six breaking minors in six weeks | redis |
 | `nats` (legacy) | blocking client, deprecated on crates.io in favour of async-nats | async-nats |
 | lapin / RabbitMQ | a second broker to run and learn | async-nats |

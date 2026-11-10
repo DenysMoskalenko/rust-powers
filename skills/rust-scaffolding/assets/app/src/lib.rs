@@ -13,24 +13,24 @@ pub mod error;
 pub mod extract;
 pub mod telemetry;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
-use axum_prometheus::PrometheusMetricLayer;
+use axum_prometheus::metrics_exporter_prometheus::PrometheusHandle;
+use axum_prometheus::{EndpointLabel, PrometheusMetricLayerBuilder};
 use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::timeout::TimeoutLayer;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::clock::Clock;
-use crate::config::{REQUEST_TIMEOUT, ServerSettings, Settings};
+use crate::config::{ServerSettings, Settings};
 use crate::error::{AppError, ErrorBody, catch_panic_layer};
 
 pub const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
@@ -58,14 +58,35 @@ pub struct AppState {
 )]
 pub struct ApiDoc;
 
+/// The `metrics` recorder is one per process by design. It is installed by the
+/// first router and shared by every later one (a second listener, the next test
+/// in the same process), which would otherwise panic installing it again.
+static METRICS: OnceLock<PrometheusHandle> = OnceLock::new();
+
+fn metrics_handle() -> PrometheusHandle {
+    METRICS
+        .get_or_init(|| axum_prometheus::Handle::default().0)
+        .clone()
+}
+
+/// A request no route matched has no `MatchedPath`. Labelling it with the raw
+/// path, the default, mints one series per URL a scanner tries.
+fn unmatched(_path: &str) -> String {
+    "unmatched".to_owned()
+}
+
 /// The real router, used by `main` and by every integration test.
 ///
 /// Layers inside a `ServiceBuilder` run OUTERMOST FIRST, the reverse of chained
-/// `.layer()` calls. The request id comes first so everything below it, spans and
-/// error bodies included, can name the request; the timeout is innermost so the
-/// budget measures the handler rather than the middleware above it.
+/// `.layer()` calls. The server span is outermost, so it times and records
+/// everything below it, a panic and a timeout included; the request id sits
+/// inside it, so every log line and error body can name the request; the timeout
+/// is innermost, so the budget measures the handler rather than the middleware.
 pub fn build_router(state: AppState) -> Router {
-    let (prometheus_layer, metric_handle) = PrometheusMetricLayer::pair();
+    let (prometheus_layer, metric_handle) = PrometheusMetricLayerBuilder::new()
+        .with_endpoint_label_type(EndpointLabel::MatchedPathWithFallbackFn(unmatched))
+        .with_metrics_from_fn(metrics_handle)
+        .build_pair();
     let cors = cors_layer(&state.settings.server);
 
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
@@ -87,29 +108,29 @@ pub fn build_router(state: AppState) -> Router {
         })
         .layer(
             ServiceBuilder::new()
+                // Reads `traceparent` off the request and opens the server span
+                // with `http.route` from the matched path. This is the only HTTP
+                // span: a tower-http `TraceLayer` next to it would open a second,
+                // unrelated one for every request.
+                .layer(OtelAxumLayer::default())
+                // Writes the server span's `traceparent` on the response, so it
+                // has to run inside that span. The order is the reverse of the
+                // crate's README, which chains `.layer()` on a `Router`.
+                .layer(OtelInResponseLayer)
+                // Inside the server span: the `request` span it opens is then a
+                // child in the same trace, not a second root.
                 .layer(axum::middleware::from_fn(api::request_id))
                 // Directly inside the request id, so a panic anywhere below
                 // still answers with the id in the body and the header.
                 .layer(catch_panic_layer())
-                // Writes `traceparent` back, then reads it off the request and
-                // opens the server span with `http.route` from the matched path.
-                // This is the only HTTP span: a tower-http `TraceLayer` next to it
-                // would open a second, unrelated one for every request.
-                .layer(OtelInResponseLayer)
-                .layer(OtelAxumLayer::default())
                 .layer(prometheus_layer)
                 .option_layer(cors)
                 .layer(CompressionLayer::new())
                 .layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT_BYTES))
-                // Innermost. It races the future that produces the response,
-                // never the body, so a streaming route (SSE, a download) stays
-                // inside this stack and is not cut off. A rate limiter is not a
-                // global layer either: it goes on the limited router with
-                // `route_layer`.
-                .layer(TimeoutLayer::with_status_code(
-                    StatusCode::REQUEST_TIMEOUT,
-                    REQUEST_TIMEOUT,
-                )),
+                // Innermost. A streaming route (SSE, a download) stays inside
+                // this stack and is not cut off. A rate limiter is not a global
+                // layer either: it goes on the limited router with `route_layer`.
+                .layer(axum::middleware::from_fn(api::request_timeout)),
         )
         .with_state(state)
 }

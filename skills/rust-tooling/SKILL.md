@@ -2,7 +2,7 @@
 name: rust-tooling
 description: "Use when changing or debugging an existing Rust service's tooling — rust-toolchain.toml, cargo add, upgrading one dependency, lockfile, min-publish-age or a version too new, workspace lints table or a member clippy skips, clippy.toml, rustfmt.toml, nextest, llvm-cov, the coverage gate, cargo-deny, cargo-machete, bacon, prek or pre-commit hooks, Makefile, a Dockerfile rebuilding every dependency, docker-compose, CI recompiling, target/ size, unknown lint warnings. Not for a new repository (rust-scaffolding), one clippy finding (rust-code-style), or what coverage measures (rust-testing)."
 metadata:
-  version: "0.5.0"
+  version: "0.6.0"
 ---
 
 # Rust Tooling
@@ -29,8 +29,9 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
   editing `rust-toolchain.toml`, `.cargo/config.toml`, the `[workspace.lints]` table,
   `clippy.toml`, `rustfmt.toml`, `.config/nextest.toml`, `deny.toml`, `bacon.toml`,
   `.pre-commit-config.yaml` or the Makefile.
-- `references/ci.md` — the GitHub Actions workflow, the toolchain step, the RUSTFLAGS and cache-key trap, the
-  Postgres service container and the optional Redis and NATS ones. Open it when adding or debugging a CI job.
+- `references/ci.md` — the GitHub Actions workflow, why it has no toolchain step, the RUSTFLAGS and cache-key
+  trap, the Postgres service container and the optional Redis and NATS ones. Open it when adding or debugging
+  a CI job.
 - `references/docker.md` — the cargo-chef Dockerfile, `.dockerignore`, release profile, base image choice and
   docker-compose with the optional Redis and NATS services. Open it when containerising the service,
   running dependencies locally, or when Docker's build cache fills the disk.
@@ -41,7 +42,7 @@ Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come
 |---|---|
 | Check formatting and lint as CI does | `make lint` (`make fmt` rewrites) |
 | Full local gate before a pull request | the `check` target, then `make test` |
-| Watch loop while editing | `make dev` (bacon, default job clippy; `n` switches to nextest) |
+| Watch loop while editing | `make dev` (bacon, default job clippy; `c` clippy, `n` nextest, `d` docs) |
 | Coverage with the gate | `make cov` |
 | Add a dependency | `cargo add <crate>` |
 | Find duplicate versions | `cargo tree -d` |
@@ -71,9 +72,6 @@ Tell the user the previous toolchain can go with `rustup toolchain uninstall` on
 Use `cargo add <crate>`, with `--features`, `--no-default-features`, `--dev` or `-p <member>` as needed: it
 resolves the latest compatible version, where a hand-written version string is a guess that ages.
 `cargo remove <crate>` is the inverse, and `--dry-run` on either shows the change first.
-
-A binary crate commits `Cargo.lock`, and `--locked` in CI makes a stale lockfile fail the build instead of
-being quietly updated on the runner.
 
 To bump one crate safely:
 
@@ -108,7 +106,7 @@ Both tables verbatim are in `references/configs.md`; why a lint is on is `rust-c
 
 ## Installing the cargo tools
 
-`cargo install cargo-binstall` once, then `cargo binstall -y <tools>`, prek included: it fetches prebuilt
+`cargo install --locked cargo-binstall` once, then `cargo binstall -y <tools>`, prek included: it fetches prebuilt
 binaries, so the whole set lands in seconds instead of minutes of compilation. `make install-tools` does that
 and runs `prek install`. Fall back to `cargo install --locked <tool>` when a crate publishes no binaries; in CI
 use `taiki-e/install-action` instead of bootstrapping binstall.
@@ -134,7 +132,7 @@ accepts `-p` and, since 0.9, `--workspace`; `--branch` (top-level, not a `report
 For which files to leave out of coverage and why, see `rust-testing`.
 
 Snapshots: `cargo insta review` steps through pending `.snap.new` files, `cargo insta accept` takes them all,
-and `*.pending-snap` belongs in `.gitignore`. Never set `INSTA_UPDATE=always` in CI — it rewrites the
+and `.gitignore` lists `*.snap.new` and `*.pending-snap`. Never set `INSTA_UPDATE=always` in CI — it rewrites the
 snapshots the run exists to check.
 
 ## Supply chain
@@ -153,13 +151,12 @@ crate's feature looks unused. The template exempts eight crates in `[package.met
 (shipped for code not yet written); delete a name when you start using the crate, and add one only after
 deleting the dependency line and watching the build fail.
 
-## Hooks and the dev loop
+## Hooks
 
 `prek install` writes the git hook once, `prek run --all-files` runs everything before a pull request, plain
-`prek run` checks only what is staged, `prek update` bumps the pinned hook revisions. The local hooks run the
-same commands as the Makefile, so a hook cannot pass while CI fails.
-
-`bacon` is the background check loop — `make dev`, then `c` for clippy, `n` for nextest, `d` for docs.
+`prek run` checks only what is staged, `prek update` bumps the pinned hook revisions. The local hooks are the
+`check` target's commands. CI adds `--locked`, which fails on a stale lockfile instead of updating it, the
+tests, the coverage gate and the docs job: run `make test` and `make cov` as well.
 
 ## Troubleshooting
 
@@ -177,6 +174,6 @@ same commands as the Makefile, so a hook cannot pass while CI fails.
 | A panicking handler answers a 500 with `"error":"internal server error"` and logs `handler panicked` | the scaffold's `CatchPanicLayer` (tower-http feature `catch-panic`) caught a bug; without it the connection task dies with no response | Fix the panic; `[lints]` warns on `panic!`, `unwrap` and `expect` for this reason. |
 | Coverage gate fails with `TOTAL 0` | the ignore regex excluded every file | Narrow the regex; with no lines left the gate cannot pass. |
 | `cargo test --doc`: no library targets | binary-only crate | The service keeps `src/lib.rs`; drop the step otherwise. |
-| CI recompiles everything in every job | job-wide `RUSTFLAGS` changes both the cargo fingerprint and the rust-cache key | Pass `-D warnings` to clippy instead. See `references/ci.md`. |
+| CI compiles every dependency again although the cache restored | `RUSTFLAGS` set on some cargo commands only: each value is its own artifact set, and changing it changes the rust-cache key | Pass `-D warnings` to clippy instead. See `references/ci.md`. |
 | Docker rebuilds all dependencies every time | the chef image tag and `rust-toolchain.toml` name different toolchains | Make the tag match the channel, patch version included (`latest-rust-1.99.1` and `1.99.1`). |
 | rustfmt: unstable features are nightly-only | a nightly-only key in `rustfmt.toml` | Remove it; that key is doing nothing. |

@@ -162,8 +162,8 @@ fn parameters(&self) -> Value {
 
 The `self` in that import is load-bearing — the derive macro's generated code refers to a
 `schemars` name that must be in scope. Field descriptions come from `///` doc comments, and
-`#[schemars(description = "…")]` also works and wins when both are present. Never add your
-own `schemars` dependency; see SKILL.md.
+`#[schemars(description = "…")]` also works and wins when both are present. Do not add a
+`schemars` dependency of another major than rig's; see SKILL.md.
 
 Note for OpenAI: rig 0.45 sends Responses API tools — Rig's default OpenAI integration —
 with `strict: false`; only a strict tool (`Responses::with_strict_tools`) needs every input
@@ -342,7 +342,7 @@ use rmcp::ServiceExt as _;
 use rmcp::model::{ClientCapabilities, ClientConfig, Implementation};
 use rmcp::transport::StreamableHttpClientTransport;
 
-const MODEL: &str = openai::GPT_5_5;
+const MODEL: &str = openai::GPT_6_SOL;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

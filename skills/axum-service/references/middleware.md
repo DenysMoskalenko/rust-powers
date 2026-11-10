@@ -13,40 +13,69 @@ run through the real layers. This is the scaffold's `lib.rs` minus `AppState`.
 
 ```rust,verify
 //! `lib.rs` — one inlined `ServiceBuilder`, outermost layer first.
+use std::sync::OnceLock;
+
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
-use axum_prometheus::PrometheusMetricLayer;
+use axum_prometheus::metrics_exporter_prometheus::PrometheusHandle;
+use axum_prometheus::{EndpointLabel, PrometheusMetricLayerBuilder};
 use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::timeout::TimeoutLayer;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::AppState;
 use crate::api;
-use crate::config::{REQUEST_TIMEOUT, ServerSettings};
+use crate::config::ServerSettings;
 use crate::error::{AppError, ErrorBody, catch_panic_layer};
 
 /// Two megabytes. Anything larger is a file upload and wants its own route.
 const BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(OpenApi)]
-#[openapi(info(title = "app", version = env!("CARGO_PKG_VERSION")))]
+#[openapi(
+    info(title = "app", version = env!("CARGO_PKG_VERSION")),
+    tags(
+        (name = "health", description = "Liveness, readiness and build info"),
+        (name = "users", description = "User management"),
+    )
+)]
 pub struct ApiDoc;
+
+/// The `metrics` recorder is one per process by design. It is installed by the
+/// first router and shared by every later one (a second listener, the next test
+/// in the same process), which would otherwise panic installing it again.
+static METRICS: OnceLock<PrometheusHandle> = OnceLock::new();
+
+fn metrics_handle() -> PrometheusHandle {
+    METRICS
+        .get_or_init(|| axum_prometheus::Handle::default().0)
+        .clone()
+}
+
+/// A request no route matched has no `MatchedPath`. Labelling it with the raw
+/// path, the default, mints one series per URL a scanner tries.
+fn unmatched(_path: &str) -> String {
+    "unmatched".to_owned()
+}
 
 /// The real router, used by `main` and by every integration test.
 ///
 /// Layers inside a `ServiceBuilder` run OUTERMOST FIRST, the reverse of chained
-/// `.layer()` calls. The request id comes first so everything below it, spans and
-/// error bodies included, can name the request; the timeout is innermost so the
-/// budget measures the handler rather than the middleware above it.
+/// `.layer()` calls. The server span is outermost, so it times and records
+/// everything below it, a panic and a timeout included; the request id sits
+/// inside it, so every log line and error body can name the request; the timeout
+/// is innermost, so the budget measures the handler rather than the middleware.
 pub fn build_router(state: AppState) -> Router {
-    let (prometheus_layer, metric_handle) = PrometheusMetricLayer::pair();
+    let (prometheus_layer, metric_handle) = PrometheusMetricLayerBuilder::new()
+        .with_endpoint_label_type(EndpointLabel::MatchedPathWithFallbackFn(unmatched))
+        .with_metrics_from_fn(metrics_handle)
+        .build_pair();
     let cors = cors_layer(&state.settings.server);
 
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
@@ -68,29 +97,29 @@ pub fn build_router(state: AppState) -> Router {
         })
         .layer(
             ServiceBuilder::new()
+                // Reads `traceparent` off the request and opens the server span
+                // with `http.route` from the matched path. This is the only HTTP
+                // span: a tower-http `TraceLayer` next to it would open a second,
+                // unrelated one for every request.
+                .layer(OtelAxumLayer::default())
+                // Writes the server span's `traceparent` on the response, so it
+                // has to run inside that span. The order is the reverse of the
+                // crate's README, which chains `.layer()` on a `Router`.
+                .layer(OtelInResponseLayer)
+                // Inside the server span: the `request` span it opens is then a
+                // child in the same trace, not a second root.
                 .layer(axum::middleware::from_fn(api::request_id))
                 // Directly inside the request id, so a panic anywhere below
                 // still answers with the id in the body and the header.
                 .layer(catch_panic_layer())
-                // Writes `traceparent` back, then reads it off the request and
-                // opens the server span with `http.route` from the matched path.
-                // This is the only HTTP span: a second HTTP tracing layer next to
-                // it would open a second, unrelated one for every request.
-                .layer(OtelInResponseLayer)
-                .layer(OtelAxumLayer::default())
                 .layer(prometheus_layer)
                 .option_layer(cors)
                 .layer(CompressionLayer::new())
                 .layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT_BYTES))
-                // Innermost. It races the future that produces the response,
-                // never the body, so a streaming route (SSE, a download) stays
-                // inside this stack and is not cut off. A rate limiter is not a
-                // global layer either: it goes on the limited router with
-                // `route_layer`.
-                .layer(TimeoutLayer::with_status_code(
-                    StatusCode::REQUEST_TIMEOUT,
-                    REQUEST_TIMEOUT,
-                )),
+                // Innermost. A streaming route (SSE, a download) stays inside
+                // this stack and is not cut off. A rate limiter is not a global
+                // layer either: it goes on the limited router with `route_layer`.
+                .layer(axum::middleware::from_fn(api::request_timeout)),
         )
         .with_state(state)
 }
@@ -120,23 +149,47 @@ fn cors_layer(settings: &ServerSettings) -> Option<CorsLayer> {
 }
 ```
 
-Outermost to innermost: `api::request_id` (trusts or mints `x-request-id`, opens the `request`
-span, scopes the `REQUEST_ID` task-local, echoes the header), `error::catch_panic_layer()`
-(tower-http's `CatchPanicLayer` with the scaffold's handler), `OtelInResponseLayer` +
-`OtelAxumLayer` (the one HTTP span, `traceparent` in and out), the Prometheus layer, CORS from
-`server.cors_origins`, compression, the body limit, the timeout. Everything, `/metrics`, the probes and both fallbacks included, sits inside the
+Outermost to innermost: `OtelAxumLayer` (reads `traceparent`, opens the one HTTP server span),
+`OtelInResponseLayer` (writes that span's `traceparent` on the response), `api::request_id` (keeps
+an inbound `x-request-id` of 1–64 `[A-Za-z0-9._-]` characters or mints a uuid v7, opens the
+`request` span, scopes the `REQUEST_ID` task-local, echoes the header),
+`error::catch_panic_layer()` (tower-http's `CatchPanicLayer` with the scaffold's handler), the
+Prometheus layer, CORS from `server.cors_origins`, compression, the body limit,
+`api::request_timeout`. Everything, `/metrics`, the probes and both fallbacks included, sits inside the
 stack, which is why a 404 carries a request id. The request id is a `from_fn` rather than
 tower-http's `SetRequestIdLayer` + `PropagateRequestIdLayer`: those two do the header half and put
 the value in neither a span nor reach of the error body.
+
+The first three positions are load-bearing, and a test in the scaffold's `tests/api/stack.rs`
+holds them:
+
+- `OtelAxumLayer` is outermost, so the server span times and records everything below it, the
+  constant 500 of a panic and the 503 of a timeout included.
+- `OtelInResponseLayer` comes second. It writes the context of the span that is current when the
+  response passes through it, so it has to run inside the server span. The crate's README lists the
+  two in the other order because it chains `.layer()` on a `Router`, where the last call is
+  outermost; copied into a `ServiceBuilder` as written, that order puts `OtelInResponseLayer`
+  outside the server span, and the response carries the context of whatever span surrounds it.
+- `api::request_id` comes third, inside the server span, so the `request` span it opens is a child
+  in the caller's trace. Placed outside, the `request` span is the root of a trace of its own.
+
+With the request id outermost and the two Otel layers in README order, a request that arrives
+with a `traceparent` gets one back with a different trace id. An existing service with that order
+has this defect; report it instead of reordering unasked.
 
 The `ServiceBuilder` has to be inlined. Factoring it into a helper that returns
 `impl Layer<Route>` erases the `Service: Clone + Send + Sync` bounds `Router::layer` requires, and
 the call site fails with four unsatisfied-trait-bound errors.
 
-`TimeoutLayer::new` is deprecated since tower-http 0.6.7; under `-D warnings` it fails the build.
-Use `with_status_code`. `REQUEST_TIMEOUT` lives in `config.rs` next to the other budget constants.
-Its 408 is the one deliberate empty body in the service: the layer answers with a bare status, and
-the scaffold documents that rather than wrap the layer to reshape it.
+The request timeout is the scaffold's own `api::request_timeout`, shown under
+[Writing a middleware](#writing-a-middleware), and `REQUEST_TIMEOUT` lives in `config.rs` next to
+the other budget constants. It answers through `AppError::Unavailable`: a 503 in the `ErrorBody`
+shape with the request id, logged once, so a timeout looks like every other failure. tower-http's
+`TimeoutLayer` is not in the stack, and its `timeout` feature is not enabled: it answers with a
+bare status and an empty body, the one response that would break the shape, and the status it is
+usually given, 408, says the client was slow to send the request, which is not what happened. In
+a project that does use it, `TimeoutLayer::new` is deprecated since tower-http 0.6.7 and fails the
+build under `-D warnings`; use `with_status_code`.
 `DefaultBodyLimit` is axum's own limit layer, so the tower-http `limit` feature is not needed.
 
 ## The two ordering rules
@@ -156,49 +209,67 @@ layer wants, so a probe for an unknown path does not get a 401.
 ## Writing a middleware
 
 `axum::middleware::from_fn` and `from_fn_with_state` wrap an `async fn` that ends with
-`next.run(req).await`. The scaffold's own example is `api::request_id`; this one guards a subtree.
+`next.run(req).await`. The scaffold has two, `api::request_id` and `api::request_timeout`. This is
+the second, and the same idea applied to one subtree.
 
 ```rust,verify
-//! Guard a subtree without touching the handlers in it.
+//! `api/mod.rs` — the request budget, and a tighter one for a single subtree.
+use std::time::Duration;
+
 use axum::extract::{Request, State};
-use axum::http::header::AUTHORIZATION;
 use axum::middleware::Next;
 use axum::response::Response;
+use axum::routing::get;
 
 use crate::AppState;
+use crate::config::REQUEST_TIMEOUT;
 use crate::error::AppError;
 
-pub async fn require_bearer(
-    State(_state): State<AppState>,
-    req: Request,
-    next: Next,
-) -> Result<Response, AppError> {
-    let ok = req
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.starts_with("Bearer "));
-
-    if !ok {
-        return Err(AppError::Unauthorized);
-    }
-    Ok(next.run(req).await)
+/// The request budget. It races the future that produces the response, never
+/// the body, so a streaming route (SSE, a download) is not cut off. The timeout
+/// answers through `AppError`: a 503 in the `ErrorBody` shape with the request
+/// id, logged once. tower-http's `TimeoutLayer` answers with an empty body.
+///
+/// # Errors
+/// `AppError::Unavailable` when no response was produced within `REQUEST_TIMEOUT`.
+pub async fn request_timeout(request: Request, next: Next) -> Result<Response, AppError> {
+    tokio::time::timeout(REQUEST_TIMEOUT, next.run(request))
+        .await
+        .map_err(|_| AppError::Unavailable(format!("no response within {REQUEST_TIMEOUT:?}")))
 }
 
-pub fn admin_routes(state: AppState) -> axum::Router {
+/// The same budget as a parameter. `from_fn_with_state` hands the function
+/// whatever value it is given; it does not have to be `AppState`.
+///
+/// # Errors
+/// `AppError::Unavailable` when no response was produced within `limit`.
+pub async fn budget(
+    State(limit): State<Duration>,
+    request: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    tokio::time::timeout(limit, next.run(request))
+        .await
+        .map_err(|_| AppError::Unavailable(format!("no response within {limit:?}")))
+}
+
+pub fn search_routes() -> axum::Router<AppState> {
     axum::Router::new()
-        .route("/admin/stats", axum::routing::get(|| async { "ok" }))
-        // `route_layer`: applies to these routes only, and skips 404s.
+        .route("/search", get(|| async { "[]" }))
+        // `route_layer`: these routes only, and not when the path matched none.
         .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_bearer,
+            Duration::from_secs(2),
+            budget,
         ))
-        .with_state(state)
 }
 ```
 
-Prefer an extractor over a middleware when the handler needs the value: `AuthUser` gives the
-handler typed claims, while a middleware can only stash them in an `Extension`.
+A middleware that rejects returns `Result<Response, AppError>`, so its refusal is rendered and
+logged by `error.rs` like a handler's. Prefer an extractor over a middleware when the handler
+needs the value: `AuthUser` gives the handler typed claims, while a middleware can only stash them
+in an `Extension`. Authentication for a whole subtree is a `from_fn` that takes `AuthUser` as an
+argument, so the token is verified by the same code as everywhere else; a middleware that only
+checks that an `Authorization` header is present or well-formed lets any string through.
 
 ## The rate-limit slot
 
@@ -208,8 +279,8 @@ Where it sits is fixed here, so the two skills agree:
 - It is a `from_fn_with_state` middleware, applied per router with `Router::route_layer` on the
   subtree it protects (`/login`, a paid endpoint), never with `.layer()` on the whole stack: a
   probe, a scrape or a 404 must not spend a token.
-- In request order it runs **inside** the whole global stack — after `api::request_id`, the two
-  Otel layers and the `TimeoutLayer` — and immediately **before** the handler, extracting the
+- In request order it runs **inside** the whole global stack — after the two Otel layers,
+  `api::request_id` and `api::request_timeout` — and immediately **before** the handler, extracting the
   caller's identity itself (`extract_parts_with_state::<AuthUser, _>`). That is what
   `route_layer` on a merged sub-router gives you, and it is the right place: a 429 carries a
   request id and lands in the trace, and the request timeout also bounds the limiter's Redis
@@ -227,8 +298,6 @@ Where it sits is fixed here, so the two skills agree:
 ```rust
 // main.rs
 axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
 
 // where the limited routes are built
 Router::new()
@@ -241,18 +310,20 @@ Router::new()
 - **`Extension<T>` versus `State`.** `State` is checked at compile time; a missing `Extension` is
   a 500 at request time. Use `Extension` only for per-request values a middleware inserts.
 - **`HandleErrorLayer`** is for tower services whose error is not `Infallible` (`tower::timeout`,
-  `tower::limit`). The tower-http equivalents used above are already infallible; wrapping them in
-  it is a common over-application.
+  `tower::limit`). The tower-http layers and the `from_fn` middleware used above are already
+  infallible; wrapping them in it is a common over-application.
 - **The panic catcher is a net, not a path.** `error::catch_panic_layer()` (tower-http feature
   `catch-panic`) sits directly inside `api::request_id`, so a panic anywhere below it is answered
   with the constant 500 `ErrorBody`, request id included, logged as `handler panicked` with the
   message, and the connection stays open. Without it the connection task dies with the panic: no
   status, no body, no log line. The layers inside it are unwound, so that one request reaches the
-  log and the client but not the span status or the request counter. Return `AppError`; do not
-  `panic!` to signal failure.
+  log, the client and the server span, which sits outside and records the 500, but not the request
+  counter. Return `AppError`; do not `panic!` to signal failure.
 - **`CorsLayer::permissive()`** answers every preflight with a wildcard. The stack builds the layer
   from `server.cors_origins` (`APP__SERVER__CORS_ORIGINS=https://a,https://b`) and adds none when
   the list is empty; for a browser client on another origin in local development, set the variable
-  rather than swapping the layer.
+  rather than swapping the layer. An entry must be `scheme://host[:port]` with nothing after it,
+  which is exactly what a browser sends in `Origin`: `Settings` refuses anything else at startup,
+  because `https://app.example.com/` would otherwise be configured and never match.
 - **A second HTTP tracing layer** (tower-http's `trace` feature) next to `OtelAxumLayer` opens a
   second, unrelated server span per request. The two Otel layers are the only HTTP span source.

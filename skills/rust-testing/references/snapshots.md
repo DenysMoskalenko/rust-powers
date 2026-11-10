@@ -28,10 +28,12 @@ async fn create_user_response_shape() {
         .await;
 
     response.assert_status(StatusCode::CREATED);
-    // One redaction, for the one value that changes every run. `created_at`
-    // needs none: the fixed clock already pins it, so the snapshot proves it.
-    assert_json_snapshot!(response.json::<serde_json::Value>(), {
-        ".id" => "[uuid]",
+    insta::with_settings!({ sort_maps => true }, {
+        // One redaction, for the one value that changes every run. `created_at`
+        // needs none: the fixed clock already pins it, so the snapshot proves it.
+        assert_json_snapshot!(response.json::<serde_json::Value>(), {
+            ".id" => "[uuid]",
+        });
     });
 }
 ```
@@ -51,6 +53,8 @@ expression: "response.json::<serde_json::Value>()"
 }
 ```
 
+`sort_maps` is what makes that key order hold. A `serde_json::Value` sorts its keys only until some dependency turns on serde_json's `preserve_order` feature, which `rig` does; from then on a `Value` keeps the order the response struct declares, and without `sort_maps` every snapshot in the suite changes on the day that crate is added.
+
 Redact only what genuinely varies. A `created_at` pinned by `FixedClock` stays in the snapshot, where it keeps proving the timestamp came from the injected clock; redacting it would throw that assertion away.
 
 ## Selector syntax
@@ -69,7 +73,7 @@ Macros: `assert_json_snapshot!`, `assert_yaml_snapshot!`, `assert_debug_snapshot
 
 | Command | Effect |
 |---|---|
-| `cargo insta test --test-runner nextest` | run, writing `.snap.new` for changes |
+| `cargo insta test --test-runner nextest` | run, writing `.snap.new` for changes; the scaffold's `.gitignore` keeps those out of a commit |
 | `cargo insta review` | interactive accept or reject, one snapshot at a time |
 | `cargo insta accept` | accept everything pending — only after reading the diff |
 | `cargo insta test --unreferenced=reject` | fail when a `.snap` file no longer belongs to any test |

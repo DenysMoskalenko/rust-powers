@@ -28,7 +28,7 @@
 
 **Must produce**:
 
-- Copying the skill's `assets/app/`, dotfiles included, into a directory that does not exist yet, as the first step.
+- Copying the skill's `assets/app/`, dotfiles included, into a directory that is new or empty, as the first step.
 - No `target/` carried over from the template.
 - `git init` in that same step, so prek's hook in `make install-tools` has a repository.
 - The crate `app` renamed in the places the skill lists: the `Cargo.toml` name with `cargo update --workspace` for the lock, `use` paths, the OpenAPI title, the Dockerfile binary, the database name, the `RUST_LOG` directive and the compose project.
@@ -36,7 +36,7 @@
 - `.env` copied from `.env.example`, with an instruction to set `APP__AUTH__JWT_SECRET`.
 - `make install-tools`.
 - `docker compose up -d --wait postgres`, then `make migrate`.
-- `make check && make test` run before any feature code, a red result treated as a copy problem.
+- `make check && make test` run before any feature code, a red result traced to the rename, the environment or a newly published advisory rather than fixed by editing the template's code.
 - A first commit that includes `Cargo.lock`.
 - Replacing the `users` resource with `books` rather than adding a second resource beside it.
 

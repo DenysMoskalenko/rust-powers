@@ -35,14 +35,15 @@
 - The agent held as `Arc<Agent>` in `AppState`, built once outside the handler.
 - The mapping is one `agent_error(PromptError) -> AppError` function in the chat module, called with `.map_err(agent_error)?`.
 - `MaxTurns` and `UnknownToolCall` mapped to `AppError::Other` (500).
-- `PromptError::Provider(ProviderError::Response(..))`, a filtered or failed turn, mapped to `AppError::Other` (500), not the 503 catch-all.
-- A provider 4xx other than 408 and 429 (`provider_response_status()`), such as 400, 401, 403 or 404, mapped to `AppError::Other` (500).
+- `PromptError::Provider(ProviderError::Response(..))`, a filtered or failed turn, mapped to `AppError::Other` (500), not 503.
+- A provider 4xx other than 408, 425 and 429, such as 400, 401, 403 or 404, mapped to `AppError::Other` (500).
 - `Cancelled` carrying the constant reason every policy hook stops with mapped to `AppError::BadRequest` (400) with a constant message.
 - A `Cancelled` that is neither a policy refusal nor a dependency outage, which rig also raises for its own failures, mapped to `AppError::Other` (500).
 - A provider 429 mapped to `AppError::TooManyRequests { retry_after_secs }`.
 - `retry_after_secs` parsed from the provider's `Retry-After` header (`provider_response_headers()`).
-- A `PromptError::Report` that rig raised itself (`ErrorKind::Request`, `HandlerUnavailable`, `Internal`, `Other` or `Denied`) mapped to `AppError::Other` (500).
-- A final catch-all arm, which a provider 5xx or 408 reaches, mapped to `AppError::Unavailable(error.to_string())` (503).
+- A failure rig marks retryable, asked with `is_retryable()` on the `Report` or the `ProviderError` rather than a hand-kept list of statuses or `ErrorKind`s, mapped to `AppError::Unavailable(error.to_string())` (503): a provider 5xx, 408 or 425, or no reply at all.
+- The 429 arm placed before the retryable arm, because rig marks a 429 retryable too.
+- A final catch-all arm mapped to `AppError::Other` (500), which a `PromptError::Report` rig raised itself reaches.
 - The provider's message logged, never sent: the 500 and 503 bodies stay the existing constants.
 - A test asserting that a provider outage is answered 503.
 - A test asserting that the error body does not contain the provider's message.
@@ -55,6 +56,7 @@
 - A `From<PromptError> for AppError` impl.
 - A 502 for a provider failure: 502 is reserved for the service's own outbound `Http` calls.
 - A provider 401, 403 or 404 answered 503.
+- A catch-all arm that answers 503.
 - `error.to_string()` or the provider's message in a response body.
 - `Agent<M>` or a generic parameter threaded through `AppState`.
 - An agent constructed inside the handler.
@@ -126,6 +128,7 @@
 
 - The stream route merged inside the middleware stack, like every other route.
 - The stream bounded from inside, by wrapping it: `StreamExt::timeout` per item, or a deadline.
+- That bound as a duration of its own rather than the request timeout's, sized above the slowest tool's timeout, because no item arrives while a tool runs.
 - When that bound fires, a final `error` event, after which the stream ends without polling the run again.
 - `.max_turns(n)` on the streamed run: `prompt(..).max_turns(n).stream()`.
 - A mid-stream failure sent as a final `error` event, after which the stream ends.
@@ -133,8 +136,8 @@
 **Must not produce**:
 
 - A timeout whose `Elapsed` only becomes an event while the stream keeps waiting on the stalled run.
-- The stream route merged after `.layer(..)` to keep `TimeoutLayer` off it.
-- The claim that `TimeoutLayer` cuts a stream that has already started.
+- The stream route merged after `.layer(..)` to keep the request timeout off it.
+- The claim that the request timeout middleware cuts a stream that has already started.
 - The provider's error text in an SSE event.
 - `stream_prompt(..)`, the 0.42 spelling of the streamed run.
 

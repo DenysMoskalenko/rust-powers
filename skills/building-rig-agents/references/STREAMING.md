@@ -24,7 +24,7 @@ use rig::agent::MultiTurnStreamItem;
 use rig::prelude::*;
 use rig::providers::openai::{self, OpenAI};
 use rig::streaming::{Item, StreamEvent};
-const MODEL: &str = openai::GPT_5_5;
+const MODEL: &str = openai::GPT_6_SOL;
 
 
 #[tokio::main]

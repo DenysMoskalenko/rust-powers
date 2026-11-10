@@ -305,17 +305,29 @@ impl AgentHook for AnswerOnLastTurn {
 `RequestPatch` builders: `preamble`, `context`, `extra_context`, `history`,
 `active_tools`, `tool_choice`, `temperature`, `max_tokens`, `additional_params`.
 
-On Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 every thinking block is bound to the
-`system` prompt, the tool set and the messages before it. A patch to `preamble`,
-`active_tools` or `history` changes that prefix, so the next request that replays the block
-gets a 400 wherever the API enforces the check, which includes every account created from
-31 August 2026. On Anthropic's own API in adaptive thinking, the default, rig 0.45 asks for
-such a block to be dropped rather than the request rejected (`thinking.block_binding`, beta
-`thinking-binding-controls-2026-08-01`), so the request goes through without that reasoning.
-Haiku 5.5 is missing from rig's model catalog, so rig does not send `block_binding` for it and
-the 400 stands.
-`tool_choice`, `max_tokens` and `additional_params` sit outside the prefix. A forced
-`ToolChoice::Required` or `Specific` is a 400 on Fable 5.1, Opus 5.5 and Sonnet 5.5 regardless.
+On Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 the API binds every thinking block to
+the prefix that produced it: the `system` prompt, the tool set and every message before the
+block. A patch to `preamble`, `active_tools` or `history` changes that prefix, and a request
+that replays the block is then a 400 wherever the API enforces the check, which includes every
+account created from 31 August 2026. What rig 0.45 does about it depends on the route:
+
+- **Anthropic's own API, adaptive thinking (the default), a model the catalog marks as binding**
+  (Claude Opus 5, Opus 5.5, Sonnet 5.5, Fable 5.1): rig sends `thinking.block_binding` with
+  `drop_block` (beta `thinking-binding-controls-2026-08-01`) on every request, so the API drops a
+  block whose prefix changed instead of rejecting the request. The request goes through and
+  that turn's reasoning is lost.
+- **The same models in another thinking mode**: rig compares the tools and system prompt it
+  recorded with each turn, and replays a turn made under other ones as it would another
+  model's, without its provider items and with its reasoning as plain text. That covers a
+  `preamble` or `active_tools` patch. rig does not compare `history`: after a `history` patch
+  the blocks are replayed as stored, and the 400 stands.
+- **A Claude id the catalog does not list (Haiku 5.5), or another provider's
+  Messages-compatible endpoint**: rig does neither, and the 400 stands for all three fields.
+
+Patch those three fields only where losing a turn's reasoning is acceptable, and not at all on
+the last route. `tool_choice`, `max_tokens` and `additional_params` sit outside the prefix. A
+forced `ToolChoice::Required` or `Specific` is a 400 on Fable 5.1, Opus 5.5 and Sonnet 5.5
+regardless.
 
 Patches are per-turn and non-sticky. If you narrow `active_tools`, make sure any
 `tool_choice` still names a tool that is advertised — otherwise the model's only legal move

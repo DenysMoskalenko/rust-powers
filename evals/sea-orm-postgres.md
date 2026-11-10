@@ -12,6 +12,7 @@
 6. "Creating a post for a user id that does not exist blows up with a foreign key violation. How should the service handle it?"
 7. "Only one of our three replicas should rebuild the nightly report. Can Postgres do the locking instead of Redis?"
 8. Why don't our sea-orm tests just roll back a transaction per test? A fresh database for every test feels slow.
+9. "Adding a foreign key to our 200-million-row `post` table blocked every write for minutes during the deploy. How should the sea-orm migration have been written?"
 
 **Should not load**
 
@@ -45,6 +46,7 @@
 **Must produce**:
 - `sea-orm-cli migrate generate ...` as the way the migration file is created.
 - A hand-written migration in the house style: `DeriveMigrationName`, `DeriveIden`, `Table::alter()` with a `string_null` column.
+- `SET LOCAL lock_timeout` run in that migration before the `ALTER TABLE`.
 - `sea-orm-cli migrate up` (or `make migrate`) given as the step that applies it.
 - `sea-orm-cli generate entity --entity-format dense …` (or `make entity`) given as how the entity changes.
 - `UserResponse` gains `display_name: Option<String>`.
@@ -112,6 +114,7 @@
 - `create_user` building an `ActiveModel` struct literal with `id: NotSet` and calling `.insert(db)`.
 - `rename_user` converting the fetched `Model` into an `ActiveModel`, assigning only `name`, and calling `.update(db)`.
 - Both signatures generic over `&C where C: ConnectionTrait`.
+- `create_user` receiving the creation time from its caller as a parameter, not calling `Utc::now()` itself.
 
 **Must not produce**:
 - `.save(db)` on a new row.
@@ -159,6 +162,40 @@
 **Must not produce**:
 - `gen_random_uuid()`, `uuidv4()` or `Uuid::new_v4()`.
 - `id: Set(Uuid::now_v7())` when nothing needs the id before the INSERT.
+
+### Eval 9 - a foreign key on a live table
+
+**Prompt**: "The `post` table has 200 million rows and takes writes all day. Write the migration that adds a nullable `reviewer_id` column to it, referencing `user(id)`, with an index on the column."
+
+**Must produce**:
+- `SET LOCAL lock_timeout` run inside a transaction, before the `ALTER TABLE` statements.
+- The foreign key added with `NOT VALID`, through raw SQL.
+- `VALIDATE CONSTRAINT` run as a separate statement, outside the transaction that added the constraint.
+- The index built with `CONCURRENTLY`, through `Index::create().concurrently()` or raw `CREATE INDEX CONCURRENTLY`.
+- `use_transaction` returning `Some(false)` on the migration.
+- An INVALID index left by an interrupted build handled: dropped before the build, or its recovery (`DROP INDEX CONCURRENTLY` or `REINDEX INDEX CONCURRENTLY`) named.
+
+**Must not produce**:
+- `manager.create_foreign_key(..)` on the existing table as the way the constraint is added.
+- A plain `create_index` or `CREATE INDEX` without `CONCURRENTLY` on `post`.
+- `CREATE INDEX CONCURRENTLY` run inside the migration's default transaction.
+
+### Eval 10 - migrations at startup
+
+**Prompt**: "Our service runs `Migrator::up(&db, None)` in `main` on the application pool, which has a ten second `statement_timeout`. With three replicas a deploy sometimes fails with `relation already exists`, and last week an index build was cancelled half-way. Fix how migrations run at startup."
+
+**Fixture**: empty
+
+**Must produce**:
+- Migrations run on connections of their own that carry no `statement_timeout`, not on the application pool.
+- `pg_advisory_xact_lock` taken in a transaction that stays open while `Migrator::up` runs, and released by its commit.
+- The lock key a fixed `i64`.
+- A statement of what the lock does not cover: during a rolling deploy the previous release still runs against the new schema, so a breaking change is sequenced as expand, migrate, contract or run from a job.
+
+**Must not produce**:
+- The application pool's `statement_timeout` raised or removed as the fix.
+- A session-level `pg_advisory_lock` taken through the pool.
+- `sea-orm-cli migrate up` in an init container offered as the fix for the race.
 
 ### Probe 1 - save on a new row
 

@@ -121,13 +121,15 @@
 - The Redis key scoped to the caller, such as `app:v1:idem:{subject}:{Idempotency-Key}`.
 - The reason stated: with the raw header as the key, two clients sending the same value get each other's stored response.
 - The claim and the check in one command: `SET key marker NX EX ttl`.
-- The claim's TTL no shorter than the request timeout.
-- The stored entry holding a fingerprint of method, path and body plus the response, never the body itself.
+- The claim's TTL above the request timeout (`REQUEST_TIMEOUT`, 30 s) by a margin.
+- The stored entry holding a fingerprint of the request plus the response, never the body itself.
 - The stored response written with its own `EX` for the replay window (24 h).
 - Same key and same fingerprint replaying the stored status and body.
 - Same key with a different fingerprint answered 422.
 - Same key while the first attempt is still running answered 409.
-- Storage errors mapped through `required(e, ..)` onto `AppError::Unavailable` (503) rather than `?`.
+- A failed claim mapped through `required(e, ..)` onto `AppError::Unavailable` (503) rather than `?`.
+- A failed charge releasing the claim, so the retry runs instead of being answered 409 until the claim's TTL.
+- The success still returned when storing the response fails after the charge went through.
 - The payment provider called with the same idempotency key, since Redis alone cannot make the charge atomic with its record.
 
 **Must not produce**:
@@ -136,6 +138,7 @@
 - The request body stored in Redis.
 - A new `AppError` variant for idempotency.
 - The initial `SET NX` claim given the 24 h replay TTL instead of one near the request timeout.
+- A 503 returned because the response could not be stored after the charge succeeded.
 
 ### Probe 1 - sharing the connection
 
@@ -180,3 +183,11 @@
 **Wrong answer**: `^(?![\s\S]*pg_try_advisory_xact_lock)[\s\S]*ExistenceCheck::NX`
 
 **Right answer**: `pg_try_advisory_xact_lock`
+
+### Probe 7 - a failover reply as a 500
+
+**Prompt**: "Write `required(e: redis::RedisError, dependency: &str) -> AppError` for the Redis commands a request cannot survive without: 503 when Redis is unavailable, 500 when the command itself is a bug."
+
+**Wrong answer**: `^(?![\s\S]*(?:retry_method|ReadOnly|BusyLoading|MasterDown|READONLY|LOADING))[\s\S]*(?:is_connection_dropped|is_io_error|is_timeout)\(\)`
+
+**Right answer**: `retry_method\(\)|ServerErrorKind::(?:ReadOnly|BusyLoading|MasterDown|TryAgain|ClusterDown)`

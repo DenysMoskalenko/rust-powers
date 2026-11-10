@@ -104,8 +104,8 @@ call plus an answer.
 |---|---|
 | `text(s)` | A text response |
 | `tool_call(id, name, args)` | A tool-call response |
-| `error(msg)` | A provider-error response |
-| `provider_response_error(status, body, request_id)` | A provider error carrying a transport request id |
+| `error(msg)` | A `ProviderError::Provider`, which rig never marks retryable |
+| `provider_response_error(status, body, request_id)` | A provider reply with that status and a transport request id; script an outage as a 503 and a rate limit as a 429 |
 | `request_error(msg)` | A request-error response |
 | `from_content(..)` / `from_contents(..)` | Arbitrary assistant content, including an empty turn |
 | `.with_call_id(..)` / `.with_usage(..)` / `.with_finish_reason(..)` | Modifiers on a built turn; `.with_finish_reason(FinishReason::Length)` scripts a truncated one |
