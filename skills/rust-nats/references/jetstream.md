@@ -39,8 +39,8 @@ bounded by its own `expires`.
 
 ## Declaring a stream
 
-Streams are declared at startup, from the service that owns the subjects, and never from a
-consumer. Three calls, three behaviours:
+The service that owns the subjects declares its streams. A separate consuming service opens
+the existing stream. Three calls, three behaviours:
 
 - `get_or_create_stream(config)` creates the stream or returns the existing one **without
   touching its config**: a retention or subject change in source keeps running with yesterday's
@@ -52,8 +52,8 @@ consumer. Three calls, three behaviours:
   running consumer; it returns `Info`, so follow it with `get_stream(name)` for the handle.
 
 Startup must survive the first call timing out: with `retry_on_initial_connect()` the client may
-still be connecting, and the request fails with `TimedOut` after `request_timeout`. Retry with
-backoff (the startup code in the service-integration reference does).
+still be connecting, and the request fails with `TimedOut` after `request_timeout`. For optional messaging, retry in a background task with capped
+backoff until shutdown. HTTP starts as soon as the pending client is available.
 
 Two subjects lists that overlap across two streams make a publish ambiguous and the server rejects
 the second stream, so subject ownership is exclusive per stream.

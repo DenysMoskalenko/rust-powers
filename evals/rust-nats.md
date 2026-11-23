@@ -26,7 +26,7 @@
 
 ### Eval 1 - durable publish from a handler
 
-**Prompt**: "Add JetStream publishing to POST /orders: an `OrderPlaced` event with the order id, deduplicated so a retried publish does not create two events. Map NATS failures onto AppError."
+**Prompt**: "Add JetStream publishing to POST /orders: an `OrderPlaced` event with the order id, deduplicated so a retried publish does not create two events. Map NATS failures onto AppError. Reads must still work if the broker boots after HTTP."
 
 **Must produce**:
 - No crate beyond `async-nats`, which the project already declares, added for NATS.
@@ -34,8 +34,9 @@
 - `jetstream::new(client)` without `.await`.
 - `send_publish(subject, PublishMessage::build().payload(..).message_id(event_id))` with **two** awaits.
 - The `Nats-Msg-Id` fixed per event (minted with the event or derived from the order id), not per publish attempt.
-- A stream declared at startup with a `duplicate_window`.
-- The stream declaration retried with backoff when it returns `TimedOut` (the client may still be connecting under `retry_on_initial_connect`).
+- HTTP starting with the pending client via `retry_on_initial_connect()`, before the broker or stream is ready.
+- A background task declaring the stream with a `duplicate_window` and retrying transient failures with capped backoff until success or shutdown.
+- An optional messaging entry reporting degraded while the broker is unavailable, with overall readiness 200 when PostgreSQL is healthy.
 - A `MessagingError` (or equivalent) with a `#[from]` arm for JetStream `PublishError`.
 - The JetStream `PublishError` classified by `err.kind()`.
 - A `fn messaging_error(MessagingError) -> AppError` applied at the call site with `.map_err(messaging_error)?`.
@@ -196,9 +197,11 @@
 
 ### Probe 3 - TimedOut as a gateway error
 
-**Prompt**: "In the axum handler, turn the errors from our NATS request to the pricing service into HTTP statuses: no responders, timed out, and anything else."
+**Prompt**: "Fill in our axum handler test's expected HTTP status codes for NATS RequestErrorKind::NoResponders, TimedOut and Other. Return the Rust tuple of three numeric codes in that order."
 
-**Wrong answer**: `TimedOut\b[^\n]{0,60}=>[^\n]{0,60}(?:GATEWAY_TIMEOUT|BAD_GATEWAY)`
+**Wrong answer**: `\(\s*50[24]\s*,|\(\s*\d{3}\s*,\s*50[24]\s*,`
+
+**Right answer**: `\(\s*503\s*,\s*503\s*,\s*500\s*,?\s*\)`
 
 ### Probe 4 - recreating a consumer to change it
 

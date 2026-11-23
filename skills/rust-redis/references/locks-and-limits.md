@@ -608,29 +608,30 @@ and retries at once. A claim that ended in that same instant would hand the retr
 while the provider is still finishing the first call; with the margin the retry is answered 409
 and comes back later.
 
-What this buys and what it does not. Redis dedups concurrent retries and replays the stored
-response; it does not make the effect atomic with the record of it. A crash - or a handler slower
-than the claim's TTL - between the effect and `store` lets the claim expire, and the next retry
-gets `Claim::Fresh` and runs the effect a second time. So the effect itself has to tolerate that:
-an outbound call that forwards the same key and is deduplicated by the provider, or an operation
-that is safe to repeat. When the effect is a database write, do not use this at all - write the
-idempotency row in the same transaction as the write, which is `sea-orm-postgres`'s. And `store`
-is an unconditional `SETEX`: a stalled first attempt can overwrite a later attempt's entry,
-harmless while both carry the same provider result, and one more reason `IN_FLIGHT_TTL` stays
-above the request timeout.
+A crash or expiry between the charge and its Redis record can run the effect again. Send the
+provider the same key on every retry of that logical payment, including after Redis loses the
+claim. Derive it from the verified caller, a fixed operation name and the client key. A raw
+header can collide across customers sharing a merchant account. The body belongs in the
+fingerprint: changing it must never generate a second provider key. For a database write,
+store the idempotency row in the same transaction as the effect (`sea-orm-postgres`).
 
-Two failures have their own rule, and `complete` below applies both. An effect that fails gives
-the claim back (`release`): nothing is in flight any more, and without the release every retry is
-answered 409 until the TTL although no attempt is running. A `store` that fails after the effect
-succeeded is logged and counted, and the request still answers with the success: a 503 there
-reports a completed charge as a failure. The claim then expires by itself and a later retry
-re-runs the effect, which the provider deduplicates.
+Each successful claim carries a fresh owner token. Compare its whole marker atomically on
+release after a failed effect and on store after a successful one. If another attempt now owns
+the key, leave its result or claim intact. Return the successful payment even when storing the
+response fails. Record that failure and rely on provider deduplication during its retention
+window.
+
+For a service already in production, keep each payment's original provider ID on retries. When
+switching from raw headers, recover that ID from a durable payment record, or drain and
+reconcile outstanding operations before enabling the new scheme. A Redis miss alone cannot
+tell whether the old provider call succeeded. Drain writers that still store unconditionally
+before allowing a new writer to take over an expired claim.
 
 ```toml
 sha2 = "0.11"   # add when needed; already in the lock file through sqlx-postgres, so nothing new compiles
 ```
 
-```rust,verify
+```rust,verify,test
 //! src/idempotency.rs - storage for the `Idempotency-Key` contract.
 
 use std::{fmt::Write as _, sync::LazyLock, time::Duration};
@@ -643,6 +644,7 @@ use axum::{
 use redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions, aio::ConnectionManager};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 use validator::{ValidationError, ValidationErrors};
 
 use crate::config::REQUEST_TIMEOUT;
@@ -670,12 +672,14 @@ struct Entry {
     fingerprint: String,
     /// `None` while the first attempt is still running.
     response: Option<StoredResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<Uuid>,
 }
 
 #[derive(Debug)]
 pub enum Claim {
-    /// This request owns the key: do the work, then call `store`.
-    Fresh,
+    /// The exact Redis marker this attempt must still own to store or release.
+    Fresh(String),
     /// Same key, same fingerprint, finished: replay it.
     Replay(StoredResponse),
     /// Same key, first attempt still running: 409, the client retries later.
@@ -694,6 +698,22 @@ pub fn fingerprint(method: &str, target: &str, body: &[u8]) -> String {
     for part in [method.as_bytes(), b"\n", target.as_bytes(), b"\n", body] {
         hasher.update(part);
     }
+    hex_digest(hasher)
+}
+
+/// Stable across retries and replicas sharing the provider account. The operation is a fixed
+/// service/operation name and never includes the payload, request id or claim owner.
+#[must_use]
+pub fn provider_key(caller: Uuid, operation: &str, client_key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(caller.as_bytes());
+    hasher.update((operation.len() as u64).to_be_bytes());
+    hasher.update(operation.as_bytes());
+    hasher.update(client_key.as_bytes());
+    hex_digest(hasher)
+}
+
+fn hex_digest(hasher: Sha256) -> String {
     let mut hex = String::with_capacity(64);
     for byte in hasher.finalize() {
         let _ = write!(hex, "{byte:02x}"); // writing to a String cannot fail
@@ -712,12 +732,17 @@ pub async fn claim(
     let options = SetOptions::default()
         .conditional_set(ExistenceCheck::NX)
         .with_expiration(SetExpiry::EX(IN_FLIGHT_TTL.as_secs()));
+    let marker = encode(&Entry {
+        fingerprint: fingerprint.to_owned(),
+        response: None,
+        owner: Some(Uuid::now_v7()),
+    })?;
     if conn
-        .set_options::<_, _, Option<String>>(key, marker(fingerprint)?, options)
+        .set_options::<_, _, Option<String>>(key, &marker, options)
         .await?
         .is_some()
     {
-        return Ok(Claim::Fresh);
+        return Ok(Claim::Fresh(marker));
     }
     let Some(raw) = conn.get::<_, Option<String>>(key).await? else {
         // Expired between the two commands; the client's retry will claim it.
@@ -733,26 +758,40 @@ pub async fn claim(
     })
 }
 
-/// Replace the marker with the response and start the replay window. An
-/// explicit `EX`, not `KEEPTTL`: the marker's TTL was the short in-flight one.
-#[tracing::instrument(skip_all, fields(db.system = "redis", db.operation = "SETEX"))]
-pub async fn store(
+static STORE: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r"if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+          redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+          return 1",
+    )
+});
+
+#[tracing::instrument(skip_all, fields(db.system = "redis", db.operation = "EVALSHA"))]
+async fn store(
     conn: &ConnectionManager,
     key: &str,
+    marker: &str,
     fingerprint: &str,
     response: StoredResponse,
-) -> Result<(), redis::RedisError> {
+) -> Result<bool, redis::RedisError> {
     let entry = encode(&Entry {
         fingerprint: fingerprint.to_owned(),
         response: Some(response),
+        owner: None,
     })?;
-    conn.clone()
-        .set_ex::<_, _, ()>(key, entry, RESULT_TTL.as_secs())
-        .await
+    let stored: bool = STORE
+        .key(key)
+        .arg(marker)
+        .arg(entry)
+        .arg(RESULT_TTL.as_secs())
+        .invoke_async(&mut conn.clone())
+        .await?;
+    if !stored {
+        tracing::warn!("idempotency claim expired before the result could be stored");
+    }
+    Ok(stored)
 }
 
-/// Deletes the key only while it still holds this request's in-flight marker:
-/// a stored response, or another request's claim, is left alone.
 static RELEASE: LazyLock<redis::Script> = LazyLock::new(|| {
     redis::Script::new(
         r"if redis.call('GET', KEYS[1]) == ARGV[1] then
@@ -762,15 +801,9 @@ static RELEASE: LazyLock<redis::Script> = LazyLock::new(|| {
     )
 });
 
-/// Give the claim back after a failed effect. Best effort: when Redis cannot
-/// be reached the claim expires by itself after `IN_FLIGHT_TTL`.
 #[tracing::instrument(skip_all, fields(db.system = "redis", db.operation = "EVALSHA"))]
-pub async fn release(conn: &ConnectionManager, key: &str, fingerprint: &str) {
-    let Ok(marker) = marker(fingerprint) else {
-        return;
-    };
-    let mut conn = conn.clone();
-    let released: Result<i64, _> = RELEASE.key(key).arg(marker).invoke_async(&mut conn).await;
+async fn release(conn: &ConnectionManager, key: &str, marker: &str) {
+    let released: Result<bool, _> = RELEASE.key(key).arg(marker).invoke_async(&mut conn.clone()).await;
     if let Err(e) = released {
         tracing::warn!(error = %e, "idempotency claim not released; it expires by itself");
     }
@@ -785,8 +818,8 @@ pub async fn complete(
     claim: Claim,
     effect: impl AsyncFnOnce() -> Result<StoredResponse, AppError>,
 ) -> Result<Response, AppError> {
-    match claim {
-        Claim::Fresh => {}
+    let marker = match claim {
+        Claim::Fresh(marker) => marker,
         Claim::Replay(stored) => return Ok(reply(stored)),
         Claim::InFlight => return Err(AppError::Conflict("request still in flight".to_owned())),
         Claim::Mismatch => {
@@ -794,39 +827,26 @@ pub async fn complete(
             errors.add("idempotency-key", ValidationError::new("reused for a different request"));
             return Err(errors.into()); // 422
         }
-    }
+    };
     let stored = match effect().await {
         Ok(stored) => stored,
         Err(err) => {
-            release(conn, key, fingerprint).await;
+            release(conn, key, &marker).await;
             return Err(err);
         }
     };
     // The effect happened: a failed `store` is not allowed to report it as a
     // failure. The claim expires and a retry re-runs the effect.
-    if let Err(e) = store(conn, key, fingerprint, stored.clone()).await {
-        not_stored(&e);
+    if let Err(e) = store(conn, key, &marker, fingerprint, stored.clone()).await {
+        metrics::counter!("idempotency_store_errors_total").increment(1);
+        tracing::error!(error = %e, "idempotency result not stored");
     }
     Ok(reply(stored))
-}
-
-fn not_stored(e: &redis::RedisError) {
-    metrics::counter!("idempotency_store_errors_total").increment(1);
-    tracing::error!(error = %e, "idempotency result not stored");
 }
 
 fn reply(stored: StoredResponse) -> Response {
     let status = StatusCode::from_u16(stored.status).unwrap_or(StatusCode::OK);
     (status, Json(stored.body)).into_response()
-}
-
-/// What `claim` writes and `release` compares: the same fingerprint always
-/// encodes to the same string.
-fn marker(fingerprint: &str) -> Result<String, redis::RedisError> {
-    encode(&Entry {
-        fingerprint: fingerprint.to_owned(),
-        response: None,
-    })
 }
 
 fn encode(entry: &Entry) -> Result<String, redis::RedisError> {
@@ -836,29 +856,94 @@ fn encode(entry: &Entry) -> Result<String, redis::RedisError> {
 fn parse_error(e: &serde_json::Error) -> redis::RedisError {
     redis::RedisError::from((redis::ErrorKind::Parse, "idempotency entry", e.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use redis::AsyncCommands;
+    use testcontainers::{ImageExt, runners::AsyncRunner};
+    use testcontainers_modules::redis::{REDIS_PORT, Redis};
+    use uuid::Uuid;
+
+    use super::{Claim, StoredResponse, claim, provider_key, release, store};
+
+    #[test]
+    fn provider_retries_keep_the_same_payment_identity() {
+        let alice = Uuid::from_u128(1);
+        let bob = Uuid::from_u128(2);
+        assert_eq!(provider_key(alice, "charge", "1"), "44025d5d6683ebfeff01769f429c1aa9f21fcd194aa475d05033797a51e375a2");
+        let mut provider = HashSet::new();
+        assert!(provider.insert(provider_key(alice, "charge", "1")));
+        assert!(!provider.insert(provider_key(alice, "charge", "1")));
+        assert!(provider.insert(provider_key(bob, "charge", "1")));
+        assert!(provider.insert(provider_key(alice, "refund", "1")));
+        assert!(provider.insert(provider_key(alice, "charg", "e1")));
+    }
+
+    #[tokio::test]
+    async fn only_the_current_claim_can_change_the_entry() -> anyhow::Result<()> {
+        let container;
+        let url = if let Ok(url) = std::env::var("TEST_REDIS_URL") {
+            url
+        } else {
+            container = Redis::default().with_tag("8-alpine").start().await?;
+            let host = container.get_host().await?;
+            let port = container.get_host_port_ipv4(REDIS_PORT).await?;
+            format!("redis://{host}:{port}")
+        };
+        let mut conn = redis::Client::open(url)?.get_connection_manager().await?;
+        let key = format!("test:{}:idem", Uuid::now_v7());
+        let result = StoredResponse { status: 201, body: serde_json::json!({"paid": true}) };
+        for next in ["original", "changed"] {
+            let Claim::Fresh(old) = claim(&conn, &key, "original").await? else {
+                anyhow::bail!("expected an unclaimed key");
+            };
+            assert!(conn.expire::<_, bool>(&key, 0).await?);
+            let Claim::Fresh(current) = claim(&conn, &key, next).await? else {
+                anyhow::bail!("expected a replacement claim");
+            };
+            release(&conn, &key, &old).await;
+            assert!(matches!(claim(&conn, &key, next).await?, Claim::InFlight));
+            assert!(!store(&conn, &key, &old, "original", result.clone()).await?);
+            assert!(store(&conn, &key, &current, next, result.clone()).await?);
+            assert!(matches!(claim(&conn, &key, next).await?, Claim::Replay(_)));
+            assert!(conn.expire::<_, bool>(&key, 0).await?);
+        }
+        conn.set_ex::<_, _, ()>(&key, r#"{"fingerprint":"old","response":null}"#, 45).await?;
+        assert!(matches!(claim(&conn, &key, "old").await?, Claim::InFlight));
+        let legacy = r#"{"fingerprint":"old","response":{"status":201,"body":"receipt"}}"#;
+        conn.set_ex::<_, _, ()>(&key, legacy, 60).await?;
+        assert!(matches!(claim(&conn, &key, "old").await?,
+            Claim::Replay(stored) if stored.status == 201 && stored.body == "receipt"));
+        Ok(())
+    }
+}
 ```
 
-The handler side, with the key scoped to the caller so one client's `Idempotency-Key: 1` cannot
-collide with another's. The claim's error is mapped through `required` (`cache::required`, or
-`redis_errors::required` in a service without a cache module), because a request that promised
-idempotency cannot start without it; `complete` owns every outcome after that:
+In the service test suite, reuse its Redis fixture for the ownership test above.
+
+The payment handler below uses the account's authenticated internal `caller_id: Uuid`.
+Its fixed-width display makes the existing Redis prefix and header unambiguous. For arbitrary
+string identities use length framing, and preserve the lookup for existing replay records
+through their TTL. Older entries carry no owner: completed ones still replay and older
+in-flight markers continue to block until they finish or expire. The provider key is a
+64-character hex digest. Use a representation accepted by your provider.
 
 ```rust
 let header = headers
     .get("idempotency-key")
     .and_then(|v| v.to_str().ok())
     .ok_or_else(|| AppError::BadRequest("Idempotency-Key header is required".to_owned()))?;
-let key = format!("app:v1:idem:{}:{header}", user.0.sub);
+let key = format!("app:v1:idem:{caller_id}:{header}");
+let provider_key = idempotency::provider_key(caller_id, "orders-api/payments.charge", header);
 let target = uri.path_and_query().map_or(uri.path(), |target| target.as_str());
 let fingerprint = idempotency::fingerprint(method.as_str(), target, &body);
 let claim = idempotency::claim(&state.redis, &key, &fingerprint)
     .await
     .map_err(|e| cache::required(e, "idempotency store"))?;
 idempotency::complete(&state.redis, &key, &fingerprint, claim, async || {
-    // The effect forwards the same `header` to the provider as *its* idempotency
-    // key, so the provider collapses a re-run after a lost claim into one charge.
-    // Redis only keeps concurrent retries out and replays the answer.
-    let created = state.payments.charge(&input, header).await?;
+    let created = state.payments.charge(&input, &provider_key).await?;
     let body = serde_json::to_value(&created).map_err(anyhow::Error::from)?;
     Ok(StoredResponse { status: 201, body })
 })

@@ -603,10 +603,9 @@ alone, or two clients that send the same value get each other's stored response.
 a short in-flight TTL, a 24 h result TTL — is `rust-redis`'s; this file owns only the contract.
 
 That storage dedups retries and replays the answer; it does not make the effect atomic with the
-record of it, so the contract fits an effect that survives being repeated — an outbound call
-forwarding the same key, deduplicated by the provider. An effect that is a database write writes
-its idempotency row in the same transaction as the write instead (`sea-orm-postgres`), and needs
-none of this.
+record of it. For an outbound effect, the provider must deduplicate retries with a stable key
+scoped to the caller and operation. For a database write, put the idempotency row in the same
+transaction as the write (`sea-orm-postgres`).
 
 ## Outbound HTTP
 

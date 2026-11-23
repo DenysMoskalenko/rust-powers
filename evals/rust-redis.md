@@ -118,22 +118,25 @@
 **Prompt**: "Clients retry `POST /payments` after timeouts and we charge them twice. Add `Idempotency-Key` support and keep the replay data in Redis."
 
 **Must produce**:
-- The Redis key scoped to the caller, such as `app:v1:idem:{subject}:{Idempotency-Key}`.
+- The Redis key scoped to the caller, with an unambiguous encoding of the verified identity and client key.
 - The reason stated: with the raw header as the key, two clients sending the same value get each other's stored response.
 - The claim and the check in one command: `SET key marker NX EX ttl`.
 - The claim's TTL above the request timeout (`REQUEST_TIMEOUT`, 30 s) by a margin.
 - The stored entry holding a fingerprint of the request plus the response, never the body itself.
-- The stored response written with its own `EX` for the replay window (24 h).
+- A fresh owner token in every acquired claim, including retries with an identical fingerprint.
+- Atomic comparison of that attempt’s marker before storing the response with its own 24 h expiry.
 - Same key and same fingerprint replaying the stored status and body.
 - Same key with a different fingerprint answered 422.
 - Same key while the first attempt is still running answered 409.
 - A failed claim mapped through `required(e, ..)` onto `AppError::Unavailable` (503) rather than `?`.
-- A failed charge releasing the claim, so the retry runs instead of being answered 409 until the claim's TTL.
+- A failed charge releasing only its own still-current marker, with an atomic compare-and-delete.
 - The success still returned when storing the response fails after the charge went through.
-- The payment provider called with the same idempotency key, since Redis alone cannot make the charge atomic with its record.
+- A stable provider-compatible ID derived unambiguously from caller, operation and client key; a retry after losing the Redis claim uses that same ID.
 
 **Must not produce**:
-- The raw `Idempotency-Key` header value used as the whole Redis key.
+- The raw `Idempotency-Key` header used as the whole Redis key or forwarded unchanged to a shared payment provider.
+- Using the per-attempt claim token or the body fingerprint as the provider ID.
+- An unconditional write or delete that can replace or release a successor’s claim.
 - A `GET` followed by a `SET` as the claim.
 - The request body stored in Redis.
 - A new `AppError` variant for idempotency.

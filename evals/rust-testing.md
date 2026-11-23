@@ -128,6 +128,19 @@
 - An assertion on the process RSS.
 - `TestServer` alone as the transport, which opens no connection.
 
+### Eval 7 - a binary-only process test
+
+**Prompt**: "Our existing Cargo package `orders-worker` has only `src/main.rs`. Write an integration test for its public `--version` command, which prints `orders-worker 1.0.0`. Keep the package layout."
+
+**Fixture**: empty
+
+**Must produce**:
+- An integration test launches the built `orders-worker` executable through Cargo's `CARGO_BIN_EXE_orders-worker` variable or an equivalent Cargo-aware executable lookup.
+- It passes `--version` and checks both the exit status and expected standard output.
+
+**Must not produce**:
+- A new library target or changes to production code to expose the command for this test.
+
 ### Probe 1 - building a TestServer
 
 **Prompt**: "Write a standalone test for GET /health/live that creates its own `TestServer` from the router instead of calling `test_app()`."

@@ -60,17 +60,18 @@ claude plugin marketplace add https://github.com/DenysMoskalenko/rust-powers
 claude plugin install rust-powers@rust-powers
 ```
 
-**Local development:** install from a clean clone. A local install copies the directory
-whole, so a working copy with build output in it copies gigabytes.
+**Local development.** From the repository root, register the checkout as a marketplace.
+Claude Code loads this marketplace’s relative plugin source in place. Use `/reload-plugins`
+or start a new session to pick up edits.
 
 ```bash
-git clone https://github.com/DenysMoskalenko/rust-powers
-claude plugin marketplace add ./rust-powers
+claude plugin marketplace add ./
 claude plugin install rust-powers@rust-powers
 ```
 
-Installed plugins update when the plugin `version` changes, which every change to `skills/`
-bumps.
+For GitHub installs, run `claude plugin update rust-powers@rust-powers` to get a new release,
+then reload the plugin or start a new session. To receive updates automatically, enable
+auto-update for this marketplace in `/plugin`. Third-party marketplaces default to manual updates.
 
 After installation, the skills listed above are available to Claude Code via the `Skill`
 tool.
@@ -132,16 +133,16 @@ npx skills add DenysMoskalenko/rust-powers
 Skill content is verified, not just proofread.
 
 ```bash
-make check      # validate + snippets, what CI runs
+make check      # validate, test the eval tools, compile and test the snippets
 make validate   # frontmatter, budgets, ownership hygiene, evals, STACK.md parity
 make snippets   # compile and lint every ```rust,verify block, run every verified test
 make lint       # prek run --all-files
 make evals      # billed: run evals/ with and without the plugin via claude plugin eval
 ```
 
-[`.github/workflows/check.yml`](.github/workflows/check.yml) runs the same two scripts —
-`validate_skills.py --strict` and `check_snippets.py` — plus `prek run --all-files`, on every
-push to `main` and every pull request.
+[`.github/workflows/check.yml`](.github/workflows/check.yml) runs strict validation, the offline
+eval-tool tests, the snippet checks, and `prek run --all-files` on every push to `main` and
+every pull request.
 
 `make snippets` regenerates the gitignored `verify/` workspace from
 `skills/rust-scaffolding/assets/app/`, extracts every verifiable snippet into it, and runs

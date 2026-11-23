@@ -16,6 +16,7 @@ Re-validated on rustc 1.99.1 / clippy 0.1.99, 26 October 2026: `cargo update` (5
 | complexity limits | clippy `cognitive_complexity`, `too_many_lines`, `too_many_arguments` | no extra tool |
 | test runner | cargo-nextest + rstest | nextest skips doctests; run `cargo test --doc` separately |
 | coverage | cargo-llvm-cov | |
+| async runtime | Tokio | Cargo requirement `1.53`, tested scaffold lockfile `1.54.1` |
 | HTTP framework | axum 0.8 + tower-http 0.7 | |
 | request and response schemas | serde + validator + utoipa | |
 | body validation | validator 0.21 + own `Valid<T>` extractor | 15 lines, see below |

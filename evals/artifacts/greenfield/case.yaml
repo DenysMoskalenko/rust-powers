@@ -1,0 +1,14 @@
+schema_version: "1.1"
+name: rust-scaffolding.artifact
+tags: [artifact]
+execution:
+  allowed_tools: [Skill, Read, Glob, Grep, Write, Edit, Bash]
+  max_turns: 35
+  timeout_seconds: 900
+  prompt: "Scaffold a new Rust web service named library-svc in this empty directory. Leave the starter routes and their tests in place. Write the actual project here so we can build and test it. Skip deployment, tool installation, and commits."
+graders:
+  - name: renamed-manifest
+    type: regex
+    target: { source: file, path: Cargo.toml }
+    pattern: '^name\s*=\s*"library-svc"'
+    flags: m

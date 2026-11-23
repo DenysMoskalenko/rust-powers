@@ -2,7 +2,7 @@
 name: rust-redis
 description: "Use when caching or coordinating through Redis in an axum service with redis-rs — ConnectionManager setup, cache-aside and TTLs, serde values, invalidation, SCAN over KEYS, pipelines, Lua scripts, distributed locks and leases, rate limiting as an axum layer, idempotency keys, testcontainers Redis. Also for Connection refused, NOSCRIPT, WRONGTYPE, the trait bound FromRedisValue is not satisfied, multiple applicable items in scope. Not for pub/sub, queues or events (rust-nats), nor transactional exclusion with advisory locks (sea-orm-postgres)."
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
 ---
 
 # Redis with redis-rs
@@ -207,16 +207,13 @@ bucket is ever the key. It returns `AppError::TooManyRequests { retry_after_secs
 on a Redis error, with a counter; it fails closed only where the limit guards what cannot absorb the
 traffic. Its slot in the stack and `into_make_service_with_connect_info` are `axum-service`'s.
 
-Idempotency implements `axum-service`'s contract, keyed per caller
-(`app:v1:idem:{subject}:{Idempotency-Key}`): with the raw header as the key, two clients sending
-the same value get each other's stored response. The claim is `SET key marker NX EX ttl`, the
-TTL above `REQUEST_TIMEOUT` by a margin (45 s over the scaffold's 30), or a slow first attempt is
-re-run while it runs; a failed effect releases the claim; `store` writes fingerprint + response
-(never the body) with its own 24 h `EX`, and its failure after the effect still returns the
-success. Redis dedups retries and replays the answer; it does not make the effect atomic with the
-record, so the effect must be an outbound call carrying the same key, never a bare database
-write. For a create, the unique index is the idempotency key. A revoked token is one key per
-`jti`, TTL its lifetime.
+Scope Redis idempotency records to the verified caller and client key. Claim with
+`SET key marker NX EX ttl`: a fresh owner token per attempt, a TTL above `REQUEST_TIMEOUT`
+by a margin (45 s over 30). Only that marker can release on failure or store the fingerprint
+and response for 24 h. Return an already successful effect even if storing fails. Give the
+provider a stable key derived from caller, operation and client key so a retry after claim
+expiry reaches the same payment. For a database write, keep the idempotency row in the same
+transaction (`sea-orm-postgres`). A revoked token is one key per `jti`, TTL its lifetime.
 
 ## Observability and testing
 
