@@ -136,9 +136,9 @@ moved into `evals/` during integration; only `evals/` is tracked.
 
 ## Verification
 
-`make check` is `make validate` followed by `make snippets`. Both must be green.
+`make check` runs `make validate`, the offline eval-tool tests, and `make snippets`. All must pass.
 
-`.github/workflows/check.yml` runs both of those scripts, plus `prek run --all-files`, on every
+`.github/workflows/check.yml` runs the same checks, plus `prek run --all-files`, on every
 push to `main` and every pull request.
 
 `make validate` runs `scripts/validate_skills.py`: frontmatter parses and uses only the
@@ -172,8 +172,7 @@ create databases. Without one of those, use `--skip-tests` and say so in your re
 
 `verify/` is generated and gitignored. Never edit it; edit the markdown and re-run. The
 Makefile builds into `$CARGO_TARGET_DIR`, by default `rust-powers-target` in the system temp
-directory, because the plugin root is the repository root and a local install copies it whole;
-never leave a `target/` inside the repository.
+directory, so generated build artifacts stay outside the plugin tree.
 
 `make lint` runs `prek run --all-files` for whitespace, JSON, TOML, and YAML hygiene.
 
@@ -195,7 +194,8 @@ never leave a `target/` inside the repository.
 6. **Version.** Any change under `skills/<name>/` bumps that skill's `metadata.version` and the
    `version` in every plugin manifest (`.claude-plugin/plugin.json`, both version fields of
    `.claude-plugin/marketplace.json`, `.codex-plugin/plugin.json`,
-   `.cursor-plugin/plugin.json`). Installed plugins auto-update only when that version changes.
+   `.cursor-plugin/plugin.json`). Claude Code users who install from GitHub receive the new version
+   through a manual update or by enabling auto-update for this marketplace.
 7. **Review.** Re-read the changed section end to end. Verify every relative path you touched
    exists. Update the rest of the plugin manifests only when the change alters what the
    plugin advertises.

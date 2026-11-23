@@ -2,7 +2,7 @@
 name: rust-nats
 description: "Use when publishing or consuming NATS messages, or when events or background work must survive a restart — event bus, pub/sub or durable work queue on async-nats: subjects, request-reply, queue groups, JetStream streams and durable pull consumers, Nats-Msg-Id deduplication, ack, nak and term, dead-letter and poison messages, KV buckets, flaky NATS tests under nextest. Also for no responders, consumer deleted, timed out, MAX_DELIVERIES. Not for Redis caching (rust-redis), nor the readiness endpoint itself (axum-service)."
 metadata:
-  version: "0.3.0"
+  version: "0.3.1"
 ---
 
 # NATS with async-nats
@@ -132,9 +132,9 @@ per process.
 
 Four `ConnectOptions` are not defaults and must be set: `.name("service")`,
 `.request_timeout(Some(2 s))` (the default 10 s is the whole outbound-HTTP budget and bounds every
-JetStream API call), `.retry_on_initial_connect()` (without it a NATS that boots second crash-loops
-the pod; with it the first JetStream call may `TimedOut`, so the startup stream declaration
-retries) and `.event_callback(..)` to log `Connected`, `Disconnected`, `SlowConsumer`. Auth:
+JetStream API call), `.retry_on_initial_connect()` and `.event_callback(..)` to log `Connected`,
+`Disconnected`, `SlowConsumer`. For optional messaging, start HTTP with the pending client;
+declare the stream in a worker that retries with backoff until shutdown. Auth:
 `.token(..)`, `with_credentials_file(..)`, `with_nkey(..)`.
 
 ## Subjects and publish

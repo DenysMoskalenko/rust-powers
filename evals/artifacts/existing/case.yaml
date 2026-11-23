@@ -1,0 +1,15 @@
+schema_version: "1.1"
+name: axum-service.artifact
+tags: [artifact]
+context:
+  scaffold_script: setup.sh
+execution:
+  allowed_tools: [Skill, Read, Glob, Grep, Write, Edit]
+  max_turns: 20
+  timeout_seconds: 600
+  prompt: "Our ledger service needs POST /batch/{count}. A positive integer count up to our configured batch limit should return 204. Above the limit, use the existing public error and response. Add the route to src/lib.rs and keep existing clients working."
+graders:
+  - name: batch-route
+    type: regex
+    target: { source: file, path: src/lib.rs }
+    pattern: '"/batch/\{[^}"]+\}"'

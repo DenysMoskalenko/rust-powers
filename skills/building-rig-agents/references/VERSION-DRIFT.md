@@ -13,7 +13,7 @@ snippet that "should work" does not compile.
   - [1. `Agent` is no longer generic](#1-agent-is-no-longer-generic)
   - [2. `OneOrMany<T>` is gone](#2-oneormanyt-is-gone)
   - [3. The `Tool` trait was restructured](#3-the-tool-trait-was-restructured)
-  - [4. Tool errors: `ToolError` → `ToolExecutionError`](#4-tool-errors-toolerror-toolexecutionerror)
+  - [4. Tool errors: `ToolError` → `ToolExecutionError`](#4-tool-errors-toolerror--toolexecutionerror)
   - [5. Hooks: no `StepEvent`, no `Flow`](#5-hooks-no-stepevent-no-flow)
   - [6. `dynamic_tools` changed meaning](#6-dynamic_tools-changed-meaning)
   - [7. `rig::evals` does not exist](#7-rigevals-does-not-exist)

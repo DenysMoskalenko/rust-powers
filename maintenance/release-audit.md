@@ -114,12 +114,13 @@ The bump itself is AGENTS.md `## Versions`; the order across a release:
    never raises a requirement to a release that young, which waits for the next audit, unless it fixes an
    advisory, which takes `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow` on that one `cargo update -p`.
 3. `rust-tooling` references re-mirrored byte-for-byte; `diff` each block against the scaffold file.
-4. Skill pin lines, correction-table rows, snippets.
+4. Skill pin lines, correction-table rows, snippets. Take tested versions from the scaffold lockfile
+   and distinguish them from the compatible version requirements in the manifest.
 5. `evals/<skill>.md` in the same commit whenever what a good answer looks like changed.
 6. `metadata.version` in every skill whose teaching changed: patch for wording, minor for an API change.
 7. The release `version` in the three `plugin.json` manifests and both version fields of
-   `.claude-plugin/marketplace.json` (top-level `version` and `metadata.version`); installed plugins
-   auto-update only when it changes, and `validate_skills.py --base` fails a pull request that
+   `.claude-plugin/marketplace.json` (top-level `version` and `metadata.version`).
+   `validate_skills.py --base` fails a pull request that
    changes `skills/` without it; a toolchain bump also edits `Rust 1.99 edition 2024` in the `marketplace.json`
    plugin `description` and `.codex-plugin/plugin.json` `interface.longDescription`; README only if it
    names the version.

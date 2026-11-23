@@ -26,6 +26,8 @@
 
 **Prompt**: Create a new Rust service that stores books and exposes a REST API. I want tests and CI passing before we write any features.
 
+**Note**: The editable companion rust-scaffolding.artifact grades the generated library-svc files.
+
 **Must produce**:
 
 - Copying the skill's `assets/app/`, dotfiles included, into a directory that is new or empty, as the first step.

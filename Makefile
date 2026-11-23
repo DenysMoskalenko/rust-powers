@@ -1,13 +1,14 @@
-.PHONY: check validate snippets lint evals
+.PHONY: check validate test-eval-tools snippets lint evals
 
-# Outside the repository, which local plugin installs copy whole; the OS reclaims the temp dir.
 export CARGO_TARGET_DIR ?= $(or $(TMPDIR),/tmp)/rust-powers-target
 
 CLAUDE ?= claude
 EVAL_ARGS ?=
 
-# Everything CI runs.
-check: validate snippets
+check: validate test-eval-tools snippets
+
+test-eval-tools:
+	python3 -m unittest discover -s scripts -p 'test_*.py'
 
 # Frontmatter, budgets, ownership hygiene, STACK.md <-> scaffold Cargo.toml parity.
 validate:

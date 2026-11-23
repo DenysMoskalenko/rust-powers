@@ -2,12 +2,12 @@
 name: rust-testing
 description: "Use when writing or fixing tests for an axum service or a new endpoint, or stabilizing a flaky test — API tests through axum-test and TestServer, test_app and its dependency overrides, rstest fixtures, fake and bon factories, httpmock, insta snapshots, injected Clock, nextest filters, coverage exclusions. Also for PoolTimedOut, or tests that leak state under nextest. Not for nextest.toml, llvm-cov flags or CI (rust-tooling), the Postgres container and per-test database (sea-orm-postgres), or rig mocks (building-rig-agents)."
 metadata:
-  version: "0.6.0"
+  version: "0.6.1"
 ---
 
 # Testing an axum service
 
-Assumes Rust 1.99, edition 2024, axum 0.8, axum-test 21, rstest 0.28, sea-orm 2, tokio 1.53, fake 5, bon 3, httpmock 0.9, mockall 0.15, insta 1.49, stats_alloc 0.1, cargo-nextest 0.9.
+Assumes Rust 1.99, edition 2024, axum 0.8, axum-test 21, rstest 0.28, sea-orm 2, tokio 1.54.1 (Cargo requirement `1.53`), fake 5, bon 3, httpmock 0.9, mockall 0.15, insta 1.49, stats_alloc 0.1, cargo-nextest 0.9.
 
 Names such as `AppError`, `test_app()`, `Valid<T>` and the Makefile targets come from the rust-scaffolding template. In a project built differently, use its own types, helpers and tooling, map outcomes onto its nearest existing error variant, and say so when none fits instead of adding one. Apply these rules to new code; when editing existing code, keep its public contract and tuned configuration and report differences instead of rewriting, unless asked. If `Cargo.lock` pins another major or minor version than the line above, follow the project and say which rules may not apply.
 
@@ -44,7 +44,7 @@ tests/api/common.rs   test_app() and factories
 tests/api/users.rs    one module per bounded area
 ```
 
-Integration tests reach only `pub` items of a **library** target, so a binary-only crate cannot be integration-tested. Every `.rs` file directly in `tests/` becomes its own test binary that links the whole dependency graph again, one more link on every library edit: merging the scaffold's four cut that rebuild from about 13 to 7 s. So `tests/` holds one directory, and a new area is a module that reaches the harness as `crate::common`, declared with `mod <area>;` in `tests/api/main.rs`: an undeclared file never compiles, and cargo does not warn. nextest forks per test, not per binary, so parallelism is unaffected. In a project whose `tests/*.rs` each open with `mod common;`, keep that layout: a new area is one more such file, with `mod common;` in place of `use crate::common;`. Propose the merge; do not do it unasked.
+An in-process test imports the router from the library. A process-level test can launch a binary-only crate with `env!("CARGO_BIN_EXE_<name>")`. Each `tests/*.rs` links a separate test binary. Merging the scaffold's four cut rebuilds after a library edit from about 13 to 7 s. So `tests/` holds one directory, and a new area is a module that reaches the harness as `crate::common`, declared with `mod <area>;` in `tests/api/main.rs`: an undeclared file never compiles, and cargo does not warn. nextest forks per test, not per binary, so parallelism is unaffected. In a project whose `tests/*.rs` each open with `mod common;`, keep that layout: a new area is one more such file, with `mod common;` in place of `use crate::common;`. Propose the merge; do not do it unasked.
 
 `allow-unwrap-in-tests` in `clippy.toml` covers only the body of a `#[test]` function. Any test module holding helpers, `tests/api/common.rs` included, opens with the scaffold's attribute: `#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "test helpers")]`.
 

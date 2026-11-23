@@ -89,7 +89,8 @@ A branch has two parts and only one of them can be cut short. The future before 
 
 | Need | Use |
 |---|---|
-| A fixed set of operations, all must finish | `tokio::try_join!` |
+| A fixed set of operations, all must finish | `tokio::join!`, then inspect each result |
+| Return on the first error and allow unfinished sibling futures to be dropped | `tokio::try_join!` |
 | A dynamic number of tasks, results as they finish | `JoinSet` — dropping it aborts the rest |
 | A deadline on one operation | `tokio::time::timeout`, before reaching for `select!` |
 | Broadcast "stop" to many tasks | a `tokio::sync::watch` channel |

@@ -92,6 +92,17 @@
 - A claim that a clearer `expect` message satisfies the lint.
 - `once_cell` or `lazy_static` for the static.
 
+### Eval 5 - drain two independent sinks
+
+**Prompt**: "At shutdown our Tokio worker flushes the audit sink and the metrics sink concurrently. Each flush returns a Result. A failed flush must let the other finish, and we need to report each outcome. Show the shutdown code."
+
+**Must produce**:
+- Both flush futures are polled concurrently to completion even if one returns an error.
+- The outcome of each flush is available for separate reporting.
+
+**Must not produce**:
+- Early return on the first error that skips or drops the remaining flush.
+
 ### Probe 1 - async method in a public trait
 
 **Prompt**: "Add a public `Mailer` trait with an async `send(&self, to: &str, body: &str)` method and an SMTP implementation. The signup service is generic over `M: Mailer` and calls `send` inside `tokio::spawn`."

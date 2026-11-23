@@ -310,7 +310,10 @@ Test the behaviour the helpers encode, not the helpers' plumbing:
 - invalidation forces the next read to reload;
 - a lease is not handed out twice, and a stale holder cannot release the new one;
 - the limiter allows exactly `limit` calls and then refuses, and the next window allows again;
-- an idempotency key claims once and replays afterwards;
+- each retry of one payment reuses its provider key; two callers using the same header get
+  distinct provider keys;
+- a late idempotency completion or release leaves the current claim intact, including when a
+  retry has the same fingerprint; replay the stored status and body;
 - `WRONGTYPE` is classified as a bug, and a failover reply and an unreachable server as outages.
 
 The unreachable server needs no container: point the manager at `redis://127.0.0.1:1`, which is

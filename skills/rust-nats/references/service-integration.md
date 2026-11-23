@@ -568,11 +568,13 @@ The Postgres side is `sea-orm-postgres`.
 
 ## Process wiring, startup retry and shutdown order
 
-`main` calls `start` after settings and telemetry, puts `messaging.bus` into `AppState`, runs
+`main` calls `start` after settings and telemetry, clones `messaging.bus` into `AppState`, runs
 `axum::serve(..).with_graceful_shutdown(..)` (that call, the router and the readiness route are
-`axum-service`'s), and calls `messaging.shutdown()` once it returns.
+`axum-service`'s), and calls `messaging.shutdown()` once it returns. With messaging optional,
+HTTP can serve database reads before NATS connects. The worker declares the service-owned
+stream and opens its consumer after NATS is available.
 
-```rust,verify
+```rust,verify,test
 //! One client, one `JetStream` context, one worker task; startup that retries
 //! and a shutdown whose every wait is bounded.
 use std::time::Duration;
@@ -616,10 +618,7 @@ pub async fn connect(url: &str) -> Result<async_nats::Client, async_nats::Connec
         // The default 10 s is the whole outbound-HTTP budget. This also bounds
         // every JetStream management call: stream info, consumer create.
         .request_timeout(Some(Duration::from_secs(2)))
-        // Off by default: without it a NATS that boots second crash-loops the
-        // pod. With it `connect()` returns `Ok` while still `Pending` and the
-        // socket comes up in the background, so the first JetStream call may
-        // time out: `declare_stream` retries.
+        // HTTP can serve database reads while the client is still Pending.
         .retry_on_initial_connect()
         // Reconnects are infinite by default; this is where they get logged.
         .event_callback(|event| async move {
@@ -644,34 +643,11 @@ pub fn readiness(client: &async_nats::Client) -> Health {
     }
 }
 
-/// `get_or_create_stream` with backoff: `TimedOut` here usually means the
-/// connection is still pending, not that `JetStream` is broken.
-async fn declare_stream(ctx: &jetstream::Context) -> anyhow::Result<stream::Stream> {
-    let mut delay = Duration::from_secs(1);
-    loop {
-        let config = stream::Config {
-            name: "ORDERS".to_owned(),
-            subjects: vec!["orders.>".to_owned()],
-            ..Default::default()
-        };
-        match ctx.get_or_create_stream(config).await {
-            Ok(stream) => return Ok(stream),
-            Err(err) if delay < Duration::from_secs(30) => {
-                tracing::warn!(%err, ?delay, "stream declaration failed; retrying");
-                tokio::time::sleep(delay).await;
-                delay *= 2;
-            }
-            Err(err) => return Err(err.into()),
-        }
-    }
-}
-
 pub async fn start(nats_url: &str) -> anyhow::Result<Messaging> {
     let client = connect(nats_url).await?;
     let jetstream = jetstream::new(client.clone());
-    let stream = declare_stream(&jetstream).await?;
     let (stop, stopped) = watch::channel(false);
-    let worker = tokio::spawn(worker(stream, stopped));
+    let worker = tokio::spawn(worker(jetstream.clone(), stopped));
     Ok(Messaging {
         bus: Bus {
             nats: client,
@@ -684,12 +660,12 @@ pub async fn start(nats_url: &str) -> anyhow::Result<Messaging> {
 
 /// The skeleton of "The worker task": the first `Err` item is terminal for
 /// the message stream, never for the task.
-async fn worker(stream: stream::Stream, mut stop: watch::Receiver<bool>) {
+async fn worker(ctx: jetstream::Context, mut stop: watch::Receiver<bool>) {
     let mut backoff = Duration::from_secs(1);
     while !*stop.borrow() {
         let opened = Instant::now();
         // `Ok` only on shutdown, a dropped sender included; looping on it would spin.
-        let Err(err) = consume(&stream, &mut stop).await else { break };
+        let Err(err) = consume(&ctx, &mut stop).await else { break };
         // A stream that ran for a minute had recovered: this failure is a new one.
         if opened.elapsed() > Duration::from_secs(60) {
             backoff = Duration::from_secs(1);
@@ -712,7 +688,14 @@ fn warn_if_orphaned(stop: &watch::Receiver<bool>) {
     }
 }
 
-async fn consume(stream: &stream::Stream, stop: &mut watch::Receiver<bool>) -> anyhow::Result<()> {
+async fn open_messages(ctx: &jetstream::Context) -> anyhow::Result<pull::Stream> {
+    let stream = ctx
+        .get_or_create_stream(stream::Config {
+            name: "ORDERS".to_owned(),
+            subjects: vec!["orders.>".to_owned()],
+            ..Default::default()
+        })
+        .await?;
     let consumer = stream
         .get_or_create_consumer(
             "orders-worker",
@@ -728,12 +711,20 @@ async fn consume(stream: &stream::Stream, stop: &mut watch::Receiver<bool>) -> a
         )
         .await?;
     // Not bare `messages()`: it pulls 200, and what waits here ages against `ack_wait`.
-    let mut messages = consumer
+    Ok(consumer
         .stream()
         .max_messages_per_batch(16)
         .heartbeat(Duration::from_secs(15))
         .messages()
-        .await?;
+        .await?)
+}
+
+async fn consume(ctx: &jetstream::Context, stop: &mut watch::Receiver<bool>) -> anyhow::Result<()> {
+    let mut messages = tokio::select! {
+        biased;
+        _ = stop.changed() => return Ok(()),
+        result = open_messages(ctx) => result?,
+    };
     loop {
         let next = tokio::select! {
             biased;
@@ -777,7 +768,69 @@ async fn bounded<E: std::fmt::Display>(
     tracing::warn!(step, %failure, "shutdown step failed");
 }
 
+#[tokio::test]
+async fn optional_messaging_starts_and_stops_while_the_broker_is_pending() -> anyhow::Result<()> {
+    let unavailable = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("nats://{}", unavailable.local_addr()?);
+    let messaging = timeout(Duration::from_secs(1), start(&url)).await??;
+    assert_eq!(readiness(&messaging.bus.nats), Health::Degraded);
+    messaging.stop.send_replace(true);
+    timeout(Duration::from_secs(1), messaging.worker).await??;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "pauses a private JetStream container; requires Docker"]
+async fn optional_broker_recovers_without_restarting_http() -> anyhow::Result<()> {
+    use testcontainers::{ImageExt as _, runners::AsyncRunner as _};
+    use testcontainers_modules::nats::{Nats, NatsServerCmd};
+
+    let broker = Nats::default()
+        .with_cmd(&NatsServerCmd::default().with_jetstream())
+        .with_tag("2.14-alpine")
+        .start()
+        .await?;
+    let host = broker.get_host().await?;
+    let port = broker.get_host_port_ipv4(4222).await?;
+    let url = format!("nats://{host}:{port}");
+    broker.pause().await?;
+    let messaging = timeout(Duration::from_secs(1), start(&url)).await??;
+    let app = crate::common::test_app().await;
+    app.server.get("/health/live").await.assert_status_ok();
+    app.server.get("/health/ready").await.assert_status_ok();
+    app.server.get("/users").await.assert_status_ok();
+    assert_eq!(readiness(&messaging.bus.nats), Health::Degraded);
+
+    broker.unpause().await?;
+    let ctx = &messaging.bus.jetstream;
+    timeout(Duration::from_secs(30), async {
+        let stream = loop {
+            if let Ok(stream) = ctx.get_stream("ORDERS").await {
+                break stream;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        let seq = ctx.publish("orders.placed.test", "{}".into()).await?.await?.sequence;
+        loop {
+            if let Ok(info) = stream.consumer_info("orders-worker").await
+                && info.ack_floor.stream_sequence >= seq
+            {
+                return anyhow::Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await??;
+    assert_eq!(readiness(&messaging.bus.nats), Health::Ok);
+    messaging.shutdown().await;
+    Ok(())
+}
+
 ```
+
+The recovery test owns its broker so it can pause delivery without touching a shared
+`TEST_NATS_URL`. Run it on Docker with
+`cargo nextest run --run-ignored only -E 'test(optional_broker_recovers_without_restarting_http)'`.
 
 The service's real order is: HTTP drained → worker stopped → `flush` → `drain` → exporter
 flushed → pool closed. The last two are `axum-service`'s, and so is the deadline on the first

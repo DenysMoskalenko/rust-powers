@@ -107,7 +107,12 @@ Pass options through `EVAL_ARGS`, for example
 `make evals EVAL_ARGS="--model claude-opus-5-5 --tag rust-nats"`. Each case is tagged with its
 skill and one of `trigger`, `eval` or `probe`. Results land in `evals/.run/cases/results/`;
 `python3 scripts/summarize_evals.py <result.json>...` turns `--json` output into the per-case
-summary kept in `maintenance/`.
+summary kept in `maintenance/`. A skipped judge, run error or missing score is excluded from the
+mean and identified by arm. An arm without a valid score has no comparison delta.
+
+A custom `--out` must be a new path or a root marked by this generator. Rebuilding keeps both
+suites’ `results/` directories in place, including nested skill and case runs. On the first upgrade of the old default `evals/.run/`,
+the generator retains its former files under a unique `.previous-*/` directory in that root.
 
 Costs and limits, from the September 2026 run on Opus 5.5 (`maintenance/eval-results-2026-09-23.md`):
 
@@ -117,3 +122,40 @@ Costs and limits, from the September 2026 run on Opus 5.5 (`maintenance/eval-res
   replies over 15 KB. Before you act on a small Δ, re-grade with `--judge-model sonnet`, and
   keep each Must line a single requirement that can be checked on its own.
 - Trigger cases don't need a baseline arm: pass `--ablation none --tag trigger`.
+
+## Grading files from an editable run
+
+Two opt-in cases under `artifacts/` complement the read-only suite. The greenfield case builds a
+hyphenated `library-svc`. The existing-service case adds a batch endpoint to a small ledger API
+that already defines its own public error, response and tuned limit. The regular suite still
+asks for code in the reply.
+
+Generate the cases with `python3 scripts/build_eval_cases.py`. After the usual case, arm and
+cost-cap approval, run the selected case once per arm and keep its workspace:
+
+```bash
+claude plugin eval evals/.run --eval-dir artifacts --case axum-service.artifact \
+  --runs 1 --ablation with-without --scaffold --keep-temp --allow-tools Write Edit \
+  --max-cost-usd "$APPROVED_AGENT_CAP" --no-publish
+```
+
+For the greenfield case substitute `rust-scaffolding.artifact` and grant `Bash` as well so it
+can copy the template. The native file grader is a preliminary signal. The independent result
+comes from compiling and exercising each retained workspace. Use the path containing its
+`Cargo.toml` printed by `--keep-temp`; record the case, arm, attempt and exit status together.
+
+```bash
+python3 scripts/grade_eval_workspace.py existing "$EXISTING_WORKSPACE"
+python3 scripts/grade_eval_workspace.py greenfield "$GREENFIELD_WORKSPACE"
+```
+
+Run the grader inside a disposable sandbox or CI worker suitable for building the agent’s
+code. It copies the workspace before testing it. The existing-service verifier supplies its
+own Rust integration test for the old route, public error, limit and new route. Greenfield
+checks the crate, Docker, compose and environment renames, then runs
+`cargo test --locked --workspace` and requires the original liveness test and independent
+OpenAPI-title test to pass;
+provide Docker or a disposable `TEST_DATABASE_URL`. For an offline control, run the existing
+case’s `setup.sh` in an empty directory, or copy and rename the scaffold using the greenfield
+skill. Run the same grader against those files with `CARGO_NET_OFFLINE=true` and cached crates.
+An untouched ledger fixture must fail on the missing POST route.

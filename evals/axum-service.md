@@ -32,6 +32,8 @@
 
 **Prompt**: "Add `POST /orders` that validates the body (`customer_email` must be an email, `quantity` between 1 and 50) and returns 201 with the created order, plus a `GET` that fetches one order by its id."
 
+**Note**: The editable companion axum-service.artifact checks route behavior and compatibility in the existing ledger fixture.
+
 **Must produce**:
 
 - The create handler returns `Result<(StatusCode, Json<OrderResponse>), AppError>` and answers 201.

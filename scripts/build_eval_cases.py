@@ -13,12 +13,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import shlex
 import shutil
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN = ROOT / "evals" / ".run"
+OUTPUT_MARKER = ".generated-by-build-eval-cases"
 CASES = RUN / "cases"
 FIXTURES = RUN / "fixtures"
 SCAFFOLD = "skills/rust-scaffolding/assets/app"
@@ -121,7 +125,7 @@ def write_case(skill: str, case: str, kind: str, prompt: str, fixture: str, grad
         front.append(f"append_system_prompt: {yaml_str(NO_EDITS)}")
     (root / "prompt.md").write_text("---\n" + "\n".join(front) + "\n---\n\n" + prompt + "\n", encoding="utf-8")
     if fixture != "empty":
-        (root / "setup.sh").write_text(f"#!/usr/bin/env bash\nset -euo pipefail\ncp -R '{FIXTURES / fixture}/.' .\n", encoding="utf-8")
+        (root / "setup.sh").write_text(f"#!/usr/bin/env bash\nset -euo pipefail\ncp -R {shlex.quote(str(RUN / 'fixtures' / fixture) + '/.')} .\n", encoding="utf-8")
         (root / "setup.sh").chmod(0o755)
         (root / "case.yaml").write_text(f'schema_version: "1.1"\nname: {case}\ncontext:\n  scaffold_script: setup.sh\n', encoding="utf-8")
     for name, body in graders.items():
@@ -196,31 +200,109 @@ def build_skill(skill: str) -> int:
     return count
 
 
-def main() -> None:
+def build(stage: Path, destination: Path) -> int:
     global RUN, CASES, FIXTURES
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, default=RUN, help="plugin root to write (default: evals/.run)")
-    RUN = parser.parse_args().out.resolve()
-    CASES, FIXTURES = RUN / "cases", RUN / "fixtures"
-    results = CASES / "results"
-    kept = RUN.parent / ".results-keep"
-    if results.is_dir():
-        shutil.move(results, kept)
-    shutil.rmtree(RUN, ignore_errors=True)
-    (RUN / ".claude-plugin").mkdir(parents=True)
-    shutil.copy2(ROOT / ".claude-plugin" / "plugin.json", RUN / ".claude-plugin" / "plugin.json")
-    shutil.copytree(ROOT / "skills", RUN / "skills", ignore=shutil.ignore_patterns("target", ".DS_Store"))
+    RUN, CASES, FIXTURES = destination, stage / "cases", stage / "fixtures"
+    (stage / ".claude-plugin").mkdir()
+    shutil.copy2(ROOT / ".claude-plugin" / "plugin.json", stage / ".claude-plugin" / "plugin.json")
+    shutil.copytree(ROOT / "skills", stage / "skills", ignore=shutil.ignore_patterns("target", ".DS_Store"))
+    shutil.copytree(ROOT / "evals" / "artifacts", stage / "artifacts", ignore=shutil.ignore_patterns("results", ".DS_Store"))
     build_fixtures()
     CASES.mkdir()
-    if kept.is_dir():
-        shutil.move(kept, results)
     skills = sorted(d.name for d in (ROOT / "skills").iterdir() if (ROOT / "evals" / f"{d.name}.md").is_file())
-    total = 0
-    for skill in skills:
-        n = build_skill(skill)
-        total += n
-        print(f"{skill}: {n} cases")
-    print(f"{total} cases in {CASES}")
+    count = sum(build_skill(skill) for skill in skills)
+    return count
+
+
+def suite_files(root: Path, suite: str) -> set[Path]:
+    if (root / suite).is_symlink():
+        raise SystemExit(f"refusing symlinked suite directory: {root / suite}")
+    files: set[Path] = set()
+    for directory, children, names in os.walk(root / suite):
+        children[:] = [name for name in children if name != "results"]
+        for name in children:
+            if (Path(directory) / name).is_symlink():
+                raise SystemExit(f"refusing symlinked case directory: {Path(directory) / name}")
+        relative = Path(directory).relative_to(root)
+        files.update(relative / name for name in names if name != "results")
+    return files
+
+
+def install(stage: Path, destination: Path, legacy: bool) -> None:
+    paths = {Path(name) for name in (".claude-plugin", "skills", "fixtures")}
+    for suite in ("cases", "artifacts"):
+        paths.update(suite_files(stage, suite), suite_files(destination, suite))
+
+    backup = Path(tempfile.mkdtemp(prefix=".previous-", dir=destination))
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for relative in sorted(paths):
+            current, new, old = destination / relative, stage / relative, backup / relative
+            if current.is_dir() and new.is_file():
+                raise SystemExit(f"refusing to replace a directory with a case file: {current}")
+            if current.exists() or current.is_symlink():
+                old.parent.mkdir(parents=True, exist_ok=True)
+                current.rename(old)
+                moved.append((old, current))
+            if new.exists():
+                current.parent.mkdir(parents=True, exist_ok=True)
+                new.rename(current)
+                moved.append((current, new))
+        (destination / OUTPUT_MARKER).touch()
+    except BaseException:
+        for source, original in reversed(moved):
+            source.rename(original)
+        raise
+    if legacy:
+        print(f"Retained previously unmarked generated files at {backup}")
+    else:
+        shutil.rmtree(backup)
+
+
+def regenerate(destination: Path) -> None:
+    default = ROOT / "evals" / ".run"
+    protected = [ROOT / name for name in (
+        ".git", ".claude-plugin", ".codex-plugin", ".cursor-plugin", ".agents", ".github",
+        "skills", "scripts", "maintenance", "evals/artifacts",
+    )]
+    if destination == ROOT / "evals" or ROOT.is_relative_to(destination) or any(destination.is_relative_to(p) for p in protected):
+        raise SystemExit(f"refusing to generate inside repository sources: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    marker = destination / OUTPUT_MARKER
+    try:
+        destination.mkdir()
+    except FileExistsError:
+        legacy = destination == default and all((destination / name).is_dir() for name in (".claude-plugin", "skills", "cases", "fixtures"))
+        if marker.is_symlink() or (not marker.is_file() and not legacy):
+            raise SystemExit(f"{destination} exists without a valid {OUTPUT_MARKER}; choose an unused path")
+    else:
+        marker.touch()
+
+    lock_path = destination / ".generator.lock"
+    if lock_path.is_symlink():
+        raise SystemExit(f"refusing symlinked generator lock: {lock_path}")
+    with lock_path.open("a+b") as lock:
+        if os.name == "nt":
+            import msvcrt
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        with tempfile.TemporaryDirectory(dir=destination.parent) as scratch:
+            stage = Path(scratch)
+            count = build(stage, destination)
+            install(stage, destination, not marker.is_file())
+    print(f"{count} cases in {destination / 'cases'}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", type=Path, default=ROOT / "evals" / ".run", help="generated plugin root (default: evals/.run)")
+    path = parser.parse_args().out.absolute()
+    if path.is_symlink():
+        raise SystemExit(f"refusing symlink output: {path}")
+    regenerate(path.resolve())
 
 
 if __name__ == "__main__":

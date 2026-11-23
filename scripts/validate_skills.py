@@ -390,7 +390,7 @@ def validate_skill(skill_dir: Path, report: Report, strict: bool) -> None:
     for dirpath, dirnames, _ in os.walk(skill_dir):
         if "target" in dirnames:
             dirnames.remove("target")
-            report.warn(Path(dirpath) / "target", 1, "build output inside a skill: local plugin installs copy it and `claude plugin eval` refuses its hard links; delete it")
+            report.warn(Path(dirpath) / "target", 1, "build output inside a skill: keep Cargo targets outside the distributed skill tree")
 
     eval_file = EVALS / f"{skill_dir.name}.md"
     if not eval_file.is_file():
